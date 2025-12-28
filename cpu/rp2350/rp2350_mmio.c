@@ -984,6 +984,7 @@ static mm_bool psm_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
 
 static void rp2350_core1_reset(void)
 {
+    printf("[RP2350] core1 reset\n");
     rp2350_mc.core1_state = 0u;
     rp2350_mc.launch_pending = 0u;
     rp2350_mc.boot_seq = 0u;
@@ -997,6 +998,7 @@ static void rp2350_core1_reset(void)
 
 static void rp2350_core1_release(void)
 {
+    printf("[RP2350] core1 released (bootrom)\n");
     rp2350_mc.core1_state = 1u;
     rp2350_mc.boot_seq = 0u;
     rp2350_mc.wof[1] = 0u;
@@ -1925,6 +1927,10 @@ mm_bool mm_rp2350_core1_take_launch(mm_u32 *vtor_out, mm_u32 *sp_out, mm_u32 *en
     if (rp2350_mc.launch_pending == 0u) {
         return MM_FALSE;
     }
+    printf("[RP2350] core1 start vtor=0x%08lx sp=0x%08lx entry=0x%08lx\n",
+           (unsigned long)rp2350_mc.launch_vtor,
+           (unsigned long)rp2350_mc.launch_sp,
+           (unsigned long)rp2350_mc.launch_entry);
     rp2350_mc.launch_pending = 0u;
     if (vtor_out) *vtor_out = rp2350_mc.launch_vtor;
     if (sp_out) *sp_out = rp2350_mc.launch_sp;
