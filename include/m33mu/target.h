@@ -47,6 +47,8 @@ struct mm_target_cfg {
     mm_u32 ram_base_ns;
     mm_u32 ram_size_ns;
 
+    mm_u32 core_count;
+
     const struct mm_ram_region *ram_regions;
     mm_u32 ram_region_count;
     mm_u32 mpcbb_block_size;

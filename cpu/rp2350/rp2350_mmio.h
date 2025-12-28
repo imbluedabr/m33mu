@@ -9,6 +9,8 @@
 #include "m33mu/mmio.h"
 #include "m33mu/memmap.h"
 #include "m33mu/flash_persist.h"
+#include "m33mu/cpu.h"
+#include "m33mu/nvic.h"
 
 #define RP2350_RESET_IO_BANK0  (1u << 6)
 #define RP2350_RESET_IO_QSPI   (1u << 7)
@@ -42,5 +44,14 @@ mm_bool mm_rp2350_flash_program(struct mm_memmap *map,
                                 mm_u32 flash_offs,
                                 mm_u32 data_addr,
                                 mm_u32 count);
+void mm_rp2350_set_active_core(mm_u32 core_id);
+void mm_rp2350_bind_multicore(struct mm_cpu *core0,
+                              struct mm_cpu *core1,
+                              struct mm_nvic *nvic0,
+                              struct mm_nvic *nvic1,
+                              mm_u32 *active_core);
+mm_bool mm_rp2350_core1_running(void);
+mm_bool mm_rp2350_core1_can_reset(void);
+mm_bool mm_rp2350_core1_take_launch(mm_u32 *vtor_out, mm_u32 *sp_out, mm_u32 *entry_out);
 
 #endif /* M33MU_CPU_RP2350_MMIO_H */

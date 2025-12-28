@@ -15,7 +15,7 @@
 #define SPI0_BASE  0x40080000u
 #define SPI1_BASE  0x40088000u
 
-#define UART_SIZE 0x1000u
+#define UART_SIZE 0x2000u
 #define SPI_SIZE  0x1000u
 
 #define UARTDR   0x000u
@@ -133,18 +133,31 @@ static mm_bool uart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     if (offset + size_bytes > UART_SIZE) return MM_FALSE;
 
     uart_ensure_enabled(u);
-    if (offset == UARTDR && size_bytes == 4u) {
+    if (offset == UARTDR && (size_bytes == 1u || size_bytes == 2u || size_bytes == 4u)) {
         mm_u32 v = 0u;
         if (u->enabled && mm_uart_io_has_rx(&u->io)) {
             v = (mm_u32)mm_uart_io_read(&u->io);
+        }
+        if (size_bytes == 1u) {
+            v &= 0xffu;
+        } else if (size_bytes == 2u) {
+            v &= 0xffffu;
         }
         *value_out = v;
         uart_update_flags(u);
         return MM_TRUE;
     }
-    if (offset == UARTFR && size_bytes == 4u) {
+    if (offset == UARTFR && (size_bytes == 1u || size_bytes == 2u || size_bytes == 4u)) {
         uart_update_flags(u);
-        *value_out = u->regs[UARTFR / 4u];
+        {
+            mm_u32 v = u->regs[UARTFR / 4u];
+            if (size_bytes == 1u) {
+                v &= 0xffu;
+            } else if (size_bytes == 2u) {
+                v &= 0xffffu;
+            }
+            *value_out = v;
+        }
         return MM_TRUE;
     }
 
@@ -158,7 +171,7 @@ static mm_bool uart_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
     if (u == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
     if (offset + size_bytes > UART_SIZE) return MM_FALSE;
 
-    if (offset == UARTDR && size_bytes == 4u) {
+    if (offset == UARTDR && (size_bytes == 1u || size_bytes == 2u || size_bytes == 4u)) {
         uart_ensure_enabled(u);
         if (u->enabled && ((u->regs[UARTCR / 4u] & UARTCR_TXE) != 0u)) {
             mm_uart_io_queue_tx(&u->io, (mm_u8)(value & 0xffu));

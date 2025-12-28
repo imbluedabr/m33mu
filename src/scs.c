@@ -30,6 +30,7 @@ extern void mm_system_request_reset(void);
 struct mm_scs_mmio {
     struct mm_scs *scs;
     struct mm_nvic *nvic;
+    const struct mm_scs_mux *mux;
     enum mm_sec_state sec;
 };
 
@@ -56,6 +57,22 @@ static mm_bool nvic_trace_enabled(void)
     enabled = (env != 0 && env[0] != '\0') ? MM_TRUE : MM_FALSE;
     init = MM_TRUE;
     return enabled;
+}
+
+static void scs_select_ctx(struct mm_scs_mmio *ctx, struct mm_scs **scs_out, struct mm_nvic **nvic_out)
+{
+    struct mm_scs *scs = ctx->scs;
+    struct mm_nvic *nvic = ctx->nvic;
+    if (ctx->mux != 0 && ctx->mux->active_core != 0 && ctx->mux->core_count > 1u) {
+        mm_u32 idx = *ctx->mux->active_core;
+        if (idx >= ctx->mux->core_count) {
+            idx = 0;
+        }
+        scs = ctx->mux->scs[idx];
+        nvic = ctx->mux->nvic[idx];
+    }
+    if (scs_out) *scs_out = scs;
+    if (nvic_out) *nvic_out = nvic;
 }
 
 static mm_bool nvic_enable_log_suppressed(mm_u32 idx, mm_u32 value)
@@ -162,7 +179,8 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
 static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
     struct mm_scs_mmio *ctx = (struct mm_scs_mmio *)opaque;
-    struct mm_scs *scs = ctx->scs;
+    struct mm_scs *scs = 0;
+    struct mm_nvic *nvic = 0;
     enum mm_sec_state eff_sec;
     mm_u32 aligned;
     mm_u32 reg_off;
@@ -171,6 +189,10 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
     mm_u32 mask = 0;
 
     if (value_out == 0) {
+        return MM_FALSE;
+    }
+    scs_select_ctx(ctx, &scs, &nvic);
+    if (scs == 0 || nvic == 0) {
         return MM_FALSE;
     }
     eff_sec = ctx->sec;
@@ -210,41 +232,41 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
         case 0x1C: val = scs->systick_calib; goto done_subword;
         default:
             /* NVIC enable/pending/active + ITNS registers. */
-            if (ctx->nvic != 0) {
+            if (nvic != 0) {
                 mm_u32 word = 0xffffffffu;
                 mm_u32 idx = (aligned - 0x100u) / 4u;
                 mm_u32 mask_ns = 0;
                 if (aligned >= 0x100u && aligned < 0x108u) {
                     /* ISER0/1 */
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = ctx->nvic->enable_mask[idx];
+                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->enable_mask[idx];
                 } else if (aligned >= 0x180u && aligned < 0x188u) {
                     /* ICER0/1 reads current enable */
                     idx = (aligned - 0x180u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = ctx->nvic->enable_mask[idx];
+                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->enable_mask[idx];
                 } else if (aligned >= 0x200u && aligned < 0x208u) {
                     /* ISPR0/1 */
                     idx = (aligned - 0x200u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = ctx->nvic->pending_mask[idx];
+                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->pending_mask[idx];
                 } else if (aligned >= 0x280u && aligned < 0x288u) {
                     /* ICPR0/1 reads current pending */
                     idx = (aligned - 0x280u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = ctx->nvic->pending_mask[idx];
+                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->pending_mask[idx];
                 } else if (aligned >= 0x300u && aligned < 0x308u) {
                     /* IABR0/1 */
                     idx = (aligned - 0x300u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = ctx->nvic->active_mask[idx];
+                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->active_mask[idx];
                 } else if (aligned >= 0x380u && aligned < 0x388u) {
                     /* ITNS0/1 (Secure only) */
                     idx = (aligned - 0x380u) / 4u;
                     if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        word = (eff_sec == MM_SECURE) ? ctx->nvic->itns_mask[idx] : 0u;
+                        word = (eff_sec == MM_SECURE) ? nvic->itns_mask[idx] : 0u;
                     }
                 }
                 if (word != 0xffffffffu) {
                     if (eff_sec == MM_NONSECURE) {
                         idx = (aligned >= 0x380u && aligned < 0x388u) ? (aligned - 0x380u) / 4u : (aligned - 0x100u) / 4u;
                         if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                            mask_ns = ctx->nvic->itns_mask[idx];
+                            mask_ns = nvic->itns_mask[idx];
                             word &= mask_ns;
                         }
                     }
@@ -253,14 +275,14 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
                 }
             }
             /* NVIC IPR priorities: 0xE000E400-0xE000E4FF */
-            if (ctx->nvic != 0 && offset >= 0x400u && offset < 0x500u) {
+            if (nvic != 0 && offset >= 0x400u && offset < 0x500u) {
                 mm_u32 idx = offset - 0x400u;
                 if (size_bytes == 1u) {
                     printf("[NVIC_IPR_READ] off=0x%03lx idx=%lu -> 0x%02lx\n",
                            (unsigned long)offset,
                            (unsigned long)idx,
-                           (unsigned long)((idx < MM_MAX_IRQ) ? ctx->nvic->priority[idx] : 0xffu));
-                    *value_out = (idx < MM_MAX_IRQ) ? ctx->nvic->priority[idx] : 0xffu;
+                           (unsigned long)((idx < MM_MAX_IRQ) ? nvic->priority[idx] : 0xffu));
+                    *value_out = (idx < MM_MAX_IRQ) ? nvic->priority[idx] : 0xffu;
                     return MM_TRUE;
                 }
                 if (size_bytes == 4u && (idx % 4u) == 0u) {
@@ -268,7 +290,7 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
                     mm_u32 i;
                     for (i = 0; i < 4u; ++i) {
                         mm_u32 pidx = idx + i;
-                        mm_u8 p = (pidx < MM_MAX_IRQ) ? ctx->nvic->priority[pidx] : 0xffu;
+                        mm_u8 p = (pidx < MM_MAX_IRQ) ? nvic->priority[pidx] : 0xffu;
                         v |= ((mm_u32)p) << (i * 8u);
                     }
                     *value_out = v;
@@ -397,7 +419,8 @@ done_subword:
 static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
     struct mm_scs_mmio *ctx = (struct mm_scs_mmio *)opaque;
-    struct mm_scs *scs = ctx->scs;
+    struct mm_scs *scs = 0;
+    struct mm_nvic *nvic = 0;
     enum mm_sec_state eff_sec;
     mm_u32 aligned;
     mm_u32 reg_off;
@@ -405,6 +428,10 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     mm_u32 mask;
     mm_u32 cur;
 
+    scs_select_ctx(ctx, &scs, &nvic);
+    if (scs == 0 || nvic == 0) {
+        return MM_FALSE;
+    }
     if (offset >= SCS_PAGE_SIZE) {
         return MM_FALSE;
     }
@@ -445,24 +472,24 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
             }
             return MM_TRUE;
         default:
-            if (ctx->nvic != 0 && size_bytes == 4u) {
+            if (nvic != 0 && size_bytes == 4u) {
                 mm_u32 idx;
                 mm_u32 v = value;
                 if (aligned >= 0x100u && aligned < (0x100u + 4u * ((MM_MAX_IRQ + 31u) / 32u))) {
                     /* ISER0/1: set-enable */
                     idx = (aligned - 0x100u) / 4u;
                     if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_enable = ctx->nvic->enable_mask[idx];
-                        if (eff_sec == MM_NONSECURE) v &= ctx->nvic->itns_mask[idx];
-                        ctx->nvic->enable_mask[idx] |= v;
+                        mm_u32 old_enable = nvic->enable_mask[idx];
+                        if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
+                        nvic->enable_mask[idx] |= v;
                         if (nvic_trace_enabled() &&
-                            old_enable != ctx->nvic->enable_mask[idx] &&
-                            !nvic_enable_log_suppressed(idx, ctx->nvic->enable_mask[idx])) {
+                            old_enable != nvic->enable_mask[idx] &&
+                            !nvic_enable_log_suppressed(idx, nvic->enable_mask[idx])) {
                             printf("[NVIC_ISER_WRITE] sec=%d idx=%lu val=0x%08lx enable=0x%08lx\n",
                                    (int)eff_sec,
                                    (unsigned long)idx,
                                    (unsigned long)value,
-                                   (unsigned long)ctx->nvic->enable_mask[idx]);
+                                   (unsigned long)nvic->enable_mask[idx]);
                         }
                         return MM_TRUE;
                     }
@@ -470,17 +497,17 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                     /* ICER0/1: clear-enable */
                     idx = (aligned - 0x180u) / 4u;
                     if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_enable = ctx->nvic->enable_mask[idx];
-                        if (eff_sec == MM_NONSECURE) v &= ctx->nvic->itns_mask[idx];
-                        ctx->nvic->enable_mask[idx] &= ~v;
+                        mm_u32 old_enable = nvic->enable_mask[idx];
+                        if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
+                        nvic->enable_mask[idx] &= ~v;
                         if (nvic_trace_enabled() &&
-                            old_enable != ctx->nvic->enable_mask[idx] &&
-                            !nvic_enable_log_suppressed(idx, ctx->nvic->enable_mask[idx])) {
+                            old_enable != nvic->enable_mask[idx] &&
+                            !nvic_enable_log_suppressed(idx, nvic->enable_mask[idx])) {
                             printf("[NVIC_ICER_WRITE] sec=%d idx=%lu val=0x%08lx enable=0x%08lx\n",
                                    (int)eff_sec,
                                    (unsigned long)idx,
                                    (unsigned long)value,
-                                   (unsigned long)ctx->nvic->enable_mask[idx]);
+                                   (unsigned long)nvic->enable_mask[idx]);
                         }
                         return MM_TRUE;
                     }
@@ -488,16 +515,16 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                     /* ISPR0/1: set-pending */
                     idx = (aligned - 0x200u) / 4u;
                     if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_pending = ctx->nvic->pending_mask[idx];
-                        if (eff_sec == MM_NONSECURE) v &= ctx->nvic->itns_mask[idx];
-                        ctx->nvic->pending_mask[idx] |= v;
-                        if (nvic_trace_enabled() && old_pending != ctx->nvic->pending_mask[idx]) {
+                        mm_u32 old_pending = nvic->pending_mask[idx];
+                        if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
+                        nvic->pending_mask[idx] |= v;
+                        if (nvic_trace_enabled() && old_pending != nvic->pending_mask[idx]) {
                             printf("[NVIC_ISPR_WRITE] sec=%d idx=%lu val=0x%08lx pending=0x%08lx itns=0x%08lx\n",
                                    (int)eff_sec,
                                    (unsigned long)idx,
                                    (unsigned long)value,
-                                   (unsigned long)ctx->nvic->pending_mask[idx],
-                                   (unsigned long)ctx->nvic->itns_mask[idx]);
+                                   (unsigned long)nvic->pending_mask[idx],
+                                   (unsigned long)nvic->itns_mask[idx]);
                         }
                         return MM_TRUE;
                     }
@@ -505,15 +532,15 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                     /* ICPR0/1: clear-pending */
                     idx = (aligned - 0x280u) / 4u;
                     if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_pending = ctx->nvic->pending_mask[idx];
-                        if (eff_sec == MM_NONSECURE) v &= ctx->nvic->itns_mask[idx];
-                        ctx->nvic->pending_mask[idx] &= ~v;
-                        if (nvic_trace_enabled() && old_pending != ctx->nvic->pending_mask[idx]) {
+                        mm_u32 old_pending = nvic->pending_mask[idx];
+                        if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
+                        nvic->pending_mask[idx] &= ~v;
+                        if (nvic_trace_enabled() && old_pending != nvic->pending_mask[idx]) {
                             printf("[NVIC_ICPR_WRITE] sec=%d idx=%lu val=0x%08lx pending=0x%08lx\n",
                                    (int)eff_sec,
                                    (unsigned long)idx,
                                    (unsigned long)value,
-                                   (unsigned long)ctx->nvic->pending_mask[idx]);
+                                   (unsigned long)nvic->pending_mask[idx]);
                         }
                         return MM_TRUE;
                     }
@@ -521,37 +548,37 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                     /* ITNS0/1: Secure-only */
                     idx = (aligned - 0x380u) / 4u;
                     if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_itns = ctx->nvic->itns_mask[idx];
+                        mm_u32 old_itns = nvic->itns_mask[idx];
                         if (eff_sec == MM_SECURE) {
-                            ctx->nvic->itns_mask[idx] = value;
+                            nvic->itns_mask[idx] = value;
                         }
                         if (idx == (74u / 32u)) {
                             mm_u32 bit = 1u << (74u % 32u);
-                            if ((old_itns ^ ctx->nvic->itns_mask[idx]) & bit) {
+                            if ((old_itns ^ nvic->itns_mask[idx]) & bit) {
                                 printf("[NVIC_ITNS_WRITE_IRQ74] sec=%d itns=0x%08lx\n",
                                        (int)eff_sec,
-                                       (unsigned long)ctx->nvic->itns_mask[idx]);
+                                       (unsigned long)nvic->itns_mask[idx]);
                             }
                         }
-                        if (nvic_trace_enabled() && old_itns != ctx->nvic->itns_mask[idx]) {
+                        if (nvic_trace_enabled() && old_itns != nvic->itns_mask[idx]) {
                             printf("[NVIC_ITNS_WRITE] sec=%d idx=%lu val=0x%08lx itns=0x%08lx\n",
                                    (int)eff_sec,
                                    (unsigned long)idx,
                                    (unsigned long)value,
-                                   (unsigned long)ctx->nvic->itns_mask[idx]);
+                                   (unsigned long)nvic->itns_mask[idx]);
                         }
                         return MM_TRUE;
                     }
                 }
             }
             /* NVIC IPR priority bytes */
-            if (ctx->nvic != 0 && offset >= 0x400u && offset < 0x500u) {
+            if (nvic != 0 && offset >= 0x400u && offset < 0x500u) {
                 mm_u32 idx = offset - 0x400u;
                 if (size_bytes == 1u) {
                     if (idx < MM_MAX_IRQ) {
-                        mm_u8 old_prio = ctx->nvic->priority[idx];
+                        mm_u8 old_prio = nvic->priority[idx];
                         mm_u8 new_prio = (mm_u8)(value & 0xFFu);
-                        ctx->nvic->priority[idx] = new_prio;
+                        nvic->priority[idx] = new_prio;
                         if (nvic_trace_enabled() && old_prio != new_prio) {
                             printf("[NVIC_IPR_WRITE] off=0x%03lx idx=%lu val=0x%02lx\n",
                                    (unsigned long)offset,
@@ -568,8 +595,8 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                         mm_u32 pidx = idx + i;
                         mm_u8 p = (mm_u8)((value >> (i * 8u)) & 0xFFu);
                         if (pidx < MM_MAX_IRQ) {
-                            if (ctx->nvic->priority[pidx] != p) changed = MM_TRUE;
-                            ctx->nvic->priority[pidx] = p;
+                            if (nvic->priority[pidx] != p) changed = MM_TRUE;
+                            nvic->priority[pidx] = p;
                         }
                     }
                     if (nvic_trace_enabled() && changed) {
@@ -1016,6 +1043,7 @@ mm_bool mm_scs_register_regions(struct mm_scs *scs, struct mmio_bus *bus, mm_u32
 
     ctx_secure.scs = scs;
     ctx_secure.nvic = nvic;
+    ctx_secure.mux = 0;
     ctx_secure.sec = MM_SECURE;
 
     /* Convert the SCB base passed by the caller (0xE000ED00) to the SCS page base. */
@@ -1031,6 +1059,50 @@ mm_bool mm_scs_register_regions(struct mm_scs *scs, struct mmio_bus *bus, mm_u32
     if (base_nonsecure != base_secure) {
         ctx_nonsecure.scs = scs;
         ctx_nonsecure.nvic = nvic;
+        ctx_nonsecure.mux = 0;
+        ctx_nonsecure.sec = MM_NONSECURE;
+        page_base_ns = base_nonsecure - SCS_SCB_OFFSET;
+        reg_ns.base = page_base_ns;
+        reg_ns.size = SCS_PAGE_SIZE;
+        reg_ns.opaque = &ctx_nonsecure;
+        reg_ns.read = scs_read;
+        reg_ns.write = scs_write;
+        if (!mmio_bus_register_region(bus, &reg_ns)) return MM_FALSE;
+    }
+
+    return MM_TRUE;
+}
+
+mm_bool mm_scs_register_regions_multi(const struct mm_scs_mux *mux, struct mmio_bus *bus, mm_u32 base_secure, mm_u32 base_nonsecure)
+{
+    static struct mm_scs_mmio ctx_secure;
+    static struct mm_scs_mmio ctx_nonsecure;
+    struct mmio_region reg_s;
+    struct mmio_region reg_ns;
+    mm_u32 page_base_secure;
+    mm_u32 page_base_ns;
+
+    if (mux == 0) {
+        return MM_FALSE;
+    }
+
+    ctx_secure.scs = 0;
+    ctx_secure.nvic = 0;
+    ctx_secure.mux = mux;
+    ctx_secure.sec = MM_SECURE;
+
+    page_base_secure = base_secure - SCS_SCB_OFFSET;
+    reg_s.base = page_base_secure;
+    reg_s.size = SCS_PAGE_SIZE;
+    reg_s.opaque = &ctx_secure;
+    reg_s.read = scs_read;
+    reg_s.write = scs_write;
+    if (!mmio_bus_register_region(bus, &reg_s)) return MM_FALSE;
+
+    if (base_nonsecure != base_secure) {
+        ctx_nonsecure.scs = 0;
+        ctx_nonsecure.nvic = 0;
+        ctx_nonsecure.mux = mux;
         ctx_nonsecure.sec = MM_NONSECURE;
         page_base_ns = base_nonsecure - SCS_SCB_OFFSET;
         reg_ns.base = page_base_ns;

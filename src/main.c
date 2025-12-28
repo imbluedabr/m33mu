@@ -38,6 +38,7 @@
 #include "m33mu/exec_helpers.h"
 #include "m33mu/execute.h"
 #include "m33mu/core_sys.h"
+#include "rp2350/rp2350_mmio.h"
 #include "m33mu/mem_prot.h"
 #include "m33mu/vector.h"
 #include "m33mu/exc_return.h"
@@ -713,6 +714,7 @@ static mm_bool parse_image_spec(const char *spec, char **path_out, mm_u32 *offse
 static mm_bool g_quit_on_faults = MM_FALSE;
 static mm_bool g_fault_pending = MM_FALSE;
 static int g_stack_trace = -1;
+static struct mm_prot_ctx *g_active_prot_ctx = 0;
 
 static mm_bool stack_trace_enabled(void)
 {
@@ -721,6 +723,26 @@ static mm_bool stack_trace_enabled(void)
         g_stack_trace = (v && v[0] != '\0') ? 1 : 0;
     }
     return g_stack_trace ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool prot_mux_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_state sec, mm_u32 addr, mm_u32 size_bytes)
+{
+    (void)opaque;
+    if (g_active_prot_ctx == 0) {
+        return MM_TRUE;
+    }
+    return mm_prot_interceptor(g_active_prot_ctx, type, sec, addr, size_bytes);
+}
+
+static mm_bool allow_system_reset(const struct mm_target_cfg *cfg, const char *cpu_name)
+{
+    if (cfg == 0 || cpu_name == 0) {
+        return MM_TRUE;
+    }
+    if (cfg->core_count > 1u && strcmp(cpu_name, "rp2350") == 0) {
+        return mm_rp2350_core1_can_reset();
+    }
+    return MM_TRUE;
 }
 
 static mm_u32 exc_return_encode(enum mm_sec_state sec, mm_bool use_psp, mm_bool to_thread)
@@ -893,6 +915,214 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_
                (unsigned long)cpu->r[13],
                (int)cpu->mode,
                (int)cpu->sec_state);
+    }
+    return MM_TRUE;
+}
+
+static mm_bool handle_pc_write(struct mm_cpu *cpu,
+                               struct mm_memmap *map,
+                               mm_u32 value,
+                               mm_u8 *it_pattern,
+                               mm_u8 *it_remaining,
+                               mm_u8 *it_cond);
+static mm_bool enter_exception(struct mm_cpu *cpu,
+                               struct mm_memmap *map,
+                               struct mm_scs *scs,
+                               mm_u32 exc_num,
+                               mm_u32 return_pc,
+                               mm_u32 xpsr_in);
+static mm_bool enter_exception_ex(struct mm_cpu *cpu,
+                                  struct mm_memmap *map,
+                                  struct mm_scs *scs,
+                                  mm_u32 exc_num,
+                                  mm_u32 return_pc,
+                                  mm_u32 xpsr_in,
+                                  enum mm_sec_state handler_sec);
+static mm_bool raise_mem_fault(struct mm_cpu *cpu,
+                               struct mm_memmap *map,
+                               struct mm_scs *scs,
+                               mm_u32 fault_pc,
+                               mm_u32 fault_xpsr,
+                               mm_u32 addr,
+                               mm_bool is_exec);
+static mm_bool raise_usage_fault(struct mm_cpu *cpu,
+                                 struct mm_memmap *map,
+                                 struct mm_scs *scs,
+                                 mm_u32 fault_pc,
+                                 mm_u32 fault_xpsr,
+                                 mm_u32 ufsr_bits);
+
+static mm_bool step_core_simple(struct mm_cpu *cpu,
+                                struct mm_scs *scs,
+                                struct mm_nvic *nvic,
+                                struct mm_memmap *map,
+                                const struct mm_target_cfg *cfg,
+                                mm_u64 *cycle_total,
+                                mm_u64 *vcycles,
+                                mm_u64 *cycles_since_poll,
+                                mm_u8 *it_pattern,
+                                mm_u8 *it_remaining,
+                                mm_u8 *it_cond,
+                                mm_bool *done)
+{
+    if (cpu == 0 || scs == 0 || nvic == 0 || map == 0 || cfg == 0) {
+        return MM_FALSE;
+    }
+    if (cpu->sleeping) {
+        mm_bool wake = MM_FALSE;
+        if (cpu->event_reg) {
+            wake = MM_TRUE;
+        } else if (scs->pend_st || scs->pend_sv) {
+            wake = MM_TRUE;
+        } else if (mm_nvic_select(nvic, cpu) >= 0) {
+            wake = MM_TRUE;
+        } else if (cpu->sleep_wfe && mm_nvic_any_pending(nvic)) {
+            wake = MM_TRUE;
+        }
+        if (!wake) {
+            return MM_FALSE;
+        }
+        cpu->sleeping = MM_FALSE;
+        cpu->sleep_wfe = MM_FALSE;
+        cpu->event_reg = MM_FALSE;
+    }
+
+    if (scs->pend_st) {
+        if (!enter_exception(cpu, map, scs, MM_VECT_SYSTICK, cpu->r[15] & ~1u, cpu->xpsr)) {
+            if (done) *done = MM_TRUE;
+        } else {
+            itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
+        }
+        return MM_TRUE;
+    }
+    if (scs->pend_sv) {
+        if (!enter_exception(cpu, map, scs, MM_VECT_PENDSV, cpu->r[15] & ~1u, cpu->xpsr)) {
+            if (done) *done = MM_TRUE;
+        } else {
+            itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
+        }
+        return MM_TRUE;
+    }
+    {
+        enum mm_sec_state irq_sec = MM_SECURE;
+        int pend_irq = mm_nvic_select_routed(nvic, cpu, &irq_sec);
+        if (pend_irq >= 0) {
+            mm_u32 exc_num = 16u + (mm_u32)pend_irq;
+            mm_nvic_set_pending(nvic, (mm_u32)pend_irq, MM_FALSE);
+            if (!enter_exception_ex(cpu, map, scs, exc_num, cpu->r[15] & ~1u, cpu->xpsr, irq_sec)) {
+                if (done) *done = MM_TRUE;
+            } else {
+                itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
+            }
+            return MM_TRUE;
+        }
+    }
+
+    {
+        struct mm_fetch_result f;
+        struct mm_decoded d;
+        mm_bool execute_it;
+        const mm_u32 insn_cycles = 1u;
+
+        if (cycle_total) *cycle_total += insn_cycles;
+        if (vcycles) *vcycles += insn_cycles;
+        if (cycles_since_poll) *cycles_since_poll += insn_cycles;
+        mm_scs_systick_advance(scs, insn_cycles);
+        mm_timer_tick(cfg, insn_cycles);
+
+        cpu->r[13] = mm_cpu_get_active_sp(cpu);
+
+        if (mm_rp2350_bootrom_handle(cpu, map)) {
+            return MM_TRUE;
+        }
+
+        f = mm_fetch_t32_memmap(cpu, map, cpu->sec_state);
+        if (f.fault) {
+            if (!raise_mem_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr, f.fault_addr, MM_TRUE)) {
+                if (done) *done = MM_TRUE;
+            }
+            return MM_TRUE;
+        }
+        d = mm_decode_t32(&f);
+        mm_memmap_set_last_pc(f.pc_fetch);
+        if (d.undefined) {
+            if (!raise_usage_fault(cpu, map, scs, f.pc_fetch, cpu->xpsr, (1u << 16))) {
+                if (done) *done = MM_TRUE;
+            }
+            return MM_TRUE;
+        }
+
+        execute_it = MM_TRUE;
+        if (*it_remaining > 0u && d.kind != MM_OP_IT) {
+            mm_bool cond_true = MM_FALSE;
+            mm_bool take = MM_FALSE;
+            mm_bool n = (cpu->xpsr & (1u << 31)) != 0u;
+            mm_bool z = (cpu->xpsr & (1u << 30)) != 0u;
+            mm_bool c = (cpu->xpsr & (1u << 29)) != 0u;
+            mm_bool v = (cpu->xpsr & (1u << 28)) != 0u;
+            mm_u8 cond = *it_cond;
+            switch (cond) {
+            case MM_COND_EQ: cond_true = z; break;
+            case MM_COND_NE: cond_true = !z; break;
+            case MM_COND_CS: cond_true = c; break;
+            case MM_COND_CC: cond_true = !c; break;
+            case MM_COND_MI: cond_true = n; break;
+            case MM_COND_PL: cond_true = !n; break;
+            case MM_COND_VS: cond_true = v; break;
+            case MM_COND_VC: cond_true = !v; break;
+            case MM_COND_HI: cond_true = c && !z; break;
+            case MM_COND_LS: cond_true = !c || z; break;
+            case MM_COND_GE: cond_true = (n == v); break;
+            case MM_COND_LT: cond_true = (n != v); break;
+            case MM_COND_GT: cond_true = !z && (n == v); break;
+            case MM_COND_LE: cond_true = z || (n != v); break;
+            case MM_COND_AL: cond_true = MM_TRUE; break;
+            default: cond_true = MM_FALSE; break;
+            }
+            take = ((*it_pattern & 0x1u) != 0u) ? cond_true : !cond_true;
+            execute_it = take;
+        }
+
+        if (!execute_it && d.kind != MM_OP_IT) {
+            if (*it_remaining > 0u) {
+                mm_u8 raw = itstate_get(cpu->xpsr);
+                *it_pattern >>= 1;
+                (*it_remaining)--;
+                raw = itstate_advance(raw);
+                cpu->xpsr = itstate_set(cpu->xpsr, raw);
+            }
+            return MM_TRUE;
+        }
+
+        {
+            struct mm_execute_ctx exec_ctx;
+            exec_ctx.cpu = cpu;
+            exec_ctx.map = map;
+            exec_ctx.scs = scs;
+            exec_ctx.gdb = 0;
+            exec_ctx.fetch = &f;
+            exec_ctx.dec = &d;
+            exec_ctx.opt_dump = MM_FALSE;
+            exec_ctx.opt_gdb = MM_FALSE;
+            exec_ctx.it_pattern = it_pattern;
+            exec_ctx.it_remaining = it_remaining;
+            exec_ctx.it_cond = it_cond;
+            exec_ctx.done = done;
+            exec_ctx.handle_pc_write = handle_pc_write;
+            exec_ctx.raise_mem_fault = raise_mem_fault;
+            exec_ctx.raise_usage_fault = raise_usage_fault;
+            exec_ctx.exc_return_unstack = exc_return_unstack;
+            exec_ctx.enter_exception = enter_exception;
+            (void)mm_execute_decoded(&exec_ctx);
+        }
+
+        if (*it_remaining > 0u && d.kind != MM_OP_IT) {
+            mm_u8 raw = itstate_get(cpu->xpsr);
+            *it_pattern >>= 1;
+            (*it_remaining)--;
+            raw = itstate_advance(raw);
+            cpu->xpsr = itstate_set(cpu->xpsr, raw);
+        }
     }
     return MM_TRUE;
 }
@@ -1405,9 +1635,15 @@ int main(int argc, char **argv)
     struct mm_memmap map;
             struct mmio_region regions[256];
     struct mm_cpu cpu;
+    struct mm_cpu cpu1;
     struct mm_scs scs;
+    struct mm_scs scs1;
     struct mm_prot_ctx prot;
+    struct mm_prot_ctx prot1;
     struct mm_nvic nvic;
+    struct mm_nvic nvic1;
+    struct mm_scs_mux scs_mux;
+    mm_u32 active_core = 0;
     mm_u8 *flash;
     mm_u8 *ram;
     struct mm_gdb_stub gdb;
@@ -1419,6 +1655,9 @@ int main(int argc, char **argv)
     mm_u8 it_pattern = 0;
     mm_u8 it_remaining = 0;
     mm_u8 it_cond = 0;
+    mm_u8 it_pattern1 = 0;
+    mm_u8 it_remaining1 = 0;
+    mm_u8 it_cond1 = 0;
     mm_bool tui_paused = MM_FALSE;
     mm_bool tui_step = MM_FALSE;
     mm_bool reload_pending = MM_FALSE;
@@ -1837,10 +2076,25 @@ int main(int argc, char **argv)
             mm_timer_init(&cfg, &map.mmio, &nvic);
 
             mm_scs_init(&scs, 0x410fc241u);
-            mm_scs_register_regions(&scs, &map.mmio, 0xE000ED00u, 0xE002ED00u, &nvic);
+            if (cfg.core_count > 1u) {
+                mm_scs_init(&scs1, 0x410fc241u);
+                scs_mux.scs[0] = &scs;
+                scs_mux.scs[1] = &scs1;
+                scs_mux.nvic[0] = &nvic;
+                scs_mux.nvic[1] = &nvic1;
+                scs_mux.core_count = cfg.core_count;
+                scs_mux.active_core = &active_core;
+                mm_scs_register_regions_multi(&scs_mux, &map.mmio, 0xE000ED00u, 0xE002ED00u);
+            } else {
+                mm_scs_register_regions(&scs, &map.mmio, 0xE000ED00u, 0xE002ED00u, &nvic);
+            }
             mm_core_sys_register(&map.mmio);
-    mm_prot_init(&prot, &scs, &cfg, &cpu);
-            mm_memmap_set_interceptor(&map, mm_prot_interceptor, &prot);
+            mm_prot_init(&prot, &scs, &cfg, &cpu);
+            if (cfg.core_count > 1u) {
+                mm_prot_init(&prot1, &scs1, &cfg, &cpu1);
+            }
+            g_active_prot_ctx = &prot;
+            mm_memmap_set_interceptor(&map, prot_mux_interceptor, 0);
             mm_prot_add_region(&prot, cfg.flash_base_s, cfg.flash_size_s, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
             mm_prot_add_region(&prot, cfg.flash_base_ns, cfg.flash_size_ns, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
             if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
@@ -1864,9 +2118,38 @@ int main(int argc, char **argv)
             /* Permit SIO/system bus window (e.g. RP2350 SIO at 0xD0000000). */
             mm_prot_add_region(&prot, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
             mm_prot_add_region(&prot, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+            if (cfg.core_count > 1u) {
+                mm_prot_add_region(&prot1, cfg.flash_base_s, cfg.flash_size_s, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
+                mm_prot_add_region(&prot1, cfg.flash_base_ns, cfg.flash_size_ns, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                    mm_prot_add_region(&prot1, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
+                    mm_prot_add_region(&prot1, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                }
+                if (cfg.ram_regions != 0 && cfg.ram_region_count > 0u) {
+                    mm_u32 ri;
+                    for (ri = 0; ri < cfg.ram_region_count; ++ri) {
+                        const struct mm_ram_region *r = &cfg.ram_regions[ri];
+                        mm_prot_add_region(&prot1, r->base_s, r->size, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
+                        mm_prot_add_region(&prot1, r->base_ns, r->size, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                    }
+                } else {
+                    mm_prot_add_region(&prot1, cfg.ram_base_s, cfg.ram_size_s, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
+                    mm_prot_add_region(&prot1, cfg.ram_base_ns, cfg.ram_size_ns, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                }
+                mm_prot_add_region(&prot1, 0x40000000u, 0x20000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                mm_prot_add_region(&prot1, 0x40000000u, 0x20000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+                mm_prot_add_region(&prot1, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                mm_prot_add_region(&prot1, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+            }
             mm_spiflash_register_prot_regions(&prot);
 
             mm_nvic_init(&nvic);
+            if (cfg.core_count > 1u) {
+                mm_nvic_init(&nvic1);
+            }
+            if (cfg.core_count > 1u && cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                mm_rp2350_bind_multicore(&cpu, &cpu1, &nvic, &nvic1, &active_core);
+            }
 
             /* Reset CPU state */
             {
@@ -1891,10 +2174,39 @@ int main(int argc, char **argv)
                 cpu.sleeping = MM_FALSE;
                 cpu.sleep_wfe = MM_FALSE;
                 cpu.event_reg = MM_FALSE;
+                if (cfg.core_count > 1u) {
+                    for (i = 0; i < 16; ++i) cpu1.r[i] = 0;
+                    cpu1.xpsr = 0;
+                    cpu1.sec_state = MM_SECURE;
+                    cpu1.mode = MM_THREAD;
+                    cpu1.priv_s = MM_FALSE;
+                    cpu1.priv_ns = MM_FALSE;
+                    cpu1.control_s = cpu1.control_ns = 0;
+                    cpu1.primask_s = cpu1.primask_ns = 0;
+                    cpu1.basepri_s = cpu1.basepri_ns = 0;
+                    cpu1.faultmask_s = cpu1.faultmask_ns = 0;
+                    cpu1.msp_s = cpu1.msp_ns = 0;
+                    cpu1.psp_s = cpu1.psp_ns = 0;
+                    cpu1.vtor_s = cfg.flash_base_s + boot_offset;
+                    cpu1.vtor_ns = cfg.flash_base_ns + boot_offset;
+                    cpu1.exc_depth = 0;
+                    cpu1.tz_depth = 0;
+                    cpu1.sleeping = MM_TRUE;
+                    cpu1.sleep_wfe = MM_TRUE;
+                    cpu1.event_reg = MM_FALSE;
+                    it_pattern1 = 0;
+                    it_remaining1 = 0;
+                    it_cond1 = 0;
+                }
             }
 
             {
                 enum mm_sec_state boot_sec = MM_SECURE;
+                active_core = 0;
+                g_active_prot_ctx = &prot;
+                if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                    mm_rp2350_set_active_core(0);
+                }
                 if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
                     scs.sau_ctrl = 0x1u | 0x2u;
                 }
@@ -1907,6 +2219,13 @@ int main(int argc, char **argv)
             /* Keep SCS VTOR banks in sync with CPU reset values so exception dispatch uses VTOR_S/VTOR_NS. */
             scs.vtor_s = cpu.vtor_s;
             scs.vtor_ns = cpu.vtor_ns;
+            if (cfg.core_count > 1u) {
+                if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                    scs1.sau_ctrl = 0x1u | 0x2u;
+                }
+                scs1.vtor_s = cpu1.vtor_s;
+                scs1.vtor_ns = cpu1.vtor_ns;
+            }
 
             if (opt_gdb) {
                 mm_gdb_stub_notify_stop(&gdb, 5);
@@ -1960,6 +2279,43 @@ int main(int argc, char **argv)
                 if (g_fault_pending) {
                     done = MM_TRUE;
                     break;
+                }
+                if (cfg.core_count > 1u && cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                    mm_u32 launch_vtor = 0;
+                    mm_u32 launch_sp = 0;
+                    mm_u32 launch_entry = 0;
+                    if (mm_rp2350_core1_take_launch(&launch_vtor, &launch_sp, &launch_entry)) {
+                        int r;
+                        for (r = 0; r < 16; ++r) cpu1.r[r] = 0;
+                        cpu1.xpsr = 0x01000000u;
+                        cpu1.sec_state = MM_SECURE;
+                        cpu1.mode = MM_THREAD;
+                        cpu1.priv_s = MM_FALSE;
+                        cpu1.priv_ns = MM_FALSE;
+                        cpu1.control_s = cpu1.control_ns = 0;
+                        cpu1.primask_s = cpu1.primask_ns = 0;
+                        cpu1.basepri_s = cpu1.basepri_ns = 0;
+                        cpu1.faultmask_s = cpu1.faultmask_ns = 0;
+                        cpu1.msp_s = launch_sp;
+                        cpu1.msp_ns = 0;
+                        cpu1.psp_s = 0;
+                        cpu1.psp_ns = 0;
+                        cpu1.vtor_s = launch_vtor;
+                        cpu1.vtor_ns = launch_vtor;
+                        cpu1.r[13] = launch_sp;
+                        cpu1.r[14] = 0xFFFFFFFFu;
+                        cpu1.r[15] = launch_entry | 1u;
+                        cpu1.exc_depth = 0;
+                        cpu1.tz_depth = 0;
+                        cpu1.sleeping = MM_FALSE;
+                        cpu1.sleep_wfe = MM_FALSE;
+                        cpu1.event_reg = MM_FALSE;
+                        scs1.vtor_s = launch_vtor;
+                        scs1.vtor_ns = launch_vtor;
+                        it_pattern1 = 0;
+                        it_remaining1 = 0;
+                        it_cond1 = 0;
+                    }
                 }
 
                 if (opt_gdb) {
@@ -2029,7 +2385,35 @@ int main(int argc, char **argv)
                     }
                     last_running = running_now;
                 }
-                
+
+                if (running_now && cfg.core_count > 1u && cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0 &&
+                    mm_rp2350_core1_running()) {
+                    const mm_u32 core1_epoch_steps = 64u;
+                    mm_u32 core1_step;
+                    active_core = 1u;
+                    g_active_prot_ctx = &prot1;
+                    mm_rp2350_set_active_core(1u);
+                    for (core1_step = 0; core1_step < core1_epoch_steps; ++core1_step) {
+                        if (!mm_rp2350_core1_running()) {
+                            break;
+                        }
+                        if (!step_core_simple(&cpu1, &scs1, &nvic1, &map, &cfg,
+                                              &cycle_total, &vcycles, &cycles_since_poll,
+                                              &it_pattern1, &it_remaining1, &it_cond1, &done)) {
+                            break;
+                        }
+                        if (done) {
+                            break;
+                        }
+                    }
+                    active_core = 0u;
+                    g_active_prot_ctx = &prot;
+                    mm_rp2350_set_active_core(0u);
+                    if (done) {
+                        continue;
+                    }
+                }
+
                 if (!running_now) {
                     host_sync_if_needed(vcycles, &vcycles_last_sync, host0_ns, sync_granularity, cpu_hz);
                     mm_target_usart_poll(&cfg);
@@ -2048,7 +2432,7 @@ int main(int argc, char **argv)
                         req.tv_nsec = (long)IDLE_SLEEP_NS;
                         nanosleep(&req, 0);
                     }
-                    if (mm_system_reset_pending()) {
+                    if (mm_system_reset_pending() && allow_system_reset(&cfg, cpu_name)) {
                         reset_again = MM_TRUE;
                         mm_system_clear_reset();
                         break;
@@ -2150,7 +2534,7 @@ int main(int argc, char **argv)
                                 cpu.event_reg = MM_FALSE;
                                 goto handle_pending;
                             }
-                            if (mm_system_reset_pending()) {
+                            if (mm_system_reset_pending() && allow_system_reset(&cfg, cpu_name)) {
                                 reset_again = MM_TRUE;
                                 mm_system_clear_reset();
                                 break;
@@ -2178,7 +2562,7 @@ int main(int argc, char **argv)
                                 continue;
                             }
                             cycles_since_poll = 0;
-                            if (mm_system_reset_pending()) {
+                            if (mm_system_reset_pending() && allow_system_reset(&cfg, cpu_name)) {
                                 reset_again = MM_TRUE;
                                 mm_system_clear_reset();
                                 break;
@@ -2509,7 +2893,7 @@ handle_pending:
 
                 host_sync_if_needed(vcycles, &vcycles_last_sync, host0_ns, sync_granularity, cpu_hz);
 
-                if (mm_system_reset_pending()) {
+                if (mm_system_reset_pending() && allow_system_reset(&cfg, cpu_name)) {
                     reset_again = MM_TRUE;
                     mm_system_clear_reset();
                     break;

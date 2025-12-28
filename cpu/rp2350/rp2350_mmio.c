@@ -23,6 +23,8 @@
 #define PADS_BANK0_SIZE 0x1000u
 #define PADS_QSPI_BASE  0x40040000u
 #define PADS_QSPI_SIZE  0x1000u
+#define PSM_BASE 0x40018000u
+#define PSM_SIZE 0x10u
 #define XOSC_BASE 0x40048000u
 #define XOSC_SIZE 0x1000u
 #define PLL_SYS_BASE 0x40050000u
@@ -47,6 +49,22 @@
 #define SIO_SIZE      0x1000u
 #define BOOTROM_BASE  0x00000000u
 #define BOOTROM_SIZE  0x1000u
+
+#define PSM_FRCE_ON    0x000u
+#define PSM_FRCE_OFF   0x004u
+#define PSM_FRCE_ON_PROC1  (1u << 24)
+#define PSM_FRCE_OFF_PROC1 (1u << 24)
+
+#define SIO_FIFO_ST    0x050u
+#define SIO_FIFO_WR    0x054u
+#define SIO_FIFO_RD    0x058u
+#define SIO_DOORBELL_OUT_SET 0x180u
+#define SIO_DOORBELL_OUT_CLR 0x184u
+#define SIO_DOORBELL_IN_SET  0x188u
+#define SIO_DOORBELL_IN_CLR  0x18cu
+
+#define SIO_IRQ_FIFO 25u
+#define SIO_IRQ_BELL 26u
 
 #define RESETS_RESET      0x000u
 #define RESETS_WDSEL      0x004u
@@ -152,7 +170,7 @@
 #define UART1_BASE 0x40078000u
 #define SPI0_BASE  0x40080000u
 #define SPI1_BASE  0x40088000u
-#define UART_SIZE 0x1000u
+#define UART_SIZE 0x2000u
 #define SPI_SIZE  0x1000u
 #define USB_BASE  0x50110000u
 #define USB_SIZE  0x1000u
@@ -178,6 +196,35 @@ struct sio_state {
     mm_u32 regs[SIO_SIZE / 4u];
 };
 
+struct psm_state {
+    mm_u32 frce_on;
+    mm_u32 frce_off;
+};
+
+struct rp2350_fifo {
+    mm_u32 buf[8];
+    mm_u8 head;
+    mm_u8 tail;
+    mm_u8 count;
+};
+
+struct rp2350_multicore_state {
+    struct rp2350_fifo rx[2];
+    mm_u8 wof[2];
+    mm_u8 roe[2];
+    mm_u32 doorbell_in[2];
+    mm_u32 core1_state; /* 0=off, 1=bootrom, 2=running */
+    mm_u32 launch_pending;
+    mm_u32 launch_vtor;
+    mm_u32 launch_sp;
+    mm_u32 launch_entry;
+    mm_u32 boot_seq;
+    mm_u32 active_core;
+    struct mm_cpu *cpu[2];
+    struct mm_nvic *nvic[2];
+    mm_u32 *active_core_ptr;
+};
+
 struct bank_regs {
     mm_u32 regs[0x1000u / 4u];
 };
@@ -185,6 +232,8 @@ struct bank_regs {
 static struct reset_state resets;
 static struct clock_state clocks;
 static struct sio_state sio;
+static struct psm_state psm;
+static struct rp2350_multicore_state rp2350_mc;
 static struct bank_regs io_bank0;
 static struct bank_regs io_qspi;
 static struct bank_regs pads_bank0;
@@ -518,6 +567,113 @@ static mm_u32 apply_write(mm_u32 cur, mm_u32 offset_in_reg, mm_u32 size_bytes, m
     return (cur & ~(mask << shift)) | shifted;
 }
 
+static mm_u32 rp2350_active_core(void)
+{
+    if (rp2350_mc.active_core_ptr != 0) {
+        return *rp2350_mc.active_core_ptr;
+    }
+    return rp2350_mc.active_core;
+}
+
+static void rp2350_fifo_clear(struct rp2350_fifo *fifo)
+{
+    fifo->head = 0;
+    fifo->tail = 0;
+    fifo->count = 0;
+}
+
+static mm_bool rp2350_fifo_push(struct rp2350_fifo *fifo, mm_u32 value)
+{
+    if (fifo->count >= 8u) {
+        return MM_FALSE;
+    }
+    fifo->buf[fifo->head] = value;
+    fifo->head = (mm_u8)((fifo->head + 1u) & 7u);
+    fifo->count++;
+    return MM_TRUE;
+}
+
+static mm_bool rp2350_fifo_pop(struct rp2350_fifo *fifo, mm_u32 *value_out)
+{
+    if (fifo->count == 0u) {
+        return MM_FALSE;
+    }
+    *value_out = fifo->buf[fifo->tail];
+    fifo->tail = (mm_u8)((fifo->tail + 1u) & 7u);
+    fifo->count--;
+    return MM_TRUE;
+}
+
+static mm_u32 rp2350_fifo_status(mm_u32 core_id)
+{
+    mm_u32 vld = (rp2350_mc.rx[core_id].count != 0u) ? 1u : 0u;
+    mm_u32 rdy = (rp2350_mc.rx[1u - core_id].count < 8u) ? 1u : 0u;
+    mm_u32 wof = rp2350_mc.wof[core_id] ? 1u : 0u;
+    mm_u32 roe = rp2350_mc.roe[core_id] ? 1u : 0u;
+    return (vld << 0) | (rdy << 1) | (wof << 2) | (roe << 3);
+}
+
+static void rp2350_fifo_update_irq(mm_u32 core_id)
+{
+    struct mm_nvic *nvic = rp2350_mc.nvic[core_id];
+    mm_u32 status = rp2350_fifo_status(core_id);
+    if (nvic == 0) return;
+    if ((status & 0xdu) != 0u) {
+        mm_nvic_set_pending(nvic, SIO_IRQ_FIFO, MM_TRUE);
+    } else {
+        mm_nvic_set_pending(nvic, SIO_IRQ_FIFO, MM_FALSE);
+    }
+}
+
+static void rp2350_doorbell_update_irq(mm_u32 core_id)
+{
+    struct mm_nvic *nvic = rp2350_mc.nvic[core_id];
+    if (nvic == 0) return;
+    if (rp2350_mc.doorbell_in[core_id] != 0u) {
+        mm_nvic_set_pending(nvic, SIO_IRQ_BELL, MM_TRUE);
+    } else {
+        mm_nvic_set_pending(nvic, SIO_IRQ_BELL, MM_FALSE);
+    }
+}
+
+static void rp2350_signal_event(mm_u32 core_id)
+{
+    if (core_id >= 2u) return;
+    if (rp2350_mc.cpu[core_id] != 0) {
+        rp2350_mc.cpu[core_id]->event_reg = MM_TRUE;
+        rp2350_mc.cpu[core_id]->sleeping = MM_FALSE;
+        rp2350_mc.cpu[core_id]->sleep_wfe = MM_FALSE;
+    }
+}
+
+static mm_bool rp2350_bootrom_handle_word(mm_u32 cmd)
+{
+    static const mm_u32 fixed_seq[3] = {0u, 0u, 1u};
+    mm_u32 seq = rp2350_mc.boot_seq;
+    mm_bool accept = MM_TRUE;
+    if (seq < 3u) {
+        if (cmd != fixed_seq[seq]) {
+            accept = MM_FALSE;
+        }
+    }
+    if (!accept) {
+        rp2350_mc.boot_seq = 0u;
+        return MM_FALSE;
+    }
+    if (seq == 3u) rp2350_mc.launch_vtor = cmd;
+    else if (seq == 4u) rp2350_mc.launch_sp = cmd;
+    else if (seq == 5u) rp2350_mc.launch_entry = cmd;
+    seq++;
+    if (seq >= 6u) {
+        rp2350_mc.boot_seq = 0u;
+        rp2350_mc.launch_pending = 1u;
+        rp2350_mc.core1_state = 2u;
+    } else {
+        rp2350_mc.boot_seq = seq;
+    }
+    return MM_TRUE;
+}
+
 static mm_u32 alias_base_offset(mm_u32 offset, mm_u32 *alias_out)
 {
     mm_u32 alias = 0u;
@@ -809,12 +965,84 @@ static mm_bool clocks_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u
     return MM_TRUE;
 }
 
+static mm_bool psm_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct psm_state *p = (struct psm_state *)opaque;
+    if (p == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset & 3u) != 0u || size_bytes != 4u) return MM_FALSE;
+    if (offset == PSM_FRCE_ON) {
+        *value_out = p->frce_on;
+        return MM_TRUE;
+    }
+    if (offset == PSM_FRCE_OFF) {
+        *value_out = p->frce_off;
+        return MM_TRUE;
+    }
+    *value_out = 0u;
+    return MM_TRUE;
+}
+
+static void rp2350_core1_reset(void)
+{
+    rp2350_mc.core1_state = 0u;
+    rp2350_mc.launch_pending = 0u;
+    rp2350_mc.boot_seq = 0u;
+    rp2350_mc.wof[1] = 0u;
+    rp2350_mc.roe[1] = 0u;
+    rp2350_fifo_clear(&rp2350_mc.rx[0]);
+    rp2350_fifo_clear(&rp2350_mc.rx[1]);
+    rp2350_fifo_update_irq(0u);
+    rp2350_fifo_update_irq(1u);
+}
+
+static void rp2350_core1_release(void)
+{
+    rp2350_mc.core1_state = 1u;
+    rp2350_mc.boot_seq = 0u;
+    rp2350_mc.wof[1] = 0u;
+    rp2350_mc.roe[1] = 0u;
+    rp2350_fifo_clear(&rp2350_mc.rx[1]);
+    (void)rp2350_fifo_push(&rp2350_mc.rx[0], 0u);
+    rp2350_fifo_update_irq(0u);
+    rp2350_signal_event(0u);
+}
+
+static mm_bool psm_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct psm_state *p = (struct psm_state *)opaque;
+    mm_u32 prev_off;
+    if (p == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset & 3u) != 0u || size_bytes != 4u) return MM_FALSE;
+    if (offset == PSM_FRCE_ON) {
+        p->frce_on = value;
+        if (value & PSM_FRCE_ON_PROC1) {
+            p->frce_off &= ~PSM_FRCE_OFF_PROC1;
+            if (rp2350_mc.core1_state == 0u) {
+                rp2350_core1_release();
+            }
+        }
+        return MM_TRUE;
+    }
+    if (offset == PSM_FRCE_OFF) {
+        prev_off = p->frce_off;
+        p->frce_off = value;
+        if ((value & PSM_FRCE_OFF_PROC1) != 0u) {
+            rp2350_core1_reset();
+        } else if ((prev_off & PSM_FRCE_OFF_PROC1) != 0u) {
+            rp2350_core1_release();
+        }
+        return MM_TRUE;
+    }
+    return MM_TRUE;
+}
+
 static mm_bool sio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
     struct sio_state *s = (struct sio_state *)opaque;
     enum mm_sec_state sec = mmio_active_sec();
     mm_u32 mask_lo = access_mask_lo(sec);
     mm_u32 mask_hi = access_mask_hi(sec);
+    mm_u32 core_id = rp2350_active_core() & 1u;
     mm_u32 val;
     if (s == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
     if ((offset + size_bytes) > SIO_SIZE) return MM_FALSE;
@@ -845,6 +1073,26 @@ static mm_bool sio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
         *value_out = s->oe_hi & mask_hi;
         return MM_TRUE;
     }
+    if (offset == SIO_FIFO_ST && size_bytes == 4u) {
+        *value_out = rp2350_fifo_status(core_id);
+        return MM_TRUE;
+    }
+    if (offset == SIO_FIFO_RD && size_bytes == 4u) {
+        mm_u32 v = 0;
+        if (!rp2350_fifo_pop(&rp2350_mc.rx[core_id], &v)) {
+            rp2350_mc.roe[core_id] = 1u;
+            rp2350_fifo_update_irq(core_id);
+            *value_out = 0u;
+            return MM_TRUE;
+        }
+        rp2350_fifo_update_irq(core_id);
+        *value_out = v;
+        return MM_TRUE;
+    }
+    if ((offset == SIO_DOORBELL_IN_CLR || offset == SIO_DOORBELL_IN_SET) && size_bytes == 4u) {
+        *value_out = rp2350_mc.doorbell_in[core_id] & 0xffu;
+        return MM_TRUE;
+    }
 
     val = read_slice(s->regs[offset / 4u], offset & 3u, size_bytes);
     *value_out = val;
@@ -870,6 +1118,8 @@ static mm_bool sio_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     enum mm_sec_state sec = mmio_active_sec();
     mm_u32 mask_lo = access_mask_lo(sec);
     mm_u32 mask_hi = access_mask_hi(sec);
+    mm_u32 core_id = rp2350_active_core() & 1u;
+    mm_u32 other_id = core_id ^ 1u;
     if (s == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
     if ((offset + size_bytes) > SIO_SIZE) return MM_FALSE;
 
@@ -943,6 +1193,54 @@ static mm_bool sio_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     }
     if (offset == SIO_GPIO_HI_OE_XOR && size_bytes == 4u) {
         sio_apply_write(&s->oe_hi, value & mask_hi, 3u);
+        return MM_TRUE;
+    }
+    if (offset == SIO_FIFO_ST && size_bytes == 4u) {
+        if (value & (1u << 3)) rp2350_mc.roe[core_id] = 0u;
+        if (value & (1u << 2)) rp2350_mc.wof[core_id] = 0u;
+        rp2350_fifo_update_irq(core_id);
+        return MM_TRUE;
+    }
+    if (offset == SIO_FIFO_WR && size_bytes == 4u) {
+        if (core_id == 0u && rp2350_mc.core1_state == 1u) {
+            mm_bool accept = rp2350_bootrom_handle_word(value);
+            if (accept) {
+                (void)rp2350_fifo_push(&rp2350_mc.rx[0], value);
+            } else {
+                (void)rp2350_fifo_push(&rp2350_mc.rx[0], 0u);
+            }
+            rp2350_fifo_update_irq(0u);
+            rp2350_signal_event(0u);
+            return MM_TRUE;
+        }
+        if (!rp2350_fifo_push(&rp2350_mc.rx[other_id], value)) {
+            rp2350_mc.wof[core_id] = 1u;
+            rp2350_fifo_update_irq(core_id);
+            return MM_TRUE;
+        }
+        rp2350_fifo_update_irq(other_id);
+        rp2350_signal_event(other_id);
+        return MM_TRUE;
+    }
+    if (offset == SIO_DOORBELL_OUT_SET && size_bytes == 4u) {
+        rp2350_mc.doorbell_in[other_id] |= (value & 0xffu);
+        rp2350_doorbell_update_irq(other_id);
+        rp2350_signal_event(other_id);
+        return MM_TRUE;
+    }
+    if (offset == SIO_DOORBELL_OUT_CLR && size_bytes == 4u) {
+        rp2350_mc.doorbell_in[other_id] &= ~(value & 0xffu);
+        rp2350_doorbell_update_irq(other_id);
+        return MM_TRUE;
+    }
+    if (offset == SIO_DOORBELL_IN_SET && size_bytes == 4u) {
+        rp2350_mc.doorbell_in[core_id] |= (value & 0xffu);
+        rp2350_doorbell_update_irq(core_id);
+        return MM_TRUE;
+    }
+    if (offset == SIO_DOORBELL_IN_CLR && size_bytes == 4u) {
+        rp2350_mc.doorbell_in[core_id] &= ~(value & 0xffu);
+        rp2350_doorbell_update_irq(core_id);
         return MM_TRUE;
     }
 
@@ -1169,6 +1467,13 @@ mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus)
     reg.write = clocks_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
+    reg.size = PSM_SIZE;
+    reg.base = PSM_BASE;
+    reg.opaque = &psm;
+    reg.read = psm_read;
+    reg.write = psm_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
     reg.size = SIO_SIZE;
     reg.base = SIO_BASE;
     reg.opaque = &sio;
@@ -1269,6 +1574,8 @@ void mm_rp2350_mmio_reset(void)
     memset(&resets, 0, sizeof(resets));
     memset(&clocks, 0, sizeof(clocks));
     memset(&sio, 0, sizeof(sio));
+    memset(&psm, 0, sizeof(psm));
+    memset(&rp2350_mc, 0, sizeof(rp2350_mc));
     memset(&io_bank0, 0, sizeof(io_bank0));
     memset(&io_qspi, 0, sizeof(io_qspi));
     memset(&pads_bank0, 0, sizeof(pads_bank0));
@@ -1284,6 +1591,10 @@ void mm_rp2350_mmio_reset(void)
     mm_rp2350_usb_reset();
     mm_rp2350_coproc_reset();
     access_ctrl_reset();
+
+    rp2350_mc.core1_state = 1u; /* bootrom wait */
+    rp2350_fifo_clear(&rp2350_mc.rx[0]);
+    rp2350_fifo_clear(&rp2350_mc.rx[1]);
 
     resets.regs[RESETS_RESET / 4u] = 0u;
     resets.regs[RESETS_RESET_DONE / 4u] = reset_mask();
@@ -1578,5 +1889,45 @@ mm_bool mm_rp2350_flash_program(struct mm_memmap *map,
     if (rp2350_flash.persist != 0 && rp2350_flash.persist->enabled) {
         mm_flash_persist_flush((struct mm_flash_persist *)rp2350_flash.persist, flash_offs, count);
     }
+    return MM_TRUE;
+}
+
+void mm_rp2350_set_active_core(mm_u32 core_id)
+{
+    rp2350_mc.active_core = core_id & 1u;
+}
+
+void mm_rp2350_bind_multicore(struct mm_cpu *core0,
+                              struct mm_cpu *core1,
+                              struct mm_nvic *nvic0,
+                              struct mm_nvic *nvic1,
+                              mm_u32 *active_core)
+{
+    rp2350_mc.cpu[0] = core0;
+    rp2350_mc.cpu[1] = core1;
+    rp2350_mc.nvic[0] = nvic0;
+    rp2350_mc.nvic[1] = nvic1;
+    rp2350_mc.active_core_ptr = active_core;
+}
+
+mm_bool mm_rp2350_core1_running(void)
+{
+    return rp2350_mc.core1_state == 2u ? MM_TRUE : MM_FALSE;
+}
+
+mm_bool mm_rp2350_core1_can_reset(void)
+{
+    return (rp2350_mc.core1_state != 2u) ? MM_TRUE : MM_FALSE;
+}
+
+mm_bool mm_rp2350_core1_take_launch(mm_u32 *vtor_out, mm_u32 *sp_out, mm_u32 *entry_out)
+{
+    if (rp2350_mc.launch_pending == 0u) {
+        return MM_FALSE;
+    }
+    rp2350_mc.launch_pending = 0u;
+    if (vtor_out) *vtor_out = rp2350_mc.launch_vtor;
+    if (sp_out) *sp_out = rp2350_mc.launch_sp;
+    if (entry_out) *entry_out = rp2350_mc.launch_entry;
     return MM_TRUE;
 }
