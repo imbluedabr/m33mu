@@ -20,6 +20,7 @@
  */
 
 #include "m33mu/mem_prot.h"
+#include "rp2350/rp2350_mmio.h"
 #include "m33mu/mpu.h"
 #include "m33mu/sau.h"
 #include <stdlib.h>
@@ -322,7 +323,7 @@ static void record_memfault(struct mm_prot_ctx *ctx, enum mm_sec_state sec, enum
     }
 }
 
-void mm_prot_init(struct mm_prot_ctx *ctx, struct mm_scs *scs, const struct mm_target_cfg *cfg)
+void mm_prot_init(struct mm_prot_ctx *ctx, struct mm_scs *scs, const struct mm_target_cfg *cfg, struct mm_cpu *cpu)
 {
     if (ctx == 0) {
         return;
@@ -330,6 +331,7 @@ void mm_prot_init(struct mm_prot_ctx *ctx, struct mm_scs *scs, const struct mm_t
     ctx->count = 0;
     ctx->scs = scs;
     ctx->cfg = cfg;
+    ctx->cpu = cpu;
 }
 
 mm_bool mm_prot_add_region(struct mm_prot_ctx *ctx, mm_u32 base, mm_u32 size, mm_u8 perms, enum mm_sec_state sec)
@@ -357,11 +359,15 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
     enum mm_sau_attr attr;
     enum mm_sec_state addr_sec;
     mm_bool ignore_addr_sec;
+    mm_bool privileged = MM_TRUE;
     mm_u32 needed = 0;
     size_t i;
 
     if (ctx == 0) {
         return MM_TRUE;
+    }
+    if (ctx->cpu != 0) {
+        privileged = mm_cpu_get_privileged(ctx->cpu);
     }
 
     /* Always allow System Control Space (SCS/SCB/NVIC/SysTick); tolerate alias forms.
@@ -381,6 +387,14 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
                    (unsigned long)size_bytes);
         }
         return MM_TRUE;
+    }
+
+    if (!mm_rp2350_access_check(addr, sec, privileged)) {
+        record_memfault(ctx, sec, type, addr);
+        if (sec == MM_NONSECURE) {
+            record_securefault(ctx, type, addr);
+        }
+        return MM_FALSE;
     }
 
     /* Secure state can perform data accesses to both Secure and Non-secure

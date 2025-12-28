@@ -46,6 +46,10 @@
 #include "nrf5340/nrf5340_timers.h"
 #include "nrf5340/nrf5340_uart_spi.h"
 #include "nrf5340/cpu_config.h"
+#include "rp2350/rp2350_mmio.h"
+#include "rp2350/rp2350_uart_spi.h"
+#include "rp2350/rp2350_timers.h"
+#include "rp2350/cpu_config.h"
 
 struct mm_cpu_entry {
     const char *name;
@@ -221,6 +225,40 @@ static const struct mm_cpu_entry cpu_table[] = {
             NRF5340_TIMER_INIT,
             NRF5340_TIMER_RESET,
             NRF5340_TIMER_TICK
+        }
+    },
+    {
+        "rp2350",
+        {
+            RP2350_FLASH_BASE_S,
+            RP2350_FLASH_SIZE,
+            RP2350_FLASH_BASE_NS,
+            RP2350_FLASH_SIZE,
+            RP2350_RAM_BASE_S,
+            RP2350_RAM_SIZE,
+            RP2350_RAM_BASE_NS,
+            RP2350_RAM_SIZE,
+            RP2350_RAM_REGIONS,
+            RP2350_RAM_REGION_COUNT,
+            RP2350_MPCBB_BLOCK_SIZE,
+            0,
+            RP2350_FLAGS,
+            RP2350_SOC_RESET,
+            RP2350_SOC_REGISTER,
+            RP2350_FLASH_BIND,
+            RP2350_CLOCK_GET_HZ,
+            RP2350_USART_INIT,
+            RP2350_USART_RESET,
+            RP2350_USART_POLL,
+            RP2350_SPI_INIT,
+            RP2350_SPI_RESET,
+            RP2350_SPI_POLL,
+            0,
+            0,
+            0,
+            RP2350_TIMER_INIT,
+            RP2350_TIMER_RESET,
+            RP2350_TIMER_TICK
         }
     }
 };

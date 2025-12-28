@@ -1046,12 +1046,31 @@ static struct mm_decoded decode_32(mm_u32 insn)
         return d;
     }
 
+    /* LDAEXB/LDREXB (byte) */
+    if ((insn & 0xfff00ff0u) == 0xe8d00fc0u) {
+        d.kind = MM_OP_LDREXB;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rd = (mm_u8)((insn >> 12) & 0x0fu);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
     /* STREX (word) */
     if ((insn & 0xfff000ffu) == 0xe8400000u) {
         d.kind = MM_OP_STREX;
         d.rn = (mm_u8)((insn >> 16) & 0x0fu);
         d.rm = (mm_u8)((insn >> 12) & 0x0fu); /* Rt value */
         d.rd = (mm_u8)((insn >> 8) & 0x0fu);  /* Rd status */
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* STREXB (byte) */
+    if ((insn & 0xfff00ff0u) == 0xe8c00f40u) {
+        d.kind = MM_OP_STREXB;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rm = (mm_u8)((insn >> 12) & 0x0fu); /* Rt value */
+        d.rd = (mm_u8)(insn & 0x0fu);        /* Rd status */
         d.undefined = MM_FALSE;
         return d;
     }
@@ -1082,6 +1101,16 @@ static struct mm_decoded decode_32(mm_u32 insn)
             return d; /* UNPRED: treat as undefined */
         }
         d.imm = insn & 0xffu; /* sysm value */
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* STLB (store-release byte) Thumb-2: 1110 1000 1100 Rn | Rt 1111 1000 1111 */
+    if ((insn & 0xfff00fffu) == 0xe8c00f8fu) {
+        d.kind = MM_OP_STRB_IMM;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rd = (mm_u8)((insn >> 12) & 0x0fu);
+        d.imm = 0u;
         d.undefined = MM_FALSE;
         return d;
     }
@@ -1270,23 +1299,20 @@ static struct mm_decoded decode_32(mm_u32 insn)
         d.undefined = MM_FALSE;
         return d;
     }
-    /* MOV (immediate) Thumb-2 (alias of ORR immediate with Rn=1111). */
-    if ((insn & 0xfbf08000u) == 0xf0400000u && ((insn >> 16) & 0x0fu) == 0x0fu) {
+    /* ORR (immediate) Thumb-2: opcode 0010, S bit selects flag-setting vs not. Always ThumbExpandImm.
+     * MOV (immediate) is an alias with Rn=1111.
+     */
+    if ((insn & 0xfb600000u) == 0xf0400000u) { /* ORR (imm) T1, S bit ignored (i bit is part of imm12) */
         mm_u32 imm12 = (((insn >> 26) & 1u) << 11) | (((insn >> 12) & 0x7u) << 8) | (insn & 0xffu);
-        d.kind = MM_OP_MOV_IMM;
+        mm_u8 rn = (mm_u8)((insn >> 16) & 0x0fu);
         d.rd = (mm_u8)((insn >> 8) & 0x0fu);
         d.imm = thumb_expand_imm12(imm12);
-        d.undefined = MM_FALSE;
-        return d;
-    }
-
-    /* ORR (immediate) Thumb-2: opcode 0010, S bit selects flag-setting vs not. Always ThumbExpandImm. */
-    if ((insn & 0xff700000u) == 0xf0400000u) { /* ORR (imm) T1 */
-        mm_u32 imm12 = (((insn >> 26) & 1u) << 11) | (((insn >> 12) & 0x7u) << 8) | (insn & 0xffu);
-        d.kind = MM_OP_ORR_REG;
-        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
-        d.rd = (mm_u8)((insn >> 8) & 0x0fu);
-        d.imm = thumb_expand_imm12(imm12);
+        if (rn == 0x0fu) {
+            d.kind = MM_OP_MOV_IMM;
+        } else {
+            d.kind = MM_OP_ORR_REG;
+            d.rn = rn;
+        }
         d.undefined = MM_FALSE;
         return d;
     }
@@ -1883,6 +1909,64 @@ static struct mm_decoded decode_32(mm_u32 insn)
         d.rd = (mm_u8)((insn >> 12) & 0x0fu);
         d.rm = (mm_u8)(insn & 0x0fu);
         d.imm = imm2; /* LSL #imm2 */
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* Coprocessor register transfer (MCR/MRC), Thumb-2 */
+    if ((insn & 0x0f000010u) == 0x0e000010u) {
+        mm_u8 p = (mm_u8)((insn >> 28) & 0x1u);
+        mm_u8 op1 = (mm_u8)((insn >> 21) & 0x7u);
+        mm_u8 opcode = (mm_u8)((insn >> 20) & 0x1u); /* 0=MCR, 1=MRC */
+        mm_u8 crn = (mm_u8)((insn >> 16) & 0x0fu);
+        mm_u8 rd = (mm_u8)((insn >> 12) & 0x0fu);
+        mm_u8 coproc = (mm_u8)((insn >> 8) & 0x0fu);
+        mm_u8 op2 = (mm_u8)((insn >> 5) & 0x7u);
+        mm_u8 crm = (mm_u8)(insn & 0x0fu);
+        d.kind = MM_OP_MCR_MRC;
+        d.rd = rd;
+        d.rn = crn;
+        d.rm = crm;
+        d.ra = coproc;
+        d.imm = (mm_u32)op1 | ((mm_u32)op2 << 3) | ((mm_u32)opcode << 6) | ((mm_u32)p << 7);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* Coprocessor data processing (CDP), Thumb-2 */
+    if ((insn & 0x0f000010u) == 0x0e000000u) {
+        mm_u8 p = (mm_u8)((insn >> 28) & 0x1u);
+        mm_u8 op1 = (mm_u8)((insn >> 20) & 0x0fu);
+        mm_u8 crn = (mm_u8)((insn >> 16) & 0x0fu);
+        mm_u8 crd = (mm_u8)((insn >> 12) & 0x0fu);
+        mm_u8 coproc = (mm_u8)((insn >> 8) & 0x0fu);
+        mm_u8 op2 = (mm_u8)((insn >> 5) & 0x7u);
+        mm_u8 crm = (mm_u8)(insn & 0x0fu);
+        d.kind = MM_OP_CDP;
+        d.rd = crd;
+        d.rn = crn;
+        d.rm = crm;
+        d.ra = coproc;
+        d.imm = (mm_u32)op1 | ((mm_u32)op2 << 4) | ((mm_u32)p << 7);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* Coprocessor 64-bit transfer (MCRR/MRRC), Thumb-2 */
+    if ((insn & 0x0f000000u) == 0x0c000000u) {
+        mm_u8 p = (mm_u8)((insn >> 28) & 0x1u);
+        mm_u8 opcode = (mm_u8)((insn >> 20) & 0x1u); /* 0=MCRR, 1=MRRC */
+        mm_u8 rt2 = (mm_u8)((insn >> 16) & 0x0fu);
+        mm_u8 rt = (mm_u8)((insn >> 12) & 0x0fu);
+        mm_u8 coproc = (mm_u8)((insn >> 8) & 0x0fu);
+        mm_u8 op1 = (mm_u8)((insn >> 4) & 0x0fu);
+        mm_u8 crm = (mm_u8)(insn & 0x0fu);
+        d.kind = MM_OP_MCRR_MRRC;
+        d.rd = rt;
+        d.rn = rt2;
+        d.rm = crm;
+        d.ra = coproc;
+        d.imm = (mm_u32)op1 | ((mm_u32)opcode << 8) | ((mm_u32)p << 9);
         d.undefined = MM_FALSE;
         return d;
     }

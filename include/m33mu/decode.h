@@ -149,6 +149,8 @@ enum mm_op_kind {
     MM_OP_TBH,
     MM_OP_LDREX,
     MM_OP_STREX,
+    MM_OP_LDREXB,
+    MM_OP_STREXB,
     MM_OP_CLREX,
     MM_OP_TST_IMM,
     MM_OP_MRS,
@@ -186,7 +188,10 @@ enum mm_op_kind {
     /* Barriers: decoded distinctly but currently executed as no-ops. */
     MM_OP_DSB,
     MM_OP_DMB,
-    MM_OP_ISB
+    MM_OP_ISB,
+    MM_OP_MCR_MRC,
+    MM_OP_MCRR_MRRC,
+    MM_OP_CDP
 };
 
 struct mm_decoded {

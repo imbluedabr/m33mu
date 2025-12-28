@@ -21,6 +21,7 @@
 
 #include "m33mu/memmap.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 static mm_bool g_memwatch_enabled = MM_FALSE;
 static mm_u32 g_memwatch_addr = 0;
@@ -97,7 +98,10 @@ static mm_bool ram_offset_for_addr(const struct mm_memmap *map, mm_u32 addr, mm_
             return MM_TRUE;
         }
     }
-    if (map->ram_total_size > 0u && addr + size <= map->ram_total_size) {
+    if (map->ram_total_size > 0u &&
+        map->ram_base_s == 0u &&
+        map->ram_base_ns == 0u &&
+        addr + size <= map->ram_total_size) {
         *offset_out = addr;
         return MM_TRUE;
     }

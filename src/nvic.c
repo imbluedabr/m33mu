@@ -83,7 +83,23 @@ void mm_nvic_set_enable(struct mm_nvic *nvic, mm_u32 irq, mm_bool enable)
 
 void mm_nvic_set_pending(struct mm_nvic *nvic, mm_u32 irq, mm_bool pending)
 {
-    bitop(nvic->pending_mask, irq, pending);
+    mm_u32 word;
+    mm_u32 mask;
+    if (nvic == 0) return;
+    word = irq / 32u;
+    mask = 1u << (irq % 32u);
+    if (word >= (MM_MAX_IRQ + 31u) / 32u) return;
+    if (pending) {
+        nvic->pending_mask[word] |= mask;
+    } else {
+        nvic->pending_mask[word] &= ~mask;
+    }
+    if (nvic_trace_level() >= 1) {
+        printf("[NVIC_PENDING_SET] irq=%lu pending=%u mask=0x%08lx\n",
+               (unsigned long)irq,
+               pending ? 1u : 0u,
+               (unsigned long)nvic->pending_mask[word]);
+    }
 }
 
 void mm_nvic_set_itns(struct mm_nvic *nvic, mm_u32 irq, mm_bool target_nonsecure)
@@ -106,6 +122,30 @@ enum mm_sec_state mm_nvic_irq_target_sec(const struct mm_nvic *nvic, mm_u32 irq)
         return MM_SECURE;
     }
     return ((nvic->itns_mask[word] & mask) != 0u) ? MM_NONSECURE : MM_SECURE;
+}
+
+mm_bool mm_nvic_any_pending_enabled(const struct mm_nvic *nvic)
+{
+    size_t i;
+    if (nvic == 0) return MM_FALSE;
+    for (i = 0; i < (MM_MAX_IRQ + 31u) / 32u; ++i) {
+        if ((nvic->pending_mask[i] & nvic->enable_mask[i]) != 0u) {
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
+mm_bool mm_nvic_any_pending(const struct mm_nvic *nvic)
+{
+    size_t i;
+    if (nvic == 0) return MM_FALSE;
+    for (i = 0; i < (MM_MAX_IRQ + 31u) / 32u; ++i) {
+        if (nvic->pending_mask[i] != 0u) {
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
 }
 
 mm_bool mm_nvic_is_pending(const struct mm_nvic *nvic, mm_u32 irq)
@@ -145,6 +185,9 @@ int mm_nvic_select_routed(const struct mm_nvic *nvic, const struct mm_cpu *cpu, 
             continue;
         }
         if ((nvic->pending_mask[word] & mask) == 0u) {
+            continue;
+        }
+        if ((nvic->active_mask[word] & mask) != 0u) {
             continue;
         }
         tsec = mm_nvic_irq_target_sec(nvic, irq);

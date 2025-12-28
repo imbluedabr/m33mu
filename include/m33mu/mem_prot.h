@@ -25,6 +25,7 @@
 #include "m33mu/types.h"
 #include "m33mu/memmap.h"
 #include "m33mu/scs.h"
+#include "m33mu/cpu.h"
 
 #define MM_PROT_PERM_READ  (1u << 0)
 #define MM_PROT_PERM_WRITE (1u << 1)
@@ -42,9 +43,10 @@ struct mm_prot_ctx {
     size_t count;
     struct mm_scs *scs;
     const struct mm_target_cfg *cfg;
+    struct mm_cpu *cpu;
 };
 
-void mm_prot_init(struct mm_prot_ctx *ctx, struct mm_scs *scs, const struct mm_target_cfg *cfg);
+void mm_prot_init(struct mm_prot_ctx *ctx, struct mm_scs *scs, const struct mm_target_cfg *cfg, struct mm_cpu *cpu);
 mm_bool mm_prot_add_region(struct mm_prot_ctx *ctx, mm_u32 base, mm_u32 size, mm_u8 perms, enum mm_sec_state sec);
 mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_state sec, mm_u32 addr, mm_u32 size_bytes);
 

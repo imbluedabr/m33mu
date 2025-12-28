@@ -20,6 +20,8 @@
  */
 
 #include "m33mu/scs.h"
+#include "rp2350/rp2350_mmio.h"
+#include "m33mu/memmap.h"
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -152,7 +154,7 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
     scs->pend_sv = MM_FALSE;
     scs->pend_st = MM_FALSE;
     {
-        const char *env = getenv("SYSTICK_TRACE");
+        const char *env = getenv("M33MU_SYSTICK_TRACE");
         scs->trace_enabled = (env != 0 && env[0] != '\0') ? MM_TRUE : MM_FALSE;
     }
 }
@@ -189,9 +191,22 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
             val = scs->systick_ctrl & 0x7u;
             if (scs->systick_countflag) val |= (1u << 16);
             scs->systick_countflag = MM_FALSE; /* COUNTFLAG clears on read */
+            if (scs->trace_enabled) {
+                printf("[SYSTICK_CTRL_READ] ctrl=0x%08lx\n", (unsigned long)val);
+            }
             goto done_subword;
-        case 0x14: val = scs->systick_load; goto done_subword;
-        case 0x18: val = scs->systick_val; goto done_subword;
+        case 0x14:
+            val = scs->systick_load;
+            if (scs->trace_enabled) {
+                printf("[SYSTICK_LOAD_READ] load=0x%06lx\n", (unsigned long)val);
+            }
+            goto done_subword;
+        case 0x18:
+            val = scs->systick_val;
+            if (scs->trace_enabled) {
+                printf("[SYSTICK_VAL_READ] val=0x%06lx\n", (unsigned long)val);
+            }
+            goto done_subword;
         case 0x1C: val = scs->systick_calib; goto done_subword;
         default:
             /* NVIC enable/pending/active + ITNS registers. */

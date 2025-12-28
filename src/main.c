@@ -49,6 +49,7 @@
 #include "m33mu/spiflash.h"
 #include "m33mu/usbdev.h"
 #include "m33mu/eth_backend.h"
+#include "rp2350/rp2350_bootrom.h"
 #ifdef M33MU_HAS_LIBTPMS
 #include "m33mu/tpm_tis.h"
 #endif
@@ -174,6 +175,84 @@ struct mm_image_spec {
     mm_u32 offset;
     size_t loaded;
 };
+
+static mm_u32 read_u32_le(const mm_u8 *buf)
+{
+    return (mm_u32)buf[0]
+        | ((mm_u32)buf[1] << 8)
+        | ((mm_u32)buf[2] << 16)
+        | ((mm_u32)buf[3] << 24);
+}
+
+static mm_bool rp2350_vector_valid(const struct mm_target_cfg *cfg,
+                                   const mm_u8 *flash,
+                                   size_t flash_size,
+                                   mm_u32 offset)
+{
+    mm_u32 sp;
+    mm_u32 pc;
+    mm_u32 ram_start;
+    mm_u32 ram_end;
+    mm_u32 flash_start;
+    mm_u32 flash_end;
+
+    if (cfg == 0 || flash == 0) return MM_FALSE;
+    if (offset + 8u > flash_size) return MM_FALSE;
+
+    sp = read_u32_le(flash + offset);
+    pc = read_u32_le(flash + offset + 4u);
+
+    ram_start = cfg->ram_base_s;
+    ram_end = cfg->ram_base_s + cfg->ram_size_s;
+    if (sp < ram_start || sp > ram_end) {
+        ram_start = cfg->ram_base_ns;
+        ram_end = cfg->ram_base_ns + cfg->ram_size_ns;
+        if (sp < ram_start || sp > ram_end) {
+            return MM_FALSE;
+        }
+    }
+
+    flash_start = cfg->flash_base_s;
+    flash_end = cfg->flash_base_s + cfg->flash_size_s;
+    if (pc < flash_start || pc >= flash_end) {
+        flash_start = cfg->flash_base_ns;
+        flash_end = cfg->flash_base_ns + cfg->flash_size_ns;
+        if (pc < flash_start || pc >= flash_end) {
+            return MM_FALSE;
+        }
+    }
+    if ((pc & 1u) == 0u) return MM_FALSE;
+
+    return MM_TRUE;
+}
+
+static mm_u32 default_rp2350_boot_offset(const char *cpu_name,
+                                         const struct mm_target_cfg *cfg,
+                                         const struct mm_image_spec *images,
+                                         int image_count,
+                                         const mm_u8 *flash,
+                                         size_t flash_size)
+{
+    int i;
+    if (cpu_name == 0 || strcmp(cpu_name, "rp2350") != 0) {
+        return 0u;
+    }
+    if (images == 0 || image_count <= 0) {
+        return 0u;
+    }
+    for (i = 0; i < image_count; ++i) {
+        if (images[i].offset != 0u) {
+            return 0u;
+        }
+    }
+    if (rp2350_vector_valid(cfg, flash, flash_size, 0u)) {
+        return 0u;
+    }
+    if (rp2350_vector_valid(cfg, flash, flash_size, 0x100u)) {
+        return 0x100u;
+    }
+    return 0u;
+}
 
 static mm_bool reload_images(struct mm_image_spec *images,
                              int image_count,
@@ -1206,6 +1285,12 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     if (exc_num >= 16u) {
         vtor = (handler_sec == MM_NONSECURE) ? scs->vtor_ns : scs->vtor_s;
         (void)mm_vector_read(map, handler_sec, vtor, exc_num, &handler);
+        if (handler == 0u) {
+            mm_u32 fallback_vtor = (handler_sec == MM_NONSECURE) ? cpu->vtor_ns : cpu->vtor_s;
+            if (fallback_vtor != vtor) {
+                (void)mm_vector_read(map, handler_sec, fallback_vtor, exc_num, &handler);
+            }
+        }
         if (exc_num == (16u + 74u)) {
             printf("[IRQ_ENTER] irq=74 sec=%d vtor=0x%08lx handler=0x%08lx pc=0x%08lx\n",
                    (int)handler_sec,
@@ -1318,7 +1403,7 @@ int main(int argc, char **argv)
     int i;
     struct mm_target_cfg cfg;
     struct mm_memmap map;
-    struct mmio_region regions[128];
+            struct mmio_region regions[256];
     struct mm_cpu cpu;
     struct mm_scs scs;
     struct mm_prot_ctx prot;
@@ -1754,10 +1839,14 @@ int main(int argc, char **argv)
             mm_scs_init(&scs, 0x410fc241u);
             mm_scs_register_regions(&scs, &map.mmio, 0xE000ED00u, 0xE002ED00u, &nvic);
             mm_core_sys_register(&map.mmio);
-            mm_prot_init(&prot, &scs, &cfg);
+    mm_prot_init(&prot, &scs, &cfg, &cpu);
             mm_memmap_set_interceptor(&map, mm_prot_interceptor, &prot);
             mm_prot_add_region(&prot, cfg.flash_base_s, cfg.flash_size_s, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
             mm_prot_add_region(&prot, cfg.flash_base_ns, cfg.flash_size_ns, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
+            if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                mm_prot_add_region(&prot, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
+                mm_prot_add_region(&prot, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+            }
             if (cfg.ram_regions != 0 && cfg.ram_region_count > 0u) {
                 mm_u32 ri;
                 for (ri = 0; ri < cfg.ram_region_count; ++ri) {
@@ -1772,6 +1861,9 @@ int main(int argc, char **argv)
             /* Permit peripheral space (AHB/APB) for now; SAU still controls Secure vs Non-secure visibility. */
             mm_prot_add_region(&prot, 0x40000000u, 0x20000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
             mm_prot_add_region(&prot, 0x40000000u, 0x20000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+            /* Permit SIO/system bus window (e.g. RP2350 SIO at 0xD0000000). */
+            mm_prot_add_region(&prot, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+            mm_prot_add_region(&prot, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
             mm_spiflash_register_prot_regions(&prot);
 
             mm_nvic_init(&nvic);
@@ -1779,6 +1871,7 @@ int main(int argc, char **argv)
             /* Reset CPU state */
             {
                 int i;
+                mm_u32 boot_offset = default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
                 for (i = 0; i < 16; ++i) cpu.r[i] = 0;
                 cpu.xpsr = 0;
                 cpu.sec_state = MM_SECURE;
@@ -1791,18 +1884,25 @@ int main(int argc, char **argv)
                 cpu.faultmask_s = cpu.faultmask_ns = 0;
                 cpu.msp_s = cpu.msp_ns = 0;
                 cpu.psp_s = cpu.psp_ns = 0;
-                cpu.vtor_s = cfg.flash_base_s;
-                cpu.vtor_ns = cfg.flash_base_ns;
+                cpu.vtor_s = cfg.flash_base_s + boot_offset;
+                cpu.vtor_ns = cfg.flash_base_ns + boot_offset;
                 cpu.exc_depth = 0;
                 cpu.tz_depth = 0;
                 cpu.sleeping = MM_FALSE;
+                cpu.sleep_wfe = MM_FALSE;
                 cpu.event_reg = MM_FALSE;
             }
 
-            if (!mm_vector_apply_reset(&cpu, &map, MM_SECURE)) {
-                fprintf(stderr, "failed to apply reset\n");
-                rc = 1;
-                goto cleanup;
+            {
+                enum mm_sec_state boot_sec = MM_SECURE;
+                if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                    scs.sau_ctrl = 0x1u | 0x2u;
+                }
+                if (!mm_vector_apply_reset(&cpu, &map, boot_sec)) {
+                    fprintf(stderr, "failed to apply reset\n");
+                    rc = 1;
+                    goto cleanup;
+                }
             }
             /* Keep SCS VTOR banks in sync with CPU reset values so exception dispatch uses VTOR_S/VTOR_NS. */
             scs.vtor_s = cpu.vtor_s;
@@ -2002,17 +2102,37 @@ int main(int argc, char **argv)
                         wake = MM_TRUE;
                     } else if (mm_nvic_select(&nvic, &cpu) >= 0) {
                         wake = MM_TRUE;
+                    } else if (cpu.sleep_wfe && mm_nvic_any_pending(&nvic)) {
+                        if (getenv("M33MU_SLEEP_TRACE")) {
+                            printf("[SLEEP_WAKE] wfe pending irq (primask_s=%lu primask_ns=%lu)\n",
+                                   (unsigned long)cpu.primask_s,
+                                   (unsigned long)cpu.primask_ns);
+                        }
+                        wake = MM_TRUE;
                     }
                     if (wake) {
                         cpu.sleeping = MM_FALSE;
+                        cpu.sleep_wfe = MM_FALSE;
                         cpu.event_reg = MM_FALSE;
                     } else {
                         mm_u64 delta = mm_scs_systick_cycles_until_fire(&scs);
                         if (delta == (mm_u64)-1) {
+                            mm_u64 idle_cycles = 0;
                             struct timespec req;
                             req.tv_sec = 0;
                             req.tv_nsec = (long)IDLE_SLEEP_NS;
                             nanosleep(&req, 0);
+                            if (cpu_hz != 0) {
+                                idle_cycles = (mm_u64)(((long double)cpu_hz * (long double)IDLE_SLEEP_NS) / (long double)NS_PER_SEC);
+                            }
+                            if (idle_cycles == 0) {
+                                idle_cycles = 1;
+                            }
+                            mm_scs_systick_advance(&scs, idle_cycles);
+                            mm_timer_tick(&cfg, idle_cycles);
+                            vcycles += idle_cycles;
+                            cycle_total += idle_cycles;
+                            cycles_since_poll += idle_cycles;
                             mm_target_usart_poll(&cfg);
                             mm_target_spi_poll(&cfg);
                             mm_target_eth_poll(&cfg);
@@ -2022,6 +2142,13 @@ int main(int argc, char **argv)
                             if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                                 done = MM_TRUE;
                                 continue;
+                            }
+                            if (scs.pend_st || scs.pend_sv || mm_nvic_select(&nvic, &cpu) >= 0 ||
+                                (cpu.sleep_wfe && mm_nvic_any_pending(&nvic))) {
+                                cpu.sleeping = MM_FALSE;
+                                cpu.sleep_wfe = MM_FALSE;
+                                cpu.event_reg = MM_FALSE;
+                                goto handle_pending;
                             }
                             if (mm_system_reset_pending()) {
                                 reset_again = MM_TRUE;
@@ -2036,6 +2163,7 @@ int main(int argc, char **argv)
                             cycles_since_poll += delta;
                             if (scs.pend_st || scs.pend_sv) {
                                 cpu.sleeping = MM_FALSE;
+                                cpu.sleep_wfe = MM_FALSE;
                                 cpu.event_reg = MM_FALSE;
                             }
                             host_sync_if_needed(vcycles, &vcycles_last_sync, host0_ns, sync_granularity, cpu_hz);
@@ -2122,6 +2250,10 @@ handle_pending:
                      * operate on the correct stack memory.
                      */
                     cpu.r[13] = mm_cpu_get_active_sp(&cpu);
+
+                    if (mm_rp2350_bootrom_handle(&cpu, &map)) {
+                        continue;
+                    }
 
                     f = mm_fetch_t32_memmap(&cpu, &map, cpu.sec_state);
                     if (f.fault) {

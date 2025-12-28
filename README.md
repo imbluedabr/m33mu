@@ -151,6 +151,9 @@ Options:
 - `M33MU_STRCMP_ENTRY=<hex>`: override the entry PC for strcmp tracing.
 - `M33MU_MEMWATCH=<addr:size>`: watch a memory range (hex address + size).
 - `M33MU_NVIC_TRACE=1`: trace NVIC state changes.
+- `M33MU_SYSTICK_TRACE=1`: trace SysTick register access and tick behavior.
+- `M33MU_TIMER_TRACE=1`: trace RP2350 timer/alarm activity.
+- `M33MU_SLEEP_TRACE=1`: trace WFE/WFI sleep and wake decisions.
 - `M33MU_FLASH_TRACE=1`: trace flash MMIO activity.
 - `M33MU_PROT_TRACE=1..3`: print SAU/MPU attribution decisions; higher levels include region scans.
 - `M33MU_DUMP_PSP_FRAME=1`: dump 8-word stacked frames during EXC_RETURN unstack.

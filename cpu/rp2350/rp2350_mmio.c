@@ -1,0 +1,1582 @@
+/* m33mu -- an ARMv8-M Emulator
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+#include <string.h>
+#include <stdio.h>
+#include "rp2350/cpu_config.h"
+#include "rp2350/rp2350_mmio.h"
+#include "rp2350/rp2350_usb.h"
+#include "rp2350/rp2350_coproc.h"
+#include "rp2350/rp2350_bootrom.h"
+#include "m33mu/gpio.h"
+
+#define RESETS_BASE   0x40020000u
+#define RESETS_SIZE   0x1000u
+#define CLOCKS_BASE   0x40010000u
+#define CLOCKS_SIZE   0x1000u
+#define IO_BANK0_BASE 0x40028000u
+#define IO_BANK0_SIZE 0x1000u
+#define IO_QSPI_BASE  0x40030000u
+#define IO_QSPI_SIZE  0x1000u
+#define PADS_BANK0_BASE 0x40038000u
+#define PADS_BANK0_SIZE 0x1000u
+#define PADS_QSPI_BASE  0x40040000u
+#define PADS_QSPI_SIZE  0x1000u
+#define XOSC_BASE 0x40048000u
+#define XOSC_SIZE 0x1000u
+#define PLL_SYS_BASE 0x40050000u
+#define PLL_SYS_SIZE 0x1000u
+#define PLL_USB_BASE 0x40058000u
+#define PLL_USB_SIZE 0x1000u
+#define TIMER0_BASE 0x400b0000u
+#define TIMER0_SIZE 0x1000u
+#define TIMER1_BASE 0x400b8000u
+#define TIMER1_SIZE 0x1000u
+#define XIP_CTRL_BASE 0x400c8000u
+#define XIP_CTRL_SIZE 0x1000u
+#define XIP_AUX_BASE  0x50500000u
+#define XIP_AUX_SIZE  0x1000u
+#define BOOTRAM_BASE  0x400e0000u
+#define BOOTRAM_SIZE  0x1000u
+#define TICKS_BASE 0x40108000u
+#define TICKS_SIZE 0x1000u
+#define ACCESS_CTRL_BASE 0x40060000u
+#define ACCESS_CTRL_SIZE 0x100u
+#define SIO_BASE      0xd0000000u
+#define SIO_SIZE      0x1000u
+#define BOOTROM_BASE  0x00000000u
+#define BOOTROM_SIZE  0x1000u
+
+#define RESETS_RESET      0x000u
+#define RESETS_WDSEL      0x004u
+#define RESETS_RESET_DONE 0x008u
+
+#define CLK_REF_CTRL      0x030u
+#define CLK_REF_SELECTED  0x038u
+#define CLK_SYS_CTRL      0x03cu
+#define CLK_SYS_SELECTED  0x044u
+#define CLK_PERI_CTRL     0x048u
+
+#define CLK_PERI_CTRL_ENABLE_BIT 11u
+#define CLK_PERI_CTRL_ENABLED_BIT 28u
+#define CLK_PERI_CTRL_KILL_BIT 10u
+
+#define SIO_GPIO_IN       0x004u
+#define SIO_GPIO_HI_IN    0x008u
+#define SIO_GPIO_OUT      0x010u
+#define SIO_GPIO_HI_OUT   0x014u
+#define SIO_GPIO_OUT_SET  0x018u
+#define SIO_GPIO_HI_OUT_SET 0x01cu
+#define SIO_GPIO_OUT_CLR  0x020u
+#define SIO_GPIO_HI_OUT_CLR 0x024u
+#define SIO_GPIO_OUT_XOR  0x028u
+#define SIO_GPIO_HI_OUT_XOR 0x02cu
+#define SIO_GPIO_OE       0x030u
+#define SIO_GPIO_HI_OE    0x034u
+#define SIO_GPIO_OE_SET   0x038u
+#define SIO_GPIO_HI_OE_SET 0x03cu
+#define SIO_GPIO_OE_CLR   0x040u
+#define SIO_GPIO_HI_OE_CLR 0x044u
+#define SIO_GPIO_OE_XOR   0x048u
+#define SIO_GPIO_HI_OE_XOR 0x04cu
+
+#define BOOTRAM_WRITE_ONCE0 0x800u
+#define BOOTRAM_WRITE_ONCE1 0x804u
+#define BOOTRAM_BOOTLOCK_STAT 0x808u
+#define BOOTRAM_BOOTLOCK0 0x80cu
+#define BOOTRAM_BOOTLOCK7 0x828u
+
+#define ACCESS_CONTROL_LOCK        0x0000u
+#define ACCESS_CONTROL_FORCE_CORE_NS 0x0004u
+#define ACCESS_CONTROL_CFGRESET    0x0008u
+#define ACCESS_CONTROL_GPIOMASK0   0x000cu
+#define ACCESS_CONTROL_GPIOMASK1   0x0010u
+#define ACCESS_CONTROL_ROM         0x0014u
+#define ACCESS_CONTROL_XIP_MAIN    0x0018u
+#define ACCESS_CONTROL_SRAM_BASE   0x001cu
+#define ACCESS_CONTROL_DMA         0x0044u
+#define ACCESS_CONTROL_USBCTRL     0x0048u
+#define ACCESS_CONTROL_PIO0        0x004cu
+#define ACCESS_CONTROL_PIO1        0x0050u
+#define ACCESS_CONTROL_PIO2        0x0054u
+#define ACCESS_CONTROL_CORESIGHT_TRACE 0x0058u
+#define ACCESS_CONTROL_CORESIGHT_PERIPH 0x005cu
+#define ACCESS_CONTROL_SYSINFO     0x0060u
+#define ACCESS_CONTROL_RESETS      0x0064u
+#define ACCESS_CONTROL_IO_BANK0    0x0068u
+#define ACCESS_CONTROL_IO_BANK1    0x006cu
+#define ACCESS_CONTROL_PADS_BANK0  0x0070u
+#define ACCESS_CONTROL_PADS_QSPI   0x0074u
+#define ACCESS_CONTROL_BUSCTRL     0x0078u
+#define ACCESS_CONTROL_ADC         0x007cu
+#define ACCESS_CONTROL_HSTX        0x0080u
+#define ACCESS_CONTROL_I2C0        0x0084u
+#define ACCESS_CONTROL_I2C1        0x0088u
+#define ACCESS_CONTROL_PWM         0x008cu
+#define ACCESS_CONTROL_SPI0        0x0090u
+#define ACCESS_CONTROL_SPI1        0x0094u
+#define ACCESS_CONTROL_TIMER0      0x0098u
+#define ACCESS_CONTROL_TIMER1      0x009cu
+#define ACCESS_CONTROL_UART0       0x00a0u
+#define ACCESS_CONTROL_UART1       0x00a4u
+#define ACCESS_CONTROL_OTP         0x00a8u
+#define ACCESS_CONTROL_TBMAN       0x00acu
+#define ACCESS_CONTROL_POWMAN      0x00b0u
+#define ACCESS_CONTROL_TRNG        0x00b4u
+#define ACCESS_CONTROL_SHA256      0x00b8u
+#define ACCESS_CONTROL_SYSCFG      0x00bcu
+#define ACCESS_CONTROL_CLOCKS      0x00c0u
+#define ACCESS_CONTROL_XOSC        0x00c4u
+#define ACCESS_CONTROL_ROSC        0x00c8u
+#define ACCESS_CONTROL_PLL_SYS     0x00ccu
+#define ACCESS_CONTROL_PLL_USB     0x00d0u
+#define ACCESS_CONTROL_TICKS       0x00d4u
+#define ACCESS_CONTROL_WATCHDOG    0x00d8u
+#define ACCESS_CONTROL_PSM         0x00dcu
+#define ACCESS_CONTROL_XIP_CTRL    0x00e0u
+#define ACCESS_CONTROL_XIP_QMI     0x00e4u
+#define ACCESS_CONTROL_XIP_AUX     0x00e8u
+
+#define ACCESS_BITS_DBG (1u << 7)
+#define ACCESS_BITS_DMA (1u << 6)
+#define ACCESS_BITS_CORE1 (1u << 5)
+#define ACCESS_BITS_CORE0 (1u << 4)
+#define ACCESS_BITS_SP    (1u << 3)
+#define ACCESS_BITS_SU    (1u << 2)
+#define ACCESS_BITS_NSP   (1u << 1)
+#define ACCESS_BITS_NSU   (1u << 0)
+#define ACCESS_MAGIC 0xACCE0000u
+
+#define UART0_BASE 0x40070000u
+#define UART1_BASE 0x40078000u
+#define SPI0_BASE  0x40080000u
+#define SPI1_BASE  0x40088000u
+#define UART_SIZE 0x1000u
+#define SPI_SIZE  0x1000u
+#define USB_BASE  0x50110000u
+#define USB_SIZE  0x1000u
+#define USB_DPRAM_BASE 0x50100000u
+#define USB_DPRAM_SIZE 0x1000u
+#define MMIO_ALIAS_SIZE 0x4000u
+
+struct reset_state {
+    mm_u32 regs[RESETS_SIZE / 4u];
+};
+
+struct clock_state {
+    mm_u32 regs[CLOCKS_SIZE / 4u];
+};
+
+struct sio_state {
+    mm_u32 out_lo;
+    mm_u32 out_hi;
+    mm_u32 oe_lo;
+    mm_u32 oe_hi;
+    mm_u32 in_lo;
+    mm_u32 in_hi;
+    mm_u32 regs[SIO_SIZE / 4u];
+};
+
+struct bank_regs {
+    mm_u32 regs[0x1000u / 4u];
+};
+
+static struct reset_state resets;
+static struct clock_state clocks;
+static struct sio_state sio;
+static struct bank_regs io_bank0;
+static struct bank_regs io_qspi;
+static struct bank_regs pads_bank0;
+static struct bank_regs pads_qspi;
+static struct bank_regs xosc;
+static struct bank_regs pll_sys;
+static struct bank_regs pll_usb;
+static struct bank_regs xip_ctrl;
+static struct bank_regs xip_aux;
+static struct bank_regs bootram;
+static struct bank_regs ticks;
+static struct {
+    mm_u32 lock;
+    mm_u32 force_core_ns;
+    mm_u32 gpio_mask0;
+    mm_u32 gpio_mask1;
+    mm_u32 rom;
+    mm_u32 xip_main;
+    mm_u32 sram[10];
+    mm_u32 dma;
+    mm_u32 usbctrl;
+    mm_u32 pio0;
+    mm_u32 pio1;
+    mm_u32 pio2;
+    mm_u32 coresight_trace;
+    mm_u32 coresight_periph;
+    mm_u32 sysinfo;
+    mm_u32 resets;
+    mm_u32 io_bank0;
+    mm_u32 io_bank1;
+    mm_u32 pads_bank0;
+    mm_u32 pads_qspi;
+    mm_u32 busctrl;
+    mm_u32 adc;
+    mm_u32 hstx;
+    mm_u32 i2c0;
+    mm_u32 i2c1;
+    mm_u32 pwm;
+    mm_u32 spi0;
+    mm_u32 spi1;
+    mm_u32 timer0;
+    mm_u32 timer1;
+    mm_u32 uart0;
+    mm_u32 uart1;
+    mm_u32 otp;
+    mm_u32 tbman;
+    mm_u32 powman;
+    mm_u32 trng;
+    mm_u32 sha256;
+    mm_u32 syscfg;
+    mm_u32 clocks;
+    mm_u32 xosc;
+    mm_u32 rosc;
+    mm_u32 pll_sys;
+    mm_u32 pll_usb;
+    mm_u32 ticks;
+    mm_u32 watchdog;
+    mm_u32 psm;
+    mm_u32 xip_ctrl;
+    mm_u32 xip_qmi;
+    mm_u32 xip_aux;
+} access_ctrl;
+static mm_bool rp2350_active = MM_FALSE;
+static struct {
+    mm_u8 *flash;
+    mm_u32 flash_size;
+    const struct mm_flash_persist *persist;
+} rp2350_flash;
+
+static mm_u32 read_slice(mm_u32 reg, mm_u32 offset_in_reg, mm_u32 size_bytes);
+static mm_bool bank_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out);
+static mm_bool bank_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value);
+
+static mm_u32 access_default_bits(void)
+{
+    return ACCESS_BITS_SP | ACCESS_BITS_SU | ACCESS_BITS_NSP | ACCESS_BITS_NSU;
+}
+
+static void access_ctrl_reset(void)
+{
+    mm_u32 def = access_default_bits();
+    size_t i;
+    access_ctrl.lock = 0u;
+    access_ctrl.force_core_ns = 0u;
+    access_ctrl.gpio_mask0 = 0xffffffffu;
+    access_ctrl.gpio_mask1 = 0xffffffffu;
+    access_ctrl.rom = def;
+    access_ctrl.xip_main = def;
+    for (i = 0; i < 10u; ++i) {
+        access_ctrl.sram[i] = def;
+    }
+    access_ctrl.dma = def;
+    access_ctrl.usbctrl = def;
+    access_ctrl.pio0 = def;
+    access_ctrl.pio1 = def;
+    access_ctrl.pio2 = def;
+    access_ctrl.coresight_trace = def;
+    access_ctrl.coresight_periph = def;
+    access_ctrl.sysinfo = def;
+    access_ctrl.resets = def;
+    access_ctrl.io_bank0 = def;
+    access_ctrl.io_bank1 = def;
+    access_ctrl.pads_bank0 = def;
+    access_ctrl.pads_qspi = def;
+    access_ctrl.busctrl = def;
+    access_ctrl.adc = def;
+    access_ctrl.hstx = def;
+    access_ctrl.i2c0 = def;
+    access_ctrl.i2c1 = def;
+    access_ctrl.pwm = def;
+    access_ctrl.spi0 = def;
+    access_ctrl.spi1 = def;
+    access_ctrl.timer0 = def;
+    access_ctrl.timer1 = def;
+    access_ctrl.uart0 = def;
+    access_ctrl.uart1 = def;
+    access_ctrl.otp = def;
+    access_ctrl.tbman = def;
+    access_ctrl.powman = def;
+    access_ctrl.trng = def;
+    access_ctrl.sha256 = def;
+    access_ctrl.syscfg = def;
+    access_ctrl.clocks = def;
+    access_ctrl.xosc = def;
+    access_ctrl.rosc = def;
+    access_ctrl.pll_sys = def;
+    access_ctrl.pll_usb = def;
+    access_ctrl.ticks = def;
+    access_ctrl.watchdog = def;
+    access_ctrl.psm = def;
+    access_ctrl.xip_ctrl = def;
+    access_ctrl.xip_qmi = def;
+    access_ctrl.xip_aux = def;
+}
+
+static mm_u32 access_mask_lo(enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? access_ctrl.gpio_mask0 : 0xffffffffu;
+}
+
+static mm_u32 access_mask_hi(enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? access_ctrl.gpio_mask1 : 0xffffffffu;
+}
+
+static mm_u32 *access_ctrl_reg_for_offset(mm_u32 offset, mm_bool *is_mask_out)
+{
+    if (is_mask_out != 0) *is_mask_out = MM_FALSE;
+    switch (offset) {
+    case ACCESS_CONTROL_LOCK: return &access_ctrl.lock;
+    case ACCESS_CONTROL_FORCE_CORE_NS: return &access_ctrl.force_core_ns;
+    case ACCESS_CONTROL_CFGRESET: return 0;
+    case ACCESS_CONTROL_GPIOMASK0: if (is_mask_out) *is_mask_out = MM_TRUE; return &access_ctrl.gpio_mask0;
+    case ACCESS_CONTROL_GPIOMASK1: if (is_mask_out) *is_mask_out = MM_TRUE; return &access_ctrl.gpio_mask1;
+    case ACCESS_CONTROL_ROM: return &access_ctrl.rom;
+    case ACCESS_CONTROL_XIP_MAIN: return &access_ctrl.xip_main;
+    case ACCESS_CONTROL_DMA: return &access_ctrl.dma;
+    case ACCESS_CONTROL_USBCTRL: return &access_ctrl.usbctrl;
+    case ACCESS_CONTROL_PIO0: return &access_ctrl.pio0;
+    case ACCESS_CONTROL_PIO1: return &access_ctrl.pio1;
+    case ACCESS_CONTROL_PIO2: return &access_ctrl.pio2;
+    case ACCESS_CONTROL_CORESIGHT_TRACE: return &access_ctrl.coresight_trace;
+    case ACCESS_CONTROL_CORESIGHT_PERIPH: return &access_ctrl.coresight_periph;
+    case ACCESS_CONTROL_SYSINFO: return &access_ctrl.sysinfo;
+    case ACCESS_CONTROL_RESETS: return &access_ctrl.resets;
+    case ACCESS_CONTROL_IO_BANK0: return &access_ctrl.io_bank0;
+    case ACCESS_CONTROL_IO_BANK1: return &access_ctrl.io_bank1;
+    case ACCESS_CONTROL_PADS_BANK0: return &access_ctrl.pads_bank0;
+    case ACCESS_CONTROL_PADS_QSPI: return &access_ctrl.pads_qspi;
+    case ACCESS_CONTROL_BUSCTRL: return &access_ctrl.busctrl;
+    case ACCESS_CONTROL_ADC: return &access_ctrl.adc;
+    case ACCESS_CONTROL_HSTX: return &access_ctrl.hstx;
+    case ACCESS_CONTROL_I2C0: return &access_ctrl.i2c0;
+    case ACCESS_CONTROL_I2C1: return &access_ctrl.i2c1;
+    case ACCESS_CONTROL_PWM: return &access_ctrl.pwm;
+    case ACCESS_CONTROL_SPI0: return &access_ctrl.spi0;
+    case ACCESS_CONTROL_SPI1: return &access_ctrl.spi1;
+    case ACCESS_CONTROL_TIMER0: return &access_ctrl.timer0;
+    case ACCESS_CONTROL_TIMER1: return &access_ctrl.timer1;
+    case ACCESS_CONTROL_UART0: return &access_ctrl.uart0;
+    case ACCESS_CONTROL_UART1: return &access_ctrl.uart1;
+    case ACCESS_CONTROL_OTP: return &access_ctrl.otp;
+    case ACCESS_CONTROL_TBMAN: return &access_ctrl.tbman;
+    case ACCESS_CONTROL_POWMAN: return &access_ctrl.powman;
+    case ACCESS_CONTROL_TRNG: return &access_ctrl.trng;
+    case ACCESS_CONTROL_SHA256: return &access_ctrl.sha256;
+    case ACCESS_CONTROL_SYSCFG: return &access_ctrl.syscfg;
+    case ACCESS_CONTROL_CLOCKS: return &access_ctrl.clocks;
+    case ACCESS_CONTROL_XOSC: return &access_ctrl.xosc;
+    case ACCESS_CONTROL_ROSC: return &access_ctrl.rosc;
+    case ACCESS_CONTROL_PLL_SYS: return &access_ctrl.pll_sys;
+    case ACCESS_CONTROL_PLL_USB: return &access_ctrl.pll_usb;
+    case ACCESS_CONTROL_TICKS: return &access_ctrl.ticks;
+    case ACCESS_CONTROL_WATCHDOG: return &access_ctrl.watchdog;
+    case ACCESS_CONTROL_PSM: return &access_ctrl.psm;
+    case ACCESS_CONTROL_XIP_CTRL: return &access_ctrl.xip_ctrl;
+    case ACCESS_CONTROL_XIP_QMI: return &access_ctrl.xip_qmi;
+    case ACCESS_CONTROL_XIP_AUX: return &access_ctrl.xip_aux;
+    default:
+        break;
+    }
+    if (offset >= ACCESS_CONTROL_SRAM_BASE && offset < ACCESS_CONTROL_SRAM_BASE + 10u * 4u) {
+        mm_u32 idx = (offset - ACCESS_CONTROL_SRAM_BASE) / 4u;
+        return &access_ctrl.sram[idx];
+    }
+    return 0;
+}
+
+static mm_u32 access_ctrl_reg_for_addr(mm_u32 addr)
+{
+    if (addr < BOOTROM_BASE + BOOTROM_SIZE) return access_ctrl.rom;
+    if (rp2350_flash.flash_size != 0u &&
+        addr >= RP2350_FLASH_BASE_S &&
+        addr < RP2350_FLASH_BASE_S + rp2350_flash.flash_size) {
+        return access_ctrl.xip_main;
+    }
+    if (addr >= RP2350_RAM_BASE_S && addr < RP2350_RAM_BASE_S + RP2350_RAM_SIZE) {
+        mm_u32 offs = addr - RP2350_RAM_BASE_S;
+        if (offs < 0x80000u) {
+            return access_ctrl.sram[(offs / 0x10000u) & 0x7u];
+        }
+        if (offs >= 0x80000u && offs < 0x81000u) {
+            return access_ctrl.sram[8];
+        }
+        if (offs >= 0x81000u && offs < 0x82000u) {
+            return access_ctrl.sram[9];
+        }
+    }
+    if (addr >= RESETS_BASE && addr < RESETS_BASE + RESETS_SIZE) return access_ctrl.resets;
+    if (addr >= CLOCKS_BASE && addr < CLOCKS_BASE + CLOCKS_SIZE) return access_ctrl.clocks;
+    if (addr >= IO_BANK0_BASE && addr < IO_BANK0_BASE + IO_BANK0_SIZE) return access_ctrl.io_bank0;
+    if (addr >= IO_QSPI_BASE && addr < IO_QSPI_BASE + IO_QSPI_SIZE) return access_ctrl.io_bank1;
+    if (addr >= PADS_BANK0_BASE && addr < PADS_BANK0_BASE + PADS_BANK0_SIZE) return access_ctrl.pads_bank0;
+    if (addr >= PADS_QSPI_BASE && addr < PADS_QSPI_BASE + PADS_QSPI_SIZE) return access_ctrl.pads_qspi;
+    if (addr >= XIP_CTRL_BASE && addr < XIP_CTRL_BASE + XIP_CTRL_SIZE) return access_ctrl.xip_ctrl;
+    if (addr >= XIP_AUX_BASE && addr < XIP_AUX_BASE + XIP_AUX_SIZE) return access_ctrl.xip_aux;
+    if (addr >= BOOTRAM_BASE && addr < BOOTRAM_BASE + BOOTRAM_SIZE) return 0u;
+    if (addr >= TIMER0_BASE && addr < TIMER0_BASE + TIMER0_SIZE) return access_ctrl.timer0;
+    if (addr >= TIMER1_BASE && addr < TIMER1_BASE + TIMER1_SIZE) return access_ctrl.timer1;
+    if (addr >= UART0_BASE && addr < UART0_BASE + UART_SIZE) return access_ctrl.uart0;
+    if (addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) return access_ctrl.uart1;
+    if (addr >= SPI0_BASE && addr < SPI0_BASE + SPI_SIZE) return access_ctrl.spi0;
+    if (addr >= SPI1_BASE && addr < SPI1_BASE + SPI_SIZE) return access_ctrl.spi1;
+    if (addr >= USB_BASE && addr < USB_BASE + USB_SIZE) return access_ctrl.usbctrl;
+    if (addr >= USB_DPRAM_BASE && addr < USB_DPRAM_BASE + USB_DPRAM_SIZE) return access_ctrl.usbctrl;
+    return 0u;
+}
+
+static mm_bool access_ctrl_allow(mm_u32 reg, enum mm_sec_state sec, mm_bool privileged)
+{
+    mm_u32 bits = reg & 0xffu;
+    if (access_ctrl.force_core_ns != 0u) {
+        sec = MM_NONSECURE;
+    }
+    if (sec == MM_SECURE) {
+        return privileged ? ((bits & ACCESS_BITS_SP) != 0u) : ((bits & ACCESS_BITS_SU) != 0u);
+    }
+    return privileged ? ((bits & ACCESS_BITS_NSP) != 0u) : ((bits & ACCESS_BITS_NSU) != 0u);
+}
+
+static mm_bool access_ctrl_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    mm_u32 *reg;
+    mm_bool is_mask = MM_FALSE;
+    mm_u32 val = 0u;
+    (void)opaque;
+    if (value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    reg = access_ctrl_reg_for_offset(offset & ~3u, &is_mask);
+    if (reg == 0) {
+        val = 0u;
+    } else {
+        val = *reg;
+    }
+    if (!is_mask && (offset != ACCESS_CONTROL_LOCK) && (offset != ACCESS_CONTROL_FORCE_CORE_NS)) {
+        val &= 0xffu;
+    }
+    *value_out = read_slice(val, offset & 3u, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool access_ctrl_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    mm_u32 *reg;
+    mm_bool is_mask = MM_FALSE;
+    (void)opaque;
+    if (size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset & 3u) != 0u || size_bytes != 4u) return MM_FALSE;
+
+    if (offset == ACCESS_CONTROL_CFGRESET) {
+        if ((value & 0xffff0000u) == ACCESS_MAGIC) {
+            access_ctrl_reset();
+        }
+        return MM_TRUE;
+    }
+    if (offset == ACCESS_CONTROL_LOCK) {
+        if ((value & 0xffff0000u) == ACCESS_MAGIC) {
+            access_ctrl.lock = value;
+        }
+        return MM_TRUE;
+    }
+    if (access_ctrl.lock != 0u) {
+        return MM_TRUE;
+    }
+    if ((value & 0xffff0000u) != ACCESS_MAGIC) {
+        return MM_TRUE;
+    }
+    reg = access_ctrl_reg_for_offset(offset, &is_mask);
+    if (reg == 0) return MM_TRUE;
+    if (is_mask) {
+        *reg = value;
+    } else if (offset == ACCESS_CONTROL_FORCE_CORE_NS) {
+        *reg = value;
+    } else {
+        *reg = value & 0xffu;
+    }
+    return MM_TRUE;
+}
+
+static mm_u32 read_slice(mm_u32 reg, mm_u32 offset_in_reg, mm_u32 size_bytes)
+{
+    mm_u32 shift = offset_in_reg * 8u;
+    mm_u32 mask = (size_bytes == 4u) ? 0xffffffffu : ((1u << (size_bytes * 8u)) - 1u);
+    return (reg >> shift) & mask;
+}
+
+static mm_u32 apply_write(mm_u32 cur, mm_u32 offset_in_reg, mm_u32 size_bytes, mm_u32 value)
+{
+    mm_u32 shift = offset_in_reg * 8u;
+    mm_u32 mask = (size_bytes == 4u) ? 0xffffffffu : ((1u << (size_bytes * 8u)) - 1u);
+    mm_u32 shifted = (value & mask) << shift;
+    return (cur & ~(mask << shift)) | shifted;
+}
+
+static mm_u32 alias_base_offset(mm_u32 offset, mm_u32 *alias_out)
+{
+    mm_u32 alias = 0u;
+    mm_u32 base = offset;
+    if (offset >= 0x1000u && offset < MMIO_ALIAS_SIZE) {
+        alias = (offset >> 12) & 0x3u;
+        base = offset & 0xfffu;
+    }
+    if (alias_out != 0) {
+        *alias_out = alias;
+    }
+    return base;
+}
+
+static mm_u32 alias_value(mm_u32 offset_in_reg, mm_u32 size_bytes, mm_u32 value)
+{
+    return apply_write(0u, offset_in_reg, size_bytes, value);
+}
+
+static void xosc_update_status(void)
+{
+    mm_u32 ctrl = xosc.regs[0];
+    mm_u32 enable = (ctrl >> 12) & 0xfffu;
+    mm_u32 freq = ctrl & 0xfffu;
+    mm_u32 status = 0u;
+    if (enable == 0x0fabu) {
+        status |= (1u << 12) | (1u << 31);
+    }
+    switch (freq) {
+    case 0x0aa0u: status |= 0u; break;
+    case 0x0aa1u: status |= 1u; break;
+    case 0x0aa2u: status |= 2u; break;
+    case 0x0aa3u: status |= 3u; break;
+    default: break;
+    }
+    xosc.regs[1] = status;
+}
+
+static void ticks_update_block(struct bank_regs *t)
+{
+    mm_u32 ctrl;
+    mm_u32 cycles;
+    int i;
+    if (t == 0) return;
+    for (i = 0; i < 6; ++i) {
+        mm_u32 ctrl_idx = (mm_u32)(i * 3);
+        mm_u32 cycles_idx = ctrl_idx + 1u;
+        mm_u32 count_idx = ctrl_idx + 2u;
+        ctrl = t->regs[ctrl_idx] & 0x3u;
+        cycles = t->regs[cycles_idx] & 0x1ffu;
+        if ((ctrl & 0x1u) != 0u) {
+            ctrl |= 0x2u;
+            if (cycles != 0u) {
+                t->regs[count_idx] = cycles;
+            } else {
+                t->regs[count_idx] = 0u;
+            }
+        } else {
+            ctrl &= ~0x2u;
+            t->regs[count_idx] = 0u;
+        }
+        t->regs[ctrl_idx] = ctrl;
+    }
+}
+
+static mm_bool bootram_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    mm_u32 lock_idx;
+    mm_u32 lock_mask;
+    if (b == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > BOOTRAM_SIZE) return MM_FALSE;
+    if (size_bytes != 4u) {
+        return bank_read(b, offset, size_bytes, value_out);
+    }
+    if (offset == BOOTRAM_BOOTLOCK_STAT) {
+        *value_out = b->regs[offset / 4u] & 0xffu;
+        return MM_TRUE;
+    }
+    if (offset >= BOOTRAM_BOOTLOCK0 && offset <= BOOTRAM_BOOTLOCK7) {
+        lock_idx = (offset - BOOTRAM_BOOTLOCK0) / 4u;
+        lock_mask = 1u << lock_idx;
+        if ((b->regs[BOOTRAM_BOOTLOCK_STAT / 4u] & lock_mask) != 0u) {
+            b->regs[BOOTRAM_BOOTLOCK_STAT / 4u] &= ~lock_mask;
+            *value_out = lock_mask;
+        } else {
+            *value_out = 0u;
+        }
+        return MM_TRUE;
+    }
+    *value_out = b->regs[offset / 4u];
+    return MM_TRUE;
+}
+
+static mm_bool bootram_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    mm_u32 lock_idx;
+    mm_u32 lock_mask;
+    if (b == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > BOOTRAM_SIZE) return MM_FALSE;
+    if (size_bytes != 4u) {
+        return bank_write(b, offset, size_bytes, value);
+    }
+    if (offset == BOOTRAM_WRITE_ONCE0 || offset == BOOTRAM_WRITE_ONCE1) {
+        b->regs[offset / 4u] |= value;
+        return MM_TRUE;
+    }
+    if (offset == BOOTRAM_BOOTLOCK_STAT) {
+        b->regs[offset / 4u] = value & 0xffu;
+        return MM_TRUE;
+    }
+    if (offset >= BOOTRAM_BOOTLOCK0 && offset <= BOOTRAM_BOOTLOCK7) {
+        lock_idx = (offset - BOOTRAM_BOOTLOCK0) / 4u;
+        lock_mask = 1u << lock_idx;
+        b->regs[BOOTRAM_BOOTLOCK_STAT / 4u] |= lock_mask;
+        b->regs[offset / 4u] = 0u;
+        return MM_TRUE;
+    }
+    b->regs[offset / 4u] = value;
+    return MM_TRUE;
+}
+
+static void pll_update_status(struct bank_regs *pll)
+{
+    mm_u32 pwr;
+    if (pll == 0) return;
+    pwr = pll->regs[1];
+    if ((pwr & 0x1u) == 0u && (pwr & 0x20u) == 0u) {
+        pll->regs[0] |= (1u << 31);
+    } else {
+        pll->regs[0] &= ~(1u << 31);
+    }
+}
+
+static mm_u32 reset_mask(void)
+{
+    return 0xffffffffu;
+}
+
+mm_bool mm_rp2350_reset_asserted(mm_u32 mask)
+{
+    return ((resets.regs[RESETS_RESET / 4u] & mask) != 0u) ? MM_TRUE : MM_FALSE;
+}
+
+mm_bool mm_rp2350_clock_peri_enabled(void)
+{
+    mm_u32 reg = clocks.regs[CLK_PERI_CTRL / 4u];
+    mm_bool kill = ((reg >> CLK_PERI_CTRL_KILL_BIT) & 1u) != 0u;
+    mm_bool enable = ((reg >> CLK_PERI_CTRL_ENABLE_BIT) & 1u) != 0u;
+    return (enable && !kill) ? MM_TRUE : MM_FALSE;
+}
+
+mm_bool mm_rp2350_active(void)
+{
+    return rp2350_active;
+}
+
+static void sio_sync_inputs(void)
+{
+    sio.in_lo = sio.out_lo;
+    sio.in_hi = sio.out_hi;
+}
+
+static mm_bool resets_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct reset_state *r = (struct reset_state *)opaque;
+    mm_u32 val;
+    mm_u32 alias;
+    mm_u32 base_off;
+    if (r == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > RESETS_SIZE) return MM_FALSE;
+    if (base_off == RESETS_RESET_DONE && size_bytes == 4u) {
+        val = ~r->regs[RESETS_RESET / 4u];
+        val &= reset_mask();
+        *value_out = val;
+        return MM_TRUE;
+    }
+    (void)alias;
+    *value_out = read_slice(r->regs[base_off / 4u], base_off & 3u, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool resets_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct reset_state *r = (struct reset_state *)opaque;
+    mm_u32 alias;
+    mm_u32 base_off;
+    mm_u32 mask;
+    if (r == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > RESETS_SIZE) return MM_FALSE;
+    if (alias == 0u) {
+        if (base_off == RESETS_RESET && size_bytes == 4u) {
+            r->regs[RESETS_RESET / 4u] = value;
+            return MM_TRUE;
+        }
+        r->regs[base_off / 4u] = apply_write(r->regs[base_off / 4u], base_off & 3u, size_bytes, value);
+        return MM_TRUE;
+    }
+    mask = alias_value(base_off & 3u, size_bytes, value);
+    switch (alias) {
+    case 1u:
+        r->regs[base_off / 4u] ^= mask;
+        break;
+    case 2u:
+        r->regs[base_off / 4u] |= mask;
+        break;
+    case 3u:
+        r->regs[base_off / 4u] &= ~mask;
+        break;
+    default:
+        break;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool clocks_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct clock_state *c = (struct clock_state *)opaque;
+    mm_u32 val;
+    mm_u32 alias;
+    mm_u32 base_off;
+    if (c == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > CLOCKS_SIZE) return MM_FALSE;
+    if (base_off == CLK_PERI_CTRL && size_bytes == 4u) {
+        val = c->regs[CLK_PERI_CTRL / 4u];
+        if (mm_rp2350_clock_peri_enabled()) {
+            val |= (1u << CLK_PERI_CTRL_ENABLED_BIT);
+        } else {
+            val &= ~(1u << CLK_PERI_CTRL_ENABLED_BIT);
+        }
+        *value_out = val;
+        return MM_TRUE;
+    }
+    if (base_off == CLK_REF_SELECTED && size_bytes == 4u) {
+        mm_u32 src = c->regs[CLK_REF_CTRL / 4u] & 0x3u;
+        *value_out = (1u << src);
+        return MM_TRUE;
+    }
+    if (base_off == CLK_SYS_SELECTED && size_bytes == 4u) {
+        mm_u32 src = c->regs[CLK_SYS_CTRL / 4u] & 0x3u;
+        *value_out = (1u << src);
+        return MM_TRUE;
+    }
+
+    (void)alias;
+    *value_out = read_slice(c->regs[base_off / 4u], base_off & 3u, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool clocks_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct clock_state *c = (struct clock_state *)opaque;
+    mm_u32 alias;
+    mm_u32 base_off;
+    mm_u32 mask;
+    if (c == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > CLOCKS_SIZE) return MM_FALSE;
+    if (alias == 0u) {
+        c->regs[base_off / 4u] = apply_write(c->regs[base_off / 4u], base_off & 3u, size_bytes, value);
+        return MM_TRUE;
+    }
+    mask = alias_value(base_off & 3u, size_bytes, value);
+    switch (alias) {
+    case 1u:
+        c->regs[base_off / 4u] ^= mask;
+        break;
+    case 2u:
+        c->regs[base_off / 4u] |= mask;
+        break;
+    case 3u:
+        c->regs[base_off / 4u] &= ~mask;
+        break;
+    default:
+        break;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool sio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct sio_state *s = (struct sio_state *)opaque;
+    enum mm_sec_state sec = mmio_active_sec();
+    mm_u32 mask_lo = access_mask_lo(sec);
+    mm_u32 mask_hi = access_mask_hi(sec);
+    mm_u32 val;
+    if (s == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > SIO_SIZE) return MM_FALSE;
+
+    if (offset == SIO_GPIO_IN && size_bytes == 4u) {
+        sio_sync_inputs();
+        *value_out = s->in_lo & mask_lo;
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_IN && size_bytes == 4u) {
+        sio_sync_inputs();
+        *value_out = s->in_hi & mask_hi;
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_OUT && size_bytes == 4u) {
+        *value_out = s->out_lo & mask_lo;
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OUT && size_bytes == 4u) {
+        *value_out = s->out_hi & mask_hi;
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_OE && size_bytes == 4u) {
+        *value_out = s->oe_lo & mask_lo;
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OE && size_bytes == 4u) {
+        *value_out = s->oe_hi & mask_hi;
+        return MM_TRUE;
+    }
+
+    val = read_slice(s->regs[offset / 4u], offset & 3u, size_bytes);
+    *value_out = val;
+    return MM_TRUE;
+}
+
+static void sio_apply_write(mm_u32 *reg, mm_u32 value, mm_u32 kind)
+{
+    if (kind == 0u) {
+        *reg = value;
+    } else if (kind == 1u) {
+        *reg |= value;
+    } else if (kind == 2u) {
+        *reg &= ~value;
+    } else {
+        *reg ^= value;
+    }
+}
+
+static mm_bool sio_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct sio_state *s = (struct sio_state *)opaque;
+    enum mm_sec_state sec = mmio_active_sec();
+    mm_u32 mask_lo = access_mask_lo(sec);
+    mm_u32 mask_hi = access_mask_hi(sec);
+    if (s == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > SIO_SIZE) return MM_FALSE;
+
+    if (offset == SIO_GPIO_OUT && size_bytes == 4u) {
+        sio_apply_write(&s->out_lo, value & mask_lo, 0u);
+        sio_sync_inputs();
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OUT && size_bytes == 4u) {
+        sio_apply_write(&s->out_hi, value & mask_hi, 0u);
+        sio_sync_inputs();
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_OUT_SET && size_bytes == 4u) {
+        sio_apply_write(&s->out_lo, value & mask_lo, 1u);
+        sio_sync_inputs();
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OUT_SET && size_bytes == 4u) {
+        sio_apply_write(&s->out_hi, value & mask_hi, 1u);
+        sio_sync_inputs();
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_OUT_CLR && size_bytes == 4u) {
+        sio_apply_write(&s->out_lo, value & mask_lo, 2u);
+        sio_sync_inputs();
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OUT_CLR && size_bytes == 4u) {
+        sio_apply_write(&s->out_hi, value & mask_hi, 2u);
+        sio_sync_inputs();
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_OUT_XOR && size_bytes == 4u) {
+        sio_apply_write(&s->out_lo, value & mask_lo, 3u);
+        sio_sync_inputs();
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OUT_XOR && size_bytes == 4u) {
+        sio_apply_write(&s->out_hi, value & mask_hi, 3u);
+        sio_sync_inputs();
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_OE && size_bytes == 4u) {
+        sio_apply_write(&s->oe_lo, value & mask_lo, 0u);
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OE && size_bytes == 4u) {
+        sio_apply_write(&s->oe_hi, value & mask_hi, 0u);
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_OE_SET && size_bytes == 4u) {
+        sio_apply_write(&s->oe_lo, value & mask_lo, 1u);
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OE_SET && size_bytes == 4u) {
+        sio_apply_write(&s->oe_hi, value & mask_hi, 1u);
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_OE_CLR && size_bytes == 4u) {
+        sio_apply_write(&s->oe_lo, value & mask_lo, 2u);
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OE_CLR && size_bytes == 4u) {
+        sio_apply_write(&s->oe_hi, value & mask_hi, 2u);
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_OE_XOR && size_bytes == 4u) {
+        sio_apply_write(&s->oe_lo, value & mask_lo, 3u);
+        return MM_TRUE;
+    }
+    if (offset == SIO_GPIO_HI_OE_XOR && size_bytes == 4u) {
+        sio_apply_write(&s->oe_hi, value & mask_hi, 3u);
+        return MM_TRUE;
+    }
+
+    s->regs[offset / 4u] = apply_write(s->regs[offset / 4u], offset & 3u, size_bytes, value);
+    return MM_TRUE;
+}
+
+static mm_bool bank_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    mm_u32 alias;
+    mm_u32 base_off;
+    if (b == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > 0x1000u) return MM_FALSE;
+    (void)alias;
+    *value_out = read_slice(b->regs[base_off / 4u], base_off & 3u, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool bank_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    mm_u32 alias;
+    mm_u32 base_off;
+    mm_u32 mask;
+    if (b == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > 0x1000u) return MM_FALSE;
+    if (alias == 0u) {
+        b->regs[base_off / 4u] = apply_write(b->regs[base_off / 4u], base_off & 3u, size_bytes, value);
+        return MM_TRUE;
+    }
+    mask = alias_value(base_off & 3u, size_bytes, value);
+    switch (alias) {
+    case 1u:
+        b->regs[base_off / 4u] ^= mask;
+        break;
+    case 2u:
+        b->regs[base_off / 4u] |= mask;
+        break;
+    case 3u:
+        b->regs[base_off / 4u] &= ~mask;
+        break;
+    default:
+        break;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool xosc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    (void)opaque;
+    xosc_update_status();
+    return bank_read(&xosc, offset, size_bytes, value_out);
+}
+
+static mm_bool xosc_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    (void)opaque;
+    if (!bank_write(&xosc, offset, size_bytes, value)) return MM_FALSE;
+    xosc_update_status();
+    return MM_TRUE;
+}
+
+static mm_bool pll_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct bank_regs *pll = (struct bank_regs *)opaque;
+    if (pll == 0) return MM_FALSE;
+    pll_update_status(pll);
+    return bank_read(pll, offset, size_bytes, value_out);
+}
+
+static mm_bool pll_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct bank_regs *pll = (struct bank_regs *)opaque;
+    if (pll == 0) return MM_FALSE;
+    if (!bank_write(pll, offset, size_bytes, value)) return MM_FALSE;
+    pll_update_status(pll);
+    return MM_TRUE;
+}
+
+static mm_bool ticks_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    (void)opaque;
+    ticks_update_block(&ticks);
+    return bank_read(&ticks, offset, size_bytes, value_out);
+}
+
+static mm_bool ticks_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    (void)opaque;
+    if (!bank_write(&ticks, offset, size_bytes, value)) return MM_FALSE;
+    ticks_update_block(&ticks);
+    return MM_TRUE;
+}
+
+static mm_u32 gpio_bank_out(int bank)
+{
+    mm_u32 out = 0u;
+    if (bank == 0) {
+        out = sio.out_lo & 0x0000ffffu;
+    } else if (bank == 1) {
+        out = (sio.out_lo >> 16) & 0x0000ffffu;
+    } else if (bank == 2) {
+        out = sio.out_hi & 0x0000ffffu;
+    }
+    return out;
+}
+
+static mm_u32 gpio_bank_moder(int bank)
+{
+    mm_u32 oe = 0u;
+    mm_u32 moder = 0u;
+    mm_u32 pin;
+    if (bank == 0) {
+        oe = sio.oe_lo & 0x0000ffffu;
+    } else if (bank == 1) {
+        oe = (sio.oe_lo >> 16) & 0x0000ffffu;
+    } else if (bank == 2) {
+        oe = sio.oe_hi & 0x0000ffffu;
+    }
+    for (pin = 0; pin < 16u; ++pin) {
+        if ((oe >> pin) & 1u) {
+            moder |= (1u << (pin * 2u));
+        }
+    }
+    return moder;
+}
+
+static mm_u32 rp2350_gpio_bank_read(void *opaque, int bank)
+{
+    (void)opaque;
+    return gpio_bank_out(bank);
+}
+
+static mm_u32 rp2350_gpio_bank_read_moder(void *opaque, int bank)
+{
+    (void)opaque;
+    return gpio_bank_moder(bank);
+}
+
+static mm_bool rp2350_gpio_bank_clock(void *opaque, int bank)
+{
+    (void)opaque;
+    if (bank < 0 || bank > 2) return MM_FALSE;
+    if (mm_rp2350_reset_asserted(RP2350_RESET_IO_BANK0)) return MM_FALSE;
+    return mm_rp2350_clock_peri_enabled();
+}
+
+static mm_bool rp2350_gpio_bank_info(void *opaque, int bank, char *name_out, size_t name_len, int *pins_out)
+{
+    (void)opaque;
+    if (bank < 0 || bank > 2) return MM_FALSE;
+    if (name_out != 0 && name_len > 0u) {
+        int start = bank * 16;
+        int end = start + 15;
+        snprintf(name_out, name_len, "GPIO%d-%d", start, end);
+    }
+    if (pins_out != 0) {
+        *pins_out = 16;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool rp2350_clock_list_line(void *opaque, int line, char *out, size_t out_len)
+{
+    mm_u32 reg;
+    mm_bool peri_on;
+    (void)opaque;
+    if (out == 0 || out_len == 0u) return MM_FALSE;
+    if (line != 0) return MM_FALSE;
+
+    reg = clocks.regs[CLK_PERI_CTRL / 4u];
+    peri_on = ((reg >> CLK_PERI_CTRL_ENABLE_BIT) & 1u) != 0u;
+    if (!peri_on) {
+        return MM_FALSE;
+    }
+    snprintf(out, out_len, "CLOCKS: PERI");
+    return MM_TRUE;
+}
+
+mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus)
+{
+    struct mmio_region reg;
+
+    if (bus == 0) return MM_FALSE;
+
+    rp2350_active = MM_TRUE;
+    mm_rp2350_coproc_reset();
+
+    memset(&reg, 0, sizeof(reg));
+    reg.size = BOOTROM_SIZE;
+    reg.base = BOOTROM_BASE;
+    reg.opaque = 0;
+    reg.read = mm_rp2350_bootrom_read;
+    reg.write = mm_rp2350_bootrom_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    memset(&reg, 0, sizeof(reg));
+    reg.size = ACCESS_CTRL_SIZE;
+    reg.base = ACCESS_CTRL_BASE;
+    reg.opaque = 0;
+    reg.read = access_ctrl_read;
+    reg.write = access_ctrl_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    memset(&reg, 0, sizeof(reg));
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = RESETS_BASE;
+    reg.opaque = &resets;
+    reg.read = resets_read;
+    reg.write = resets_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = CLOCKS_BASE;
+    reg.opaque = &clocks;
+    reg.read = clocks_read;
+    reg.write = clocks_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = SIO_SIZE;
+    reg.base = SIO_BASE;
+    reg.opaque = &sio;
+    reg.read = sio_read;
+    reg.write = sio_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = IO_BANK0_BASE;
+    reg.opaque = &io_bank0;
+    reg.read = bank_read;
+    reg.write = bank_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = IO_QSPI_BASE;
+    reg.opaque = &io_qspi;
+    reg.read = bank_read;
+    reg.write = bank_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = PADS_BANK0_BASE;
+    reg.opaque = &pads_bank0;
+    reg.read = bank_read;
+    reg.write = bank_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = PADS_QSPI_BASE;
+    reg.opaque = &pads_qspi;
+    reg.read = bank_read;
+    reg.write = bank_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = XOSC_BASE;
+    reg.opaque = &xosc;
+    reg.read = xosc_read;
+    reg.write = xosc_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = PLL_SYS_BASE;
+    reg.opaque = &pll_sys;
+    reg.read = pll_read;
+    reg.write = pll_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = PLL_USB_BASE;
+    reg.opaque = &pll_usb;
+    reg.read = pll_read;
+    reg.write = pll_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = XIP_CTRL_BASE;
+    reg.opaque = &xip_ctrl;
+    reg.read = bank_read;
+    reg.write = bank_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = XIP_AUX_BASE;
+    reg.opaque = &xip_aux;
+    reg.read = bank_read;
+    reg.write = bank_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = BOOTRAM_SIZE;
+    reg.base = BOOTRAM_BASE;
+    reg.opaque = &bootram;
+    reg.read = bootram_read;
+    reg.write = bootram_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = TICKS_SIZE;
+    reg.base = TICKS_BASE;
+    reg.opaque = &ticks;
+    reg.read = ticks_read;
+    reg.write = ticks_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    if (!mm_rp2350_usb_register_mmio(bus)) return MM_FALSE;
+
+    mm_gpio_bank_set_reader(rp2350_gpio_bank_read, 0);
+    mm_gpio_bank_set_moder_reader(rp2350_gpio_bank_read_moder, 0);
+    mm_gpio_bank_set_clock_reader(rp2350_gpio_bank_clock, 0);
+    mm_gpio_set_bank_info_reader(rp2350_gpio_bank_info, 0);
+    mm_rcc_set_clock_list_reader(rp2350_clock_list_line, 0);
+
+    return MM_TRUE;
+}
+
+void mm_rp2350_mmio_reset(void)
+{
+    memset(&resets, 0, sizeof(resets));
+    memset(&clocks, 0, sizeof(clocks));
+    memset(&sio, 0, sizeof(sio));
+    memset(&io_bank0, 0, sizeof(io_bank0));
+    memset(&io_qspi, 0, sizeof(io_qspi));
+    memset(&pads_bank0, 0, sizeof(pads_bank0));
+    memset(&pads_qspi, 0, sizeof(pads_qspi));
+    memset(&xosc, 0, sizeof(xosc));
+    memset(&pll_sys, 0, sizeof(pll_sys));
+    memset(&pll_usb, 0, sizeof(pll_usb));
+    memset(&xip_ctrl, 0, sizeof(xip_ctrl));
+    memset(&xip_aux, 0, sizeof(xip_aux));
+    memset(&bootram, 0, sizeof(bootram));
+    bootram.regs[BOOTRAM_BOOTLOCK_STAT / 4u] = 0xffu;
+    memset(&ticks, 0, sizeof(ticks));
+    mm_rp2350_usb_reset();
+    mm_rp2350_coproc_reset();
+    access_ctrl_reset();
+
+    resets.regs[RESETS_RESET / 4u] = 0u;
+    resets.regs[RESETS_RESET_DONE / 4u] = reset_mask();
+
+    clocks.regs[CLK_PERI_CTRL / 4u] = (1u << CLK_PERI_CTRL_ENABLE_BIT);
+    clocks.regs[CLK_REF_SELECTED / 4u] = 1u;
+    clocks.regs[CLK_SYS_SELECTED / 4u] = 1u;
+}
+
+static mm_u32 cp0_mask_apply(mm_u32 current, mm_u32 value, mm_u8 op)
+{
+    switch (op & 0x3u) {
+    case 0u: return value;
+    case 1u: return current ^ value;
+    case 2u: return current | value;
+    case 3u: return current & ~value;
+    default: return current;
+    }
+}
+
+static void cp0_apply_out_mask(mm_bool hi, mm_u32 value, mm_u8 op, mm_u32 allowed)
+{
+    value &= allowed;
+    if (hi) {
+        sio.out_hi = cp0_mask_apply(sio.out_hi, value, op);
+    } else {
+        sio.out_lo = cp0_mask_apply(sio.out_lo, value, op);
+    }
+    sio_sync_inputs();
+}
+
+static void cp0_apply_oe_mask(mm_bool hi, mm_u32 value, mm_u8 op, mm_u32 allowed)
+{
+    value &= allowed;
+    if (hi) {
+        sio.oe_hi = cp0_mask_apply(sio.oe_hi, value, op);
+    } else {
+        sio.oe_lo = cp0_mask_apply(sio.oe_lo, value, op);
+    }
+}
+
+static void cp0_apply_out_mask_64(mm_u32 lo, mm_u32 hi, mm_u8 op, mm_u32 allowed_lo, mm_u32 allowed_hi)
+{
+    sio.out_lo = cp0_mask_apply(sio.out_lo, lo & allowed_lo, op);
+    sio.out_hi = cp0_mask_apply(sio.out_hi, hi & allowed_hi, op);
+    sio_sync_inputs();
+}
+
+static void cp0_apply_oe_mask_64(mm_u32 lo, mm_u32 hi, mm_u8 op, mm_u32 allowed_lo, mm_u32 allowed_hi)
+{
+    sio.oe_lo = cp0_mask_apply(sio.oe_lo, lo & allowed_lo, op);
+    sio.oe_hi = cp0_mask_apply(sio.oe_hi, hi & allowed_hi, op);
+}
+
+static void cp0_apply_out_bit(mm_u8 bit, mm_u8 op, mm_bool conditional, mm_u32 cond_val, mm_u32 allowed_lo, mm_u32 allowed_hi)
+{
+    mm_u64 mask;
+    if (bit >= 64u) return;
+    if (bit < 32u) {
+        if (((allowed_lo >> bit) & 1u) == 0u) return;
+    } else {
+        if (((allowed_hi >> (bit - 32u)) & 1u) == 0u) return;
+    }
+    if (conditional && ((cond_val & 1u) == 0u)) return;
+    mask = 1ull << bit;
+    if (op == 0u) {
+        if ((cond_val & 1u) != 0u) {
+            cp0_apply_out_mask_64((mm_u32)mask, (mm_u32)(mask >> 32), 2u, allowed_lo, allowed_hi);
+        } else {
+            cp0_apply_out_mask_64((mm_u32)mask, (mm_u32)(mask >> 32), 3u, allowed_lo, allowed_hi);
+        }
+        return;
+    }
+    cp0_apply_out_mask_64((mm_u32)mask, (mm_u32)(mask >> 32), op, allowed_lo, allowed_hi);
+}
+
+static void cp0_apply_oe_bit(mm_u8 bit, mm_u8 op, mm_bool conditional, mm_u32 cond_val, mm_u32 allowed_lo, mm_u32 allowed_hi)
+{
+    mm_u64 mask;
+    if (bit >= 64u) return;
+    if (bit < 32u) {
+        if (((allowed_lo >> bit) & 1u) == 0u) return;
+    } else {
+        if (((allowed_hi >> (bit - 32u)) & 1u) == 0u) return;
+    }
+    if (conditional && ((cond_val & 1u) == 0u)) return;
+    mask = 1ull << bit;
+    if (op == 0u) {
+        if ((cond_val & 1u) != 0u) {
+            cp0_apply_oe_mask_64((mm_u32)mask, (mm_u32)(mask >> 32), 2u, allowed_lo, allowed_hi);
+        } else {
+            cp0_apply_oe_mask_64((mm_u32)mask, (mm_u32)(mask >> 32), 3u, allowed_lo, allowed_hi);
+        }
+        return;
+    }
+    cp0_apply_oe_mask_64((mm_u32)mask, (mm_u32)(mask >> 32), op, allowed_lo, allowed_hi);
+}
+
+mm_bool mm_rp2350_cp0_mcr(enum mm_sec_state sec, mm_u8 op1, mm_u8 crn, mm_u8 crm, mm_u8 op2, mm_u32 value)
+{
+    mm_u8 group;
+    mm_bool hi;
+    mm_u32 allowed_lo = access_mask_lo(sec);
+    mm_u32 allowed_hi = access_mask_hi(sec);
+    (void)op2;
+    if (!rp2350_active) return MM_FALSE;
+    if ((crn & 0x0fu) != 0u) return MM_FALSE;
+    group = (mm_u8)((crm >> 2) & 0x3u);
+    hi = (crm & 1u) != 0u;
+    if (group == 0u) {
+        if (op1 <= 3u) {
+            cp0_apply_out_mask(hi, value, op1, hi ? allowed_hi : allowed_lo);
+            return MM_TRUE;
+        }
+        if (op1 >= 5u && op1 <= 7u) {
+            cp0_apply_out_bit((mm_u8)(value & 0x3fu), (mm_u8)(op1 - 4u), MM_FALSE, 1u, allowed_lo, allowed_hi);
+            return MM_TRUE;
+        }
+    } else if (group == 1u) {
+        if (op1 <= 3u) {
+            cp0_apply_oe_mask(hi, value, op1, hi ? allowed_hi : allowed_lo);
+            return MM_TRUE;
+        }
+        if (op1 >= 5u && op1 <= 7u) {
+            cp0_apply_oe_bit((mm_u8)(value & 0x3fu), (mm_u8)(op1 - 4u), MM_FALSE, 1u, allowed_lo, allowed_hi);
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
+mm_bool mm_rp2350_cp0_mrc(enum mm_sec_state sec, mm_u8 op1, mm_u8 crn, mm_u8 crm, mm_u8 op2, mm_u32 *value_out)
+{
+    mm_u8 group;
+    mm_bool hi;
+    mm_u32 mask;
+    (void)op2;
+    if (!rp2350_active || value_out == 0) return MM_FALSE;
+    if ((crn & 0x0fu) != 0u) return MM_FALSE;
+    if (op1 != 0u) return MM_FALSE;
+    group = (mm_u8)((crm >> 2) & 0x3u);
+    hi = (crm & 1u) != 0u;
+    mask = hi ? access_mask_hi(sec) : access_mask_lo(sec);
+    switch (group) {
+    case 0u:
+        *value_out = (hi ? sio.out_hi : sio.out_lo) & mask;
+        return MM_TRUE;
+    case 1u:
+        *value_out = (hi ? sio.oe_hi : sio.oe_lo) & mask;
+        return MM_TRUE;
+    case 2u:
+        sio_sync_inputs();
+        *value_out = (hi ? sio.in_hi : sio.in_lo) & mask;
+        return MM_TRUE;
+    default:
+        break;
+    }
+    return MM_FALSE;
+}
+
+mm_bool mm_rp2350_cp0_mcrr(enum mm_sec_state sec, mm_u8 op1, mm_u8 crm, mm_u32 lo, mm_u32 hi)
+{
+    mm_u8 group;
+    mm_u32 allowed_lo = access_mask_lo(sec);
+    mm_u32 allowed_hi = access_mask_hi(sec);
+    if (!rp2350_active) return MM_FALSE;
+    group = (mm_u8)((crm >> 2) & 0x3u);
+    if (group == 0u) {
+        if (op1 <= 3u) {
+            cp0_apply_out_mask_64(lo, hi, op1, allowed_lo, allowed_hi);
+            return MM_TRUE;
+        }
+        if (op1 >= 4u && op1 <= 7u) {
+            mm_u8 bit = (mm_u8)(lo & 0x3fu);
+            mm_bool conditional = (op1 >= 5u);
+            mm_u8 op = (op1 == 4u) ? 0u : (mm_u8)(op1 - 4u);
+            cp0_apply_out_bit(bit, op, conditional, hi, allowed_lo, allowed_hi);
+            return MM_TRUE;
+        }
+        if (op1 >= 8u && op1 <= 11u) {
+            mm_bool sel_hi = (hi & 1u) != 0u;
+            cp0_apply_out_mask(sel_hi, lo, (mm_u8)(op1 - 8u), sel_hi ? allowed_hi : allowed_lo);
+            return MM_TRUE;
+        }
+    } else if (group == 1u) {
+        if (op1 <= 3u) {
+            cp0_apply_oe_mask_64(lo, hi, op1, allowed_lo, allowed_hi);
+            return MM_TRUE;
+        }
+        if (op1 >= 4u && op1 <= 7u) {
+            mm_u8 bit = (mm_u8)(lo & 0x3fu);
+            mm_bool conditional = (op1 >= 5u);
+            mm_u8 op = (op1 == 4u) ? 0u : (mm_u8)(op1 - 4u);
+            cp0_apply_oe_bit(bit, op, conditional, hi, allowed_lo, allowed_hi);
+            return MM_TRUE;
+        }
+        if (op1 >= 8u && op1 <= 11u) {
+            mm_bool sel_hi = (hi & 1u) != 0u;
+            cp0_apply_oe_mask(sel_hi, lo, (mm_u8)(op1 - 8u), sel_hi ? allowed_hi : allowed_lo);
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
+mm_bool mm_rp2350_cp0_mrrc(enum mm_sec_state sec, mm_u8 op1, mm_u8 crm, mm_u32 *lo_out, mm_u32 *hi_out)
+{
+    mm_u8 group;
+    mm_u32 mask_lo = access_mask_lo(sec);
+    mm_u32 mask_hi = access_mask_hi(sec);
+    if (!rp2350_active || lo_out == 0 || hi_out == 0) return MM_FALSE;
+    if (op1 != 0u) return MM_FALSE;
+    group = (mm_u8)((crm >> 2) & 0x3u);
+    switch (group) {
+    case 0u:
+        *lo_out = sio.out_lo & mask_lo;
+        *hi_out = sio.out_hi & mask_hi;
+        return MM_TRUE;
+    case 1u:
+        *lo_out = sio.oe_lo & mask_lo;
+        *hi_out = sio.oe_hi & mask_hi;
+        return MM_TRUE;
+    case 2u:
+        sio_sync_inputs();
+        *lo_out = sio.in_lo & mask_lo;
+        *hi_out = sio.in_hi & mask_hi;
+        return MM_TRUE;
+    default:
+        break;
+    }
+    return MM_FALSE;
+}
+
+void mm_rp2350_flash_bind(struct mm_memmap *map,
+                          mm_u8 *flash,
+                          mm_u32 flash_size,
+                          const struct mm_flash_persist *persist,
+                          mm_u32 flags)
+{
+    (void)flags;
+    (void)map;
+    rp2350_flash.flash = flash;
+    rp2350_flash.flash_size = flash_size;
+    rp2350_flash.persist = persist;
+}
+
+mm_u64 mm_rp2350_cpu_hz(void)
+{
+    return 125000000ull;
+}
+
+mm_bool mm_rp2350_access_check(mm_u32 addr, enum mm_sec_state sec, mm_bool privileged)
+{
+    mm_u32 reg;
+    if (!rp2350_active) return MM_TRUE;
+    reg = access_ctrl_reg_for_addr(addr);
+    if (reg == 0u) return MM_TRUE;
+    return access_ctrl_allow(reg, sec, privileged);
+}
+
+mm_bool mm_rp2350_flash_erase(mm_u32 flash_offs, mm_u32 count)
+{
+    if (rp2350_flash.flash == 0 || rp2350_flash.flash_size == 0) return MM_FALSE;
+    if (count == 0u) return MM_TRUE;
+    if (flash_offs >= rp2350_flash.flash_size) return MM_FALSE;
+    if (flash_offs + count > rp2350_flash.flash_size) return MM_FALSE;
+    memset(rp2350_flash.flash + flash_offs, 0xff, count);
+    if (rp2350_flash.persist != 0 && rp2350_flash.persist->enabled) {
+        mm_flash_persist_flush((struct mm_flash_persist *)rp2350_flash.persist, flash_offs, count);
+    }
+    return MM_TRUE;
+}
+
+mm_bool mm_rp2350_flash_program(struct mm_memmap *map,
+                                enum mm_sec_state sec,
+                                mm_u32 flash_offs,
+                                mm_u32 data_addr,
+                                mm_u32 count)
+{
+    mm_u32 i;
+    if (rp2350_flash.flash == 0 || rp2350_flash.flash_size == 0 || map == 0) return MM_FALSE;
+    if (count == 0u) return MM_TRUE;
+    if (flash_offs >= rp2350_flash.flash_size) return MM_FALSE;
+    if (flash_offs + count > rp2350_flash.flash_size) return MM_FALSE;
+    for (i = 0; i < count; ++i) {
+        mm_u8 b = 0xffu;
+        if (!mm_memmap_read8(map, sec, data_addr + i, &b)) {
+            return MM_FALSE;
+        }
+        rp2350_flash.flash[flash_offs + i] &= b;
+    }
+    if (rp2350_flash.persist != 0 && rp2350_flash.persist->enabled) {
+        mm_flash_persist_flush((struct mm_flash_persist *)rp2350_flash.persist, flash_offs, count);
+    }
+    return MM_TRUE;
+}

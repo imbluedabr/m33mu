@@ -210,6 +210,7 @@ endif()
 add_library(m33mu_lib STATIC ${M33MU_SOURCES})
 
 target_include_directories(m33mu_lib PUBLIC ${M33MU_INCLUDE_DIRS})
+target_link_libraries(m33mu_lib PUBLIC m)
 
 set_target_properties(m33mu_lib PROPERTIES
   C_STANDARD 11

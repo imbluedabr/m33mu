@@ -107,6 +107,7 @@ struct mm_cpu {
 
     /* Low-power hint state */
     mm_bool sleeping;   /* WFI/WFE entered */
+    mm_bool sleep_wfe;  /* MM_TRUE if the last sleep hint was WFE */
     mm_bool event_reg;  /* Event register for WFE/SEV */
 
     /* Local exclusive monitor (LDREX/STREX pairing).

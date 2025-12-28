@@ -43,6 +43,8 @@ void mm_nvic_set_pending(struct mm_nvic *nvic, mm_u32 irq, mm_bool pending);
 mm_bool mm_nvic_is_pending(const struct mm_nvic *nvic, mm_u32 irq);
 void mm_nvic_set_itns(struct mm_nvic *nvic, mm_u32 irq, mm_bool target_nonsecure);
 enum mm_sec_state mm_nvic_irq_target_sec(const struct mm_nvic *nvic, mm_u32 irq);
+mm_bool mm_nvic_any_pending_enabled(const struct mm_nvic *nvic);
+mm_bool mm_nvic_any_pending(const struct mm_nvic *nvic);
 
 /* Simplified: select highest-priority pending enabled IRQ; returns -1 if none. */
 int mm_nvic_select(const struct mm_nvic *nvic, const struct mm_cpu *cpu);
