@@ -1685,6 +1685,7 @@ int main(int argc, char **argv)
     mm_bool strcmp_active = MM_FALSE;
     mm_u32 strcmp_entry_r0 = 0;
     mm_bool strcmp_after_it = MM_FALSE;
+    mm_bool opt_no_tz = MM_FALSE;
     const char *pc_trace_env = getenv("M33MU_PC_TRACE");
     const char *pc_trace_mem_env = getenv("M33MU_PC_TRACE_MEM");
     const char *strcmp_trace_env = getenv("M33MU_STRCMP_TRACE");
@@ -1772,6 +1773,8 @@ int main(int argc, char **argv)
             opt_quit_on_faults = MM_TRUE;
         } else if (strcmp(argv[i], "--meminfo") == 0) {
             opt_meminfo = MM_TRUE;
+        } else if (strcmp(argv[i], "--no-tz") == 0) {
+            opt_no_tz = MM_TRUE;
         } else if (strncmp(argv[i], "--spiflash:", 11) == 0) {
             if (spiflash_count >= (int)(sizeof(spiflash_cfgs) / sizeof(spiflash_cfgs[0]))) {
                 fprintf(stderr, "too many spiflash configs\n");
@@ -1864,7 +1867,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_USE_LIBCAPSTONE
                         "[--capstone] [--capstone-verbose] "
 #endif
-                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--gdb-symbols <elf>] "
+                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--no-tz] [--gdb-symbols <elf>] "
                         "[--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]] "
                         "[--usb[:port=<n>]] "
                         "[--tap[:name]] [--vde[:/path/to/vde.ctl]] "
@@ -2037,6 +2040,8 @@ int main(int argc, char **argv)
             mm_u64 cycle_total = 0;
             mm_bool done = MM_FALSE;
             mm_bool reset_again = MM_FALSE;
+            mm_bool force_ns_boot = MM_FALSE;
+            mm_u32 initial_sp = 0;
             mm_u64 vcycles = 0;
             mm_u64 vcycles_last_sync = 0;
             mm_u64 cycles_since_poll = 0;
@@ -2058,12 +2063,37 @@ int main(int argc, char **argv)
 #endif
             mm_memmap_configure_flash(&map, &cfg, flash, MM_TRUE);
             mm_memmap_configure_flash(&map, &cfg, flash, MM_FALSE);
-            map.flash.base = cfg.flash_base_s;
-            map.flash.length = cfg.flash_size_s;
             mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE);
             mm_memmap_configure_ram(&map, &cfg, ram, MM_FALSE);
-            map.ram.base = cfg.ram_base_s;
-            map.ram.length = cfg_total_ram(&cfg);
+            {
+                mm_u32 boot_offset = default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
+                if (opt_no_tz) {
+                    force_ns_boot = MM_TRUE;
+                    cfg.mpcbb_block_secure = 0;
+                    cfg.mpcbb_block_size = 0;
+                    printf("[TZ] TrustZone disabled via --no-tz\n");
+                } else if (cfg.ram_base_s != cfg.ram_base_ns) {
+                    if (mm_vector_read(&map, MM_SECURE, cfg.flash_base_s + boot_offset, 0u, &initial_sp)) {
+                        if ((initial_sp & 0xF0000000u) == 0x20000000u) {
+                            force_ns_boot = MM_TRUE;
+                            cfg.mpcbb_block_secure = 0;
+                            cfg.mpcbb_block_size = 0;
+                            printf("[TZ] Non-secure boot detected (SP=0x%08lx); TrustZone disabled\n",
+                                   (unsigned long)initial_sp);
+                        }
+                    }
+                }
+                if (force_ns_boot) {
+                    map.flash.base = cfg.flash_base_ns;
+                    map.flash.length = cfg.flash_size_ns;
+                    map.ram.base = cfg.ram_base_ns;
+                } else {
+                    map.flash.base = cfg.flash_base_s;
+                    map.flash.length = cfg.flash_size_s;
+                    map.ram.base = cfg.ram_base_s;
+                }
+                map.ram.length = cfg_total_ram(&cfg);
+            }
             mm_target_register_mmio(&cfg, &map.mmio);
             mm_spiflash_register_mmap_regions(&map.mmio);
             mm_target_flash_bind(&cfg, &map, flash, cfg.flash_size_s, opt_persist ? &persist : 0);
@@ -2147,6 +2177,17 @@ int main(int argc, char **argv)
             if (cfg.core_count > 1u) {
                 mm_nvic_init(&nvic1);
             }
+            if (force_ns_boot) {
+                mm_u32 irq;
+                for (irq = 0; irq < MM_MAX_IRQ; ++irq) {
+                    mm_nvic_set_itns(&nvic, irq, MM_TRUE);
+                }
+                if (cfg.core_count > 1u) {
+                    for (irq = 0; irq < MM_MAX_IRQ; ++irq) {
+                        mm_nvic_set_itns(&nvic1, irq, MM_TRUE);
+                    }
+                }
+            }
             if (cfg.core_count > 1u && cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
                 mm_rp2350_bind_multicore(&cpu, &cpu1, &nvic, &nvic1, &active_core);
             }
@@ -2167,8 +2208,13 @@ int main(int argc, char **argv)
                 cpu.faultmask_s = cpu.faultmask_ns = 0;
                 cpu.msp_s = cpu.msp_ns = 0;
                 cpu.psp_s = cpu.psp_ns = 0;
-                cpu.vtor_s = cfg.flash_base_s + boot_offset;
-                cpu.vtor_ns = cfg.flash_base_ns + boot_offset;
+                if (force_ns_boot) {
+                    cpu.vtor_s = cfg.flash_base_ns + boot_offset;
+                    cpu.vtor_ns = cfg.flash_base_ns + boot_offset;
+                } else {
+                    cpu.vtor_s = cfg.flash_base_s + boot_offset;
+                    cpu.vtor_ns = cfg.flash_base_ns + boot_offset;
+                }
                 cpu.exc_depth = 0;
                 cpu.tz_depth = 0;
                 cpu.sleeping = MM_FALSE;
@@ -2201,13 +2247,15 @@ int main(int argc, char **argv)
             }
 
             {
-                enum mm_sec_state boot_sec = MM_SECURE;
+                enum mm_sec_state boot_sec = force_ns_boot ? MM_NONSECURE : MM_SECURE;
                 active_core = 0;
                 g_active_prot_ctx = &prot;
                 if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
                     mm_rp2350_set_active_core(0);
                 }
                 if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                    scs.sau_ctrl = 0x1u | 0x2u;
+                } else if (force_ns_boot) {
                     scs.sau_ctrl = 0x1u | 0x2u;
                 }
                 if (!mm_vector_apply_reset(&cpu, &map, boot_sec)) {

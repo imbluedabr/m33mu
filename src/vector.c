@@ -52,10 +52,10 @@ mm_bool mm_vector_apply_reset(struct mm_cpu *cpu, const struct mm_memmap *map, e
 
     /* ARMv8‑M resets with T-bit set; keep other flags clear. */
     cpu->xpsr = 0x01000000u;
-    mm_cpu_set_active_sp(cpu, initial_sp);
-    cpu->r[15] = reset_pc | 1u;
     cpu->sec_state = sec;
     cpu->mode = MM_THREAD;
+    mm_cpu_set_active_sp(cpu, initial_sp);
+    cpu->r[15] = reset_pc | 1u;
     mm_cpu_set_privileged(cpu, MM_FALSE); /* start privileged (nPRIV=0) */
     return MM_TRUE;
 }

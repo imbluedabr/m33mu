@@ -121,7 +121,7 @@ build/m33mu tests/firmware/test-tz-bxns-cmse-sau-mpu/build/secure.bin tests/firm
 ## Command line usage
 
 ```
-build/m33mu [--cpu <cpu>] [--gdb] [--port <n>] [--gdb-symbols <elf>] [--dump] [--tui] [--persist] [--capstone] [--uart-stdout] [--quit-on-faults] [--meminfo] <image.bin[:offset]> [more images...]
+build/m33mu [--cpu <cpu>] [--gdb] [--port <n>] [--gdb-symbols <elf>] [--dump] [--tui] [--persist] [--capstone] [--uart-stdout] [--quit-on-faults] [--meminfo] [--no-tz] <image.bin[:offset]> [more images...]
 ```
 
 Options:
@@ -137,6 +137,7 @@ Options:
 - `--uart-stdout`: route UART output to stdout instead of a PTY device.
 - `--quit-on-faults`: stop execution after the first fault is raised.
 - `--meminfo`: emit `[MEMINFO]` logs for SAU/MPU layout and register writes.
+- `--no-tz`: force non-secure boot and disable TrustZone protections for the session.
 - `--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]`: attach a SPI flash image.
 - `--usb` or `--usb:port=<n>`: enable USB/IP backend (default port 3240).
 - `--tap[:tap0]`: enable Ethernet TAP backend (default interface: `tap0`).
