@@ -32,7 +32,8 @@ static mm_u32 g_ufsr_bits;
 static int g_ufsr_count;
 
 static mm_bool stub_handle_pc_write(struct mm_cpu *cpu,
-                                    struct mm_memmap *map,
+    struct mm_memmap *map,
+    struct mm_scs *scs,
                                     mm_u32 value,
                                     mm_u8 *it_pattern,
                                     mm_u8 *it_remaining,
@@ -40,6 +41,7 @@ static mm_bool stub_handle_pc_write(struct mm_cpu *cpu,
 {
     (void)cpu;
     (void)map;
+    (void)scs;
     (void)value;
     (void)it_pattern;
     (void)it_remaining;
@@ -48,8 +50,8 @@ static mm_bool stub_handle_pc_write(struct mm_cpu *cpu,
 }
 
 static mm_bool stub_raise_mem_fault(struct mm_cpu *cpu,
-                                    struct mm_memmap *map,
-                                    struct mm_scs *scs,
+    struct mm_memmap *map,
+    struct mm_scs *scs,
                                     mm_u32 fault_pc,
                                     mm_u32 fault_xpsr,
                                     mm_u32 addr,
@@ -66,8 +68,8 @@ static mm_bool stub_raise_mem_fault(struct mm_cpu *cpu,
 }
 
 static mm_bool stub_raise_usage_fault(struct mm_cpu *cpu,
-                                      struct mm_memmap *map,
-                                      struct mm_scs *scs,
+    struct mm_memmap *map,
+    struct mm_scs *scs,
                                       mm_u32 fault_pc,
                                       mm_u32 fault_xpsr,
                                       mm_u32 ufsr_bits)
@@ -83,18 +85,20 @@ static mm_bool stub_raise_usage_fault(struct mm_cpu *cpu,
 }
 
 static mm_bool stub_exc_return_unstack(struct mm_cpu *cpu,
-                                       struct mm_memmap *map,
+    struct mm_memmap *map,
+    struct mm_scs *scs,
                                        mm_u32 exc_ret)
 {
     (void)cpu;
     (void)map;
+    (void)scs;
     (void)exc_ret;
     return MM_FALSE;
 }
 
 static mm_bool stub_enter_exception(struct mm_cpu *cpu,
-                                    struct mm_memmap *map,
-                                    struct mm_scs *scs,
+    struct mm_memmap *map,
+    struct mm_scs *scs,
                                     mm_u32 exc_num,
                                     mm_u32 return_pc,
                                     mm_u32 xpsr_in)

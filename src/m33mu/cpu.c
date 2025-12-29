@@ -147,6 +147,11 @@ void mm_cpu_set_msp(struct mm_cpu *cpu, enum mm_sec_state sec, mm_u32 value)
     }
     if (sec == MM_NONSECURE) cpu->msp_ns = value;
     else cpu->msp_s = value;
+    if (sec == cpu->sec_state) {
+        if (cpu->mode == MM_HANDLER || !control_sp_sel(cpu)) {
+            cpu->r[13] = value;
+        }
+    }
     if (sec == MM_SECURE) {
         cpu_init_msp_top(cpu, sec, value);
     }
@@ -168,6 +173,11 @@ void mm_cpu_set_psp(struct mm_cpu *cpu, enum mm_sec_state sec, mm_u32 value)
     }
     if (sec == MM_NONSECURE) cpu->psp_ns = value;
     else cpu->psp_s = value;
+    if (sec == cpu->sec_state) {
+        if (cpu->mode == MM_THREAD && control_sp_sel(cpu)) {
+            cpu->r[13] = value;
+        }
+    }
 }
 
 mm_u32 mm_cpu_get_control(const struct mm_cpu *cpu, enum mm_sec_state sec)
@@ -183,12 +193,30 @@ void mm_cpu_set_control(struct mm_cpu *cpu, enum mm_sec_state sec, mm_u32 value)
     if (cpu == 0) {
         return;
     }
+    if (sec == cpu->sec_state && cpu->mode == MM_THREAD) {
+        mm_u32 cur = (sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s;
+        if ((cur & 0x1u) != 0u) {
+            value |= 0x1u;
+            value |= 0x2u;
+        }
+    }
     if (sec == MM_NONSECURE) cpu->control_ns = value;
     else cpu->control_s = value;
     if (sec == MM_NONSECURE) {
         cpu->priv_ns = (value & 0x1u) != 0u;
     } else {
         cpu->priv_s = (value & 0x1u) != 0u;
+    }
+    if (sec == cpu->sec_state) {
+        if (cpu->mode == MM_HANDLER) {
+            cpu->r[13] = (sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
+        } else {
+            if (control_sp_sel(cpu)) {
+                cpu->r[13] = (sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s;
+            } else {
+                cpu->r[13] = (sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
+            }
+        }
     }
 }
 

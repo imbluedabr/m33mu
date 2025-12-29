@@ -78,6 +78,40 @@
 
 #define ETH_IRQ 106
 
+/* LAN8742 PHY register indices and bits used by frosted. */
+#define PHY_BCR      0x00u
+#define PHY_BSR      0x01u
+#define PHY_ID1      0x02u
+#define PHY_ID2      0x03u
+#define PHY_ANAR     0x04u
+#define PHY_ANLPAR   0x05u
+#define PHY_MCSR     0x11u
+#define PHY_PHYSCSR  0x1Fu
+
+#define PHY_BCR_RESET       (1u << 15)
+#define PHY_BCR_AUTONEG_EN  (1u << 12)
+#define PHY_BCR_RESTART_AN  (1u << 9)
+#define PHY_BCR_SPEED_100   (1u << 13)
+#define PHY_BCR_FDUPLEX     (1u << 8)
+
+#define PHY_BSR_100BASE_TX_FD   (1u << 14)
+#define PHY_BSR_100BASE_TX_HD   (1u << 13)
+#define PHY_BSR_10BASE_T_FD     (1u << 12)
+#define PHY_BSR_10BASE_T_HD     (1u << 11)
+#define PHY_BSR_AUTONEG_CPLT    (1u << 5)
+#define PHY_BSR_AUTONEG_ABILITY (1u << 3)
+#define PHY_BSR_LINK_STATUS     (1u << 2)
+
+#define PHY_ANAR_100BASE_TX_FD  (1u << 8)
+#define PHY_ANAR_100BASE_TX     (1u << 7)
+#define PHY_ANAR_10BASE_T_FD    (1u << 6)
+#define PHY_ANAR_10BASE_T       (1u << 5)
+#define PHY_ANAR_SELECTOR_8023  (0x1u)
+
+#define PHY_PHYSCSR_AUTONEG_DONE (1u << 12)
+#define PHY_PHYSCSR_HCDSPEEDMASK (0x1Cu)
+#define PHY_PHYSCSR_100BTX_FD    (0x18u)
+
 struct eth_desc {
     mm_u32 des0;
     mm_u32 des1;
@@ -209,12 +243,21 @@ static void eth_generate_mac(mm_u8 mac[6])
 static void eth_phy_reset(void)
 {
     memset(g_eth.phy_regs, 0, sizeof(g_eth.phy_regs));
-    g_eth.phy_regs[0x00] = 0x0000u;
-    g_eth.phy_regs[0x01] = 0x782Du;
-    g_eth.phy_regs[0x02] = 0x0007u;
-    g_eth.phy_regs[0x03] = 0xC0F0u;
-    g_eth.phy_regs[0x04] = 0x01E1u;
-    g_eth.phy_regs[0x05] = 0x0000u;
+    g_eth.phy_regs[PHY_BCR] = PHY_BCR_AUTONEG_EN;
+    g_eth.phy_regs[PHY_BSR] = (mm_u16)(PHY_BSR_AUTONEG_ABILITY |
+                                       PHY_BSR_100BASE_TX_FD |
+                                       PHY_BSR_100BASE_TX_HD |
+                                       PHY_BSR_10BASE_T_FD |
+                                       PHY_BSR_10BASE_T_HD);
+    g_eth.phy_regs[PHY_ID1] = 0x0007u;
+    g_eth.phy_regs[PHY_ID2] = 0xC0F0u;
+    g_eth.phy_regs[PHY_ANAR] = (mm_u16)(PHY_ANAR_SELECTOR_8023 |
+                                        PHY_ANAR_100BASE_TX_FD |
+                                        PHY_ANAR_100BASE_TX |
+                                        PHY_ANAR_10BASE_T_FD |
+                                        PHY_ANAR_10BASE_T);
+    g_eth.phy_regs[PHY_ANLPAR] = g_eth.phy_regs[PHY_ANAR];
+    g_eth.phy_regs[PHY_PHYSCSR] = 0u;
 }
 
 static void eth_apply_mac(void)
@@ -253,6 +296,7 @@ static void eth_handle_mdio(void)
     mm_u32 goc;
     mm_u32 reg;
     mm_u32 phy;
+    mm_bool link_up = mm_eth_backend_link_up();
 
     if ((mdioar & ETH_MDIOAR_MB) == 0u) return;
 
@@ -264,21 +308,32 @@ static void eth_handle_mdio(void)
         g_eth.regs[ETH_MACMDIODR / 4u] = 0xFFFFu;
     } else if (goc == ETH_MDIOAR_GOC_READ) {
         mm_u16 val = g_eth.phy_regs[reg];
-        if (reg == 0x01u) {
-            if (mm_eth_backend_is_up()) {
-                val |= (1u << 2);
+        if (reg == PHY_BSR) {
+            if (link_up) {
+                val |= PHY_BSR_LINK_STATUS | PHY_BSR_AUTONEG_CPLT | PHY_BSR_AUTONEG_ABILITY;
             } else {
-                val &= ~(1u << 2);
+                val &= ~(PHY_BSR_LINK_STATUS | PHY_BSR_AUTONEG_CPLT);
             }
-            val |= (1u << 5);
+        } else if (reg == PHY_PHYSCSR) {
+            if (link_up) {
+                val |= PHY_PHYSCSR_AUTONEG_DONE;
+                val &= ~PHY_PHYSCSR_HCDSPEEDMASK;
+                val |= PHY_PHYSCSR_100BTX_FD;
+            } else {
+                val &= ~(PHY_PHYSCSR_AUTONEG_DONE | PHY_PHYSCSR_HCDSPEEDMASK);
+            }
         }
         g_eth.regs[ETH_MACMDIODR / 4u] = val;
     } else if (goc == ETH_MDIOAR_GOC_WRITE) {
-        g_eth.phy_regs[reg] = (mm_u16)(g_eth.regs[ETH_MACMDIODR / 4u] & 0xFFFFu);
-        if (reg == 0x00u) {
-            if ((g_eth.phy_regs[0x00] & (1u << 15)) != 0u) {
+        mm_u16 val = (mm_u16)(g_eth.regs[ETH_MACMDIODR / 4u] & 0xFFFFu);
+        g_eth.phy_regs[reg] = val;
+        if (reg == PHY_BCR) {
+            if ((val & PHY_BCR_RESET) != 0u) {
                 eth_phy_reset();
-                g_eth.phy_regs[0x00] &= ~(1u << 15);
+                g_eth.phy_regs[PHY_BCR] &= ~PHY_BCR_RESET;
+            }
+            if ((val & PHY_BCR_RESTART_AN) != 0u) {
+                g_eth.phy_regs[PHY_BCR] &= ~PHY_BCR_RESTART_AN;
             }
         }
     }

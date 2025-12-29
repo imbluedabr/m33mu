@@ -19,6 +19,7 @@ void mm_eth_backend_stop(void);
 mm_bool mm_eth_backend_send(const mm_u8 *data, mm_u32 len);
 int mm_eth_backend_recv(mm_u8 *data, mm_u32 len);
 mm_bool mm_eth_backend_is_up(void);
+mm_bool mm_eth_backend_link_up(void);
 enum mm_eth_backend_type mm_eth_backend_type_get(void);
 const char *mm_eth_backend_spec(void);
 

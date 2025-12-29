@@ -124,7 +124,7 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
     scs->vtor_ns = 0;
     scs->scr_s = 0;
     scs->scr_ns = 0;
-    scs->ccr = 0;
+    scs->ccr = (1u << 9); /* STKALIGN reset default */
     scs->aircr_s = 0;
     scs->aircr_ns = 0;
     scs->shpr1_s = scs->shpr2_s = scs->shpr3_s = 0;
@@ -192,7 +192,7 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
         return MM_FALSE;
     }
     scs_select_ctx(ctx, &scs, &nvic);
-    if (scs == 0 || nvic == 0) {
+    if (scs == 0) {
         return MM_FALSE;
     }
     eff_sec = ctx->sec;
@@ -429,7 +429,7 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     mm_u32 cur;
 
     scs_select_ctx(ctx, &scs, &nvic);
-    if (scs == 0 || nvic == 0) {
+    if (scs == 0) {
         return MM_FALSE;
     }
     if (offset >= SCS_PAGE_SIZE) {

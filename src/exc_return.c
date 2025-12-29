@@ -23,11 +23,15 @@
 #include <stdlib.h>
 
 /* EXC_RETURN format (Armv8-M, DDI0553):
- *  bits[31:8] = 0xFFFFFF
- *  bit6 selects target Security state (1=Secure, 0=Non-secure)
- *  bit4 basic frame (no FP state)
- *  bit3 return to Thread(1) vs Handler(0)
- *  bit2 select PSP(1) vs MSP(0) when returning to Thread
+ *  bits[31:24] = 0xFF (prefix)
+ *  bits[23:7]  = RES1
+ *  bit6  S     = stack security (1=Secure, 0=Non-secure)
+ *  bit5  DCRS  = 1 when default callee stacking applies
+ *  bit4  FType = 1 when no FP context stacked
+ *  bit3  Mode  = 1 Thread, 0 Handler
+ *  bit2  SPSEL = 1 PSP, 0 MSP
+ *  bit1  RES0
+ *  bit0  ES    = 1 Secure, 0 Non-secure (exception target)
  */
 
 struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
@@ -43,13 +47,13 @@ struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
         return info;
     }
 
-    /* Armv8-M EXC_RETURN: bit6 selects target Security state, bit2 selects PSP vs MSP,
+    /* Armv8-M EXC_RETURN: bit6 selects stack security, bit2 selects PSP vs MSP,
        bit4=1 means basic frame (no FP context). */
     info.basic_frame = ((value & (1u << 4)) != 0u);
     info.use_psp = (value & (1u << 2)) != 0u;
     /* Bit3 distinguishes Thread (1) vs Handler (0) return (DDI0553 C2.4.5). */
     info.to_thread = (value & (1u << 3)) != 0u;
-    /* Bit6 distinguishes Secure(1) from Non-secure(0). */
+    /* Bit6 distinguishes Secure(1) from Non-secure(0) stack. */
     info.target_sec = ((value & (1u << 6)) != 0u) ? MM_SECURE : MM_NONSECURE;
     info.valid = MM_TRUE;
     return info;

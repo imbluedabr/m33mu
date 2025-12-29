@@ -12,6 +12,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <poll.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include "m33mu/eth_backend.h"
@@ -105,7 +106,13 @@ static mm_bool eth_backend_open_tap(const char *name)
 #ifdef M33MU_HAS_VDE
 static mm_bool eth_backend_open_vde(const char *sock)
 {
-    g_backend.vde = vde_open(sock, "m33mu", 0);
+    char sock_buf[128];
+    size_t sock_len;
+
+    sock_len = strnlen(sock, sizeof(sock_buf) - 1);
+    memcpy(sock_buf, sock, sock_len);
+    sock_buf[sock_len] = '\0';
+    g_backend.vde = vde_open(sock_buf, "m33mu", 0);
     if (g_backend.vde == 0) {
         fprintf(stderr, "vde_open failed for %s\n", sock);
         return MM_FALSE;
@@ -162,6 +169,40 @@ mm_bool mm_eth_backend_is_up(void)
     return MM_FALSE;
 }
 
+mm_bool mm_eth_backend_link_up(void)
+{
+    if (g_backend.type == MM_ETH_BACKEND_NONE) return MM_FALSE;
+    if (g_backend.type == MM_ETH_BACKEND_TAP) {
+        struct ifreq ifr;
+        int sock;
+        if (g_backend.fd < 0) return MM_FALSE;
+        sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock < 0) return MM_FALSE;
+        memset(&ifr, 0, sizeof(ifr));
+        {
+            size_t nlen = strnlen(g_backend.spec, sizeof(ifr.ifr_name));
+            if (nlen >= sizeof(ifr.ifr_name)) {
+                close(sock);
+                return MM_FALSE;
+            }
+            memcpy(ifr.ifr_name, g_backend.spec, nlen);
+            ifr.ifr_name[nlen] = '\0';
+        }
+        if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
+            close(sock);
+            return MM_FALSE;
+        }
+        close(sock);
+        if ((ifr.ifr_flags & IFF_UP) == 0) return MM_FALSE;
+        if ((ifr.ifr_flags & IFF_RUNNING) == 0) return MM_FALSE;
+        return MM_TRUE;
+    }
+#ifdef M33MU_HAS_VDE
+    if (g_backend.type == MM_ETH_BACKEND_VDE) return (g_backend.vde != 0) ? MM_TRUE : MM_FALSE;
+#endif
+    return MM_FALSE;
+}
+
 mm_bool mm_eth_backend_send(const mm_u8 *data, mm_u32 len)
 {
     ssize_t n;
@@ -199,6 +240,17 @@ int mm_eth_backend_recv(mm_u8 *data, mm_u32 len)
 #ifdef M33MU_HAS_VDE
     if (g_backend.type == MM_ETH_BACKEND_VDE) {
         if (g_backend.vde == 0) return 0;
+        {
+            int fd = vde_datafd(g_backend.vde);
+            struct pollfd pfd;
+
+            if (fd < 0) return 0;
+            pfd.fd = fd;
+            pfd.events = POLLIN;
+            if (poll(&pfd, 1, 0) <= 0) {
+                return 0;
+            }
+        }
         n = vde_recv(g_backend.vde, data, len, 0);
         return (n > 0) ? (int)n : 0;
     }

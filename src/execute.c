@@ -33,6 +33,12 @@
 
 static int g_stack_trace = -1;
 static int g_splim_trace = -1;
+static int g_pop_trace = -1;
+static int g_psp_trace = -1;
+static int g_msp_trace = -1;
+static mm_bool svc_stack_trace_enabled(void);
+static int g_ctrl_trace = -1;
+static int g_svc_stack_trace = -1;
 
 static mm_bool stack_trace_enabled(void)
 {
@@ -52,6 +58,51 @@ static mm_bool splim_trace_enabled(void)
     return g_splim_trace ? MM_TRUE : MM_FALSE;
 }
 
+static mm_bool pop_trace_enabled(void)
+{
+    if (g_pop_trace < 0) {
+        const char *v = getenv("M33MU_POP_TRACE");
+        g_pop_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
+    return g_pop_trace ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool psp_trace_enabled(void)
+{
+    if (g_psp_trace < 0) {
+        const char *v = getenv("M33MU_PSP_TRACE");
+        g_psp_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
+    return g_psp_trace ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool msp_trace_enabled(void)
+{
+    if (g_msp_trace < 0) {
+        const char *v = getenv("M33MU_MSP_TRACE");
+        g_msp_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
+    return g_msp_trace ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool ctrl_trace_enabled(void)
+{
+    if (g_ctrl_trace < 0) {
+        const char *v = getenv("M33MU_CTRL_TRACE");
+        g_ctrl_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
+    return g_ctrl_trace ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool svc_stack_trace_enabled(void)
+{
+    if (g_svc_stack_trace < 0) {
+        const char *v = getenv("M33MU_SVC_STACK_TRACE");
+        g_svc_stack_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
+    return g_svc_stack_trace ? MM_TRUE : MM_FALSE;
+}
+
 #define CCR_DIV_0_TRP (1u << 4)
 #define UFSR_DIVBYZERO (1u << 25)
 #define UFSR_STKOF (1u << 20)
@@ -66,8 +117,21 @@ static mm_bool exec_set_active_sp(struct mm_cpu *cpu,
                                   mm_bool *done)
 {
     mm_u32 splim;
+    mm_u32 sp_old;
     if (cpu == 0) {
         return MM_FALSE;
+    }
+    sp_old = mm_cpu_get_active_sp(cpu);
+    if (svc_stack_trace_enabled() && (cpu->xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+        printf("[SP_SET] pc=0x%08lx old=0x%08lx new=0x%08lx mode=%d sec=%d ipsr=%lu ctrl_s=0x%08lx ctrl_ns=0x%08lx\n",
+               (unsigned long)(fetch ? fetch->pc_fetch : 0u),
+               (unsigned long)sp_old,
+               (unsigned long)value,
+               (int)cpu->mode,
+               (int)cpu->sec_state,
+               (unsigned long)(cpu->xpsr & 0x1ffu),
+               (unsigned long)cpu->control_s,
+               (unsigned long)cpu->control_ns);
     }
     splim = mm_cpu_get_active_splim(cpu);
     if (splim != 0u && value < splim) {
@@ -84,6 +148,8 @@ static mm_bool exec_set_active_sp(struct mm_cpu *cpu,
         return MM_FALSE;
     }
     mm_cpu_set_active_sp(cpu, value);
+    /* Keep r13 in sync with the active SP for subsequent SP-relative ops. */
+    cpu->r[13] = mm_cpu_get_active_sp(cpu);
     return MM_TRUE;
 }
 
@@ -182,10 +248,9 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
 {
     mm_u8 itstate_val = 0;
     mm_u32 pc_before_exec = 0;
-    mm_bool (*handle_pc_write)(struct mm_cpu *, struct mm_memmap *, mm_u32, mm_u8 *, mm_u8 *, mm_u8 *);
+    mm_bool (*handle_pc_write)(struct mm_cpu *, struct mm_memmap *, struct mm_scs *, mm_u32, mm_u8 *, mm_u8 *, mm_u8 *);
     mm_bool (*raise_mem_fault)(struct mm_cpu *, struct mm_memmap *, struct mm_scs *, mm_u32, mm_u32, mm_u32, mm_bool);
     mm_bool (*raise_usage_fault)(struct mm_cpu *, struct mm_memmap *, struct mm_scs *, mm_u32, mm_u32, mm_u32);
-    mm_bool (*exc_return_unstack)(struct mm_cpu *, struct mm_memmap *, mm_u32);
     mm_bool (*enter_exception)(struct mm_cpu *, struct mm_memmap *, struct mm_scs *, mm_u32, mm_u32, mm_u32);
     mm_bool opt_gdb;
 
@@ -197,7 +262,6 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
     handle_pc_write = ctx->handle_pc_write;
     raise_mem_fault = ctx->raise_mem_fault;
     raise_usage_fault = ctx->raise_usage_fault;
-    exc_return_unstack = ctx->exc_return_unstack;
     enter_exception = ctx->enter_exception;
     opt_gdb = ctx->opt_gdb;
 
@@ -327,7 +391,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                          } break;
                         case MM_OP_B_UNCOND:
                         case MM_OP_B_UNCOND_WIDE:
-                            cpu.r[15] = (f.pc_fetch + 4u + d.imm) | 1u;
+                            {
+                                mm_u32 target = (f.pc_fetch + 4u + d.imm) | 1u;
+                                cpu.r[15] = target;
+                            }
                             break;
                         case MM_OP_B_COND:
                         case MM_OP_B_COND_WIDE: {
@@ -356,7 +423,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     }
 
                                                     if (take) {
-                                                        cpu.r[15] = (f.pc_fetch + 4u + d.imm) | 1u;
+                                                        mm_u32 target = (f.pc_fetch + 4u + d.imm) | 1u;
+                                                        cpu.r[15] = target;
                                                     }
                                                 } break;
                         case MM_OP_CBZ:
@@ -372,24 +440,24 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                          } break;
                                        case MM_OP_BX: {
                                            mm_u32 target = cpu.r[d.rm];
-                                           if (d.rm == 14u && (target & 0xffffff00u) == 0xffffff00u) {
-                                               if (!exc_return_unstack(&cpu, &map, target)) {
-                                                   printf("[BX] exc_return_unstack failed target=0x%08lx pc=0x%08lx lr=0x%08lx\n",
+                                           if ((target & 0xffffff00u) == 0xffffff00u) {
+                                               if (svc_stack_trace_enabled() && (cpu.xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+                                                   printf("[BX_EXC_RETURN] pc=0x%08lx rm=%u target=0x%08lx lr=0x%08lx sp=0x%08lx sec=%d mode=%d ipsr=%lu\n",
+                                                          (unsigned long)f.pc_fetch,
+                                                          (unsigned)d.rm,
                                                           (unsigned long)target,
-                                                          (unsigned long)cpu.r[15],
-                                                          (unsigned long)cpu.r[14]);
-                                                   done = MM_TRUE;
-                                               } else {
-                                                   itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
+                                                          (unsigned long)cpu.r[14],
+                                                          (unsigned long)mm_cpu_get_active_sp(&cpu),
+                                                          (int)cpu.sec_state,
+                                                          (int)cpu.mode,
+                                                          (unsigned long)(cpu.xpsr & 0x1ffu));
                                                }
-                                           } else if ((target & 0xF0000000u) == 0xF0000000u) {
-                                               printf("[BX] suspicious target=0x%08lx pc=0x%08lx lr=0x%08lx rm=%u\n",
-                                                      (unsigned long)target,
-                                                      (unsigned long)cpu.r[15],
-                                                      (unsigned long)cpu.r[14],
-                                                      (unsigned)d.rm);
-                                               cpu.r[15] = target | 1u;
-                                           } else if (d.rm == 14u && cpu.sec_state == MM_NONSECURE &&
+                                               if (!handle_pc_write(&cpu, &map, &scs, target, &it_pattern, &it_remaining, &it_cond)) {
+                                                   done = MM_TRUE;
+                                               }
+                                               return MM_EXEC_CONTINUE;
+                                           }
+                                           if (d.rm == 14u && cpu.sec_state == MM_NONSECURE &&
                                                    cpu.tz_depth > 0 && target == 0xDEAD0001u) {
                                                /* Return from Secure->Non-secure BLXNS callback. */
                                                cpu.tz_depth--;
@@ -399,7 +467,20 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                cpu.r[14] = cpu.tz_ret_pc[cpu.tz_depth] | 1u;
                                                EXEC_SET_SP(mm_cpu_get_active_sp(&cpu));
                                            } else {
-                                               cpu.r[15] = target | 1u;
+                                               if (svc_stack_trace_enabled() && (cpu.xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+                                                   printf("[BX_PC_WRITE] pc=0x%08lx rm=%u target=0x%08lx lr=0x%08lx sp=0x%08lx sec=%d mode=%d ipsr=%lu\n",
+                                                          (unsigned long)f.pc_fetch,
+                                                          (unsigned)d.rm,
+                                                          (unsigned long)target,
+                                                          (unsigned long)cpu.r[14],
+                                                          (unsigned long)mm_cpu_get_active_sp(&cpu),
+                                                          (int)cpu.sec_state,
+                                                          (int)cpu.mode,
+                                                          (unsigned long)(cpu.xpsr & 0x1ffu));
+                                               }
+                                               if (!handle_pc_write(&cpu, &map, &scs, target, &it_pattern, &it_remaining, &it_cond)) {
+                                                   done = MM_TRUE;
+                                               }
                                            }
                                        } break;
                         case MM_OP_BLX: {
@@ -418,8 +499,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                        mm_tz_exec_blxns(&cpu, cpu.r[d.rm], (f.pc_fetch + d.len));
                                        break;
                         case MM_OP_BL:
-                                       cpu.r[14] = (f.pc_fetch + 4u) | 1u;
-                                       cpu.r[15] = (f.pc_fetch + 4u + d.imm) | 1u;
+                                       {
+                                           mm_u32 target = (f.pc_fetch + 4u + d.imm) | 1u;
+                                           cpu.r[14] = (f.pc_fetch + 4u) | 1u;
+                                           cpu.r[15] = target;
+                                       }
                                        break;
                         case MM_OP_MOV_IMM: {
                                        mm_bool setflags = MM_FALSE;
@@ -490,7 +574,19 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                            } break;
                         case MM_OP_ADD_SP_IMM:
                                        if (d.rd == 13u) {
-                                           EXEC_SET_SP(mm_cpu_get_active_sp(&cpu) + d.imm);
+                                           mm_u32 sp_before = cpu.r[13];
+                                           if (svc_stack_trace_enabled()) {
+                                               printf("[ADD_SP_IMM] pc=0x%08lx sp_before=0x%08lx imm=0x%08lx\n",
+                                                      (unsigned long)f.pc_fetch,
+                                                      (unsigned long)sp_before,
+                                                      (unsigned long)d.imm);
+                                           }
+                                           EXEC_SET_SP(sp_before + d.imm);
+                                           if (svc_stack_trace_enabled()) {
+                                               printf("[ADD_SP_IMM] pc=0x%08lx sp_after=0x%08lx\n",
+                                                      (unsigned long)f.pc_fetch,
+                                                      (unsigned long)mm_cpu_get_active_sp(&cpu));
+                                           }
                                        } else {
                                            cpu.r[d.rd] = cpu.r[13] + d.imm;
                                        }
@@ -1180,7 +1276,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, fault_addr, MM_FALSE)) done = MM_TRUE;
                                                 return MM_EXEC_CONTINUE;
                                             }
-                                            if (!handle_pc_write(&cpu, &map, target_pc, &it_pattern, &it_remaining, &it_cond)) {
+                                            if (!handle_pc_write(&cpu, &map, &scs, target_pc, &it_pattern, &it_remaining, &it_cond)) {
                                                 done = MM_TRUE;
                                             }
                                             return MM_EXEC_CONTINUE;
@@ -1265,7 +1361,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 case 0x91: val = cpu.basepri_ns; break;
                                                 case 0x92: val = cpu.faultmask_ns; break;
                                                 case 0x94: val = cpu.control_ns; break;
-                                                case 0x14: val = cpu.control_s; break;
+                                                case 0x14: val = (cpu.sec_state == MM_NONSECURE) ? cpu.control_ns : cpu.control_s; break;
                                                 default: val = 0; break;
                                             }
                                             cpu.r[d.rd] = val;
@@ -1274,14 +1370,35 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_u32 sysm = d.imm & 0xffu;
                                             mm_u32 mask = (d.imm >> 8) & 0xfu;
                                             mm_u32 val = cpu.r[d.rm];
+                                            mm_bool unpriv = !mm_cpu_get_privileged(&cpu);
                                             switch (sysm) {
                                                 case 0x08: /* MSP */
+                                                    if (cpu.sec_state == MM_NONSECURE && cpu.mode == MM_THREAD && unpriv) {
+                                                        break;
+                                                    }
                                                     mm_cpu_set_msp(&cpu, cpu.sec_state, val);
+                                                    if (msp_trace_enabled()) {
+                                                        printf("[MSP] MSP %s=0x%08lx pc=0x%08lx mode=%d\n",
+                                                               (cpu.sec_state == MM_NONSECURE) ? "NS" : "S",
+                                                               (unsigned long)val,
+                                                               (unsigned long)f.pc_fetch,
+                                                               (int)cpu.mode);
+                                                    }
                                                     break;
                                                 case 0x09: /* PSP */
                                                     mm_cpu_set_psp(&cpu, cpu.sec_state, val);
+                                                    if (psp_trace_enabled()) {
+                                                        printf("[PSP] PSP %s=0x%08lx pc=0x%08lx mode=%d\n",
+                                                               (cpu.sec_state == MM_NONSECURE) ? "NS" : "S",
+                                                               (unsigned long)val,
+                                                               (unsigned long)f.pc_fetch,
+                                                               (int)cpu.mode);
+                                                    }
                                                     break;
                                                 case 0x0a: /* MSPLIM */
+                                                    if (cpu.sec_state == MM_NONSECURE && cpu.mode == MM_THREAD && unpriv) {
+                                                        break;
+                                                    }
                                                     if (cpu.sec_state == MM_NONSECURE) {
                                                         cpu.msplim_ns = val;
                                                     } else {
@@ -1300,18 +1417,38 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                         cpu.psplim_s = val;
                                                     }
                                                     if (splim_trace_enabled()) {
-                                                        printf("[SPLIM] PSPLIM %s=0x%08lx\n",
+                                                        printf("[SPLIM] PSPLIM %s=0x%08lx pc=0x%08lx mode=%d\n",
                                                                (cpu.sec_state == MM_NONSECURE) ? "NS" : "S",
-                                                               (unsigned long)val);
+                                                               (unsigned long)val,
+                                                               (unsigned long)f.pc_fetch,
+                                                               (int)cpu.mode);
                                                     }
                                                     break;
                                                 case 0x88: /* MSP_NS */
+                                                    if (cpu.sec_state == MM_NONSECURE && cpu.mode == MM_THREAD && unpriv) {
+                                                        break;
+                                                    }
                                                     mm_cpu_set_msp(&cpu, MM_NONSECURE, val);
+                                                    if (msp_trace_enabled()) {
+                                                        printf("[MSP] MSP NS=0x%08lx pc=0x%08lx mode=%d\n",
+                                                               (unsigned long)val,
+                                                               (unsigned long)f.pc_fetch,
+                                                               (int)cpu.mode);
+                                                    }
                                                     break;
                                                 case 0x89: /* PSP_NS */
                                                     mm_cpu_set_psp(&cpu, MM_NONSECURE, val);
+                                                    if (psp_trace_enabled()) {
+                                                        printf("[PSP] PSP NS=0x%08lx pc=0x%08lx mode=%d\n",
+                                                               (unsigned long)val,
+                                                               (unsigned long)f.pc_fetch,
+                                                               (int)cpu.mode);
+                                                    }
                                                     break;
                                                 case 0x8a: /* MSPLIM_NS */
+                                                    if (cpu.sec_state == MM_NONSECURE && cpu.mode == MM_THREAD && unpriv) {
+                                                        break;
+                                                    }
                                                     cpu.msplim_ns = val;
                                                     if (splim_trace_enabled()) {
                                                         printf("[SPLIM] MSPLIM NS=0x%08lx\n", (unsigned long)val);
@@ -1320,7 +1457,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 case 0x8b: /* PSPLIM_NS */
                                                     cpu.psplim_ns = val;
                                                     if (splim_trace_enabled()) {
-                                                        printf("[SPLIM] PSPLIM NS=0x%08lx\n", (unsigned long)val);
+                                                        printf("[SPLIM] PSPLIM NS=0x%08lx pc=0x%08lx mode=%d\n",
+                                                               (unsigned long)val,
+                                                               (unsigned long)f.pc_fetch,
+                                                               (int)cpu.mode);
                                                     }
                                                     break;
                                                 case 0x10: /* PRIMASK */
@@ -1344,11 +1484,28 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 case 0x92: /* FAULTMASK_NS */
                                                     cpu.faultmask_ns = val & 1u;
                                                     break;
-                                                case 0x14: /* CONTROL_S */
-                                                    mm_cpu_set_control(&cpu, MM_SECURE, val);
+                                                case 0x14: /* CONTROL */
+                                                    if (cpu.sec_state == MM_NONSECURE) {
+                                                        mm_cpu_set_control(&cpu, MM_NONSECURE, val);
+                                                    } else {
+                                                        mm_cpu_set_control(&cpu, MM_SECURE, val);
+                                                    }
+                                                    if (ctrl_trace_enabled()) {
+                                                        printf("[CONTROL] CONTROL %s=0x%08lx pc=0x%08lx mode=%d\n",
+                                                               (cpu.sec_state == MM_NONSECURE) ? "NS" : "S",
+                                                               (unsigned long)val,
+                                                               (unsigned long)f.pc_fetch,
+                                                               (int)cpu.mode);
+                                                    }
                                                     break;
                                                 case 0x94: /* CONTROL_NS */
                                                     mm_cpu_set_control(&cpu, MM_NONSECURE, val);
+                                                    if (ctrl_trace_enabled()) {
+                                                        printf("[CONTROL] CONTROL NS=0x%08lx pc=0x%08lx mode=%d\n",
+                                                               (unsigned long)val,
+                                                               (unsigned long)f.pc_fetch,
+                                                               (int)cpu.mode);
+                                                    }
                                                     break;
                                                 default:
                                                     break;
@@ -1504,18 +1661,51 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                            } break;
                         case MM_OP_SUB_SP_IMM:
                                         if (d.rd == 13u) {
-                                            EXEC_SET_SP(mm_cpu_get_active_sp(&cpu) - d.imm);
+                                            mm_u32 sp_before = cpu.r[13];
+                                            if (svc_stack_trace_enabled()) {
+                                                printf("[SUB_SP_IMM] pc=0x%08lx sp_before=0x%08lx imm=0x%08lx\n",
+                                                       (unsigned long)f.pc_fetch,
+                                                       (unsigned long)sp_before,
+                                                       (unsigned long)d.imm);
+                                            }
+                                            EXEC_SET_SP(sp_before - d.imm);
+                                            if (svc_stack_trace_enabled()) {
+                                                printf("[SUB_SP_IMM] pc=0x%08lx sp_after=0x%08lx\n",
+                                                       (unsigned long)f.pc_fetch,
+                                                       (unsigned long)mm_cpu_get_active_sp(&cpu));
+                                            }
+                                            if (svc_stack_trace_enabled() &&
+                                                f.pc_fetch >= 0x08013518u &&
+                                                f.pc_fetch <= 0x0801351eu) {
+                                                printf("[SUB_SP_IMM_PRO] pc=0x%08lx sp_before=0x%08lx imm=0x%08lx sp_after=0x%08lx\n",
+                                                       (unsigned long)f.pc_fetch,
+                                                       (unsigned long)sp_before,
+                                                       (unsigned long)d.imm,
+                                                       (unsigned long)mm_cpu_get_active_sp(&cpu));
+                                            }
                                         } else {
                                             cpu.r[d.rd] = cpu.r[13] - d.imm;
                                         }
                                         break;
                         case MM_OP_MOV_REG:
                                         if (d.rd == 15u) {
-                                            if (!handle_pc_write(&cpu, &map, cpu.r[d.rm], &it_pattern, &it_remaining, &it_cond)) {
+                                            if (!handle_pc_write(&cpu, &map, &scs, cpu.r[d.rm], &it_pattern, &it_remaining, &it_cond)) {
                                                 done = MM_TRUE;
                                             }
                                         } else if (d.rd == 13u) {
+                                            if (svc_stack_trace_enabled() && d.rm == 7u) {
+                                                printf("[MOV_SP_R7] pc=0x%08lx sp_before=0x%08lx r7=0x%08lx\n",
+                                                       (unsigned long)f.pc_fetch,
+                                                       (unsigned long)mm_cpu_get_active_sp(&cpu),
+                                                       (unsigned long)cpu.r[7]);
+                                            }
                                             EXEC_SET_SP(cpu.r[d.rm]);
+                                            if (svc_stack_trace_enabled() && d.rm == 7u) {
+                                                printf("[MOV_SP_R7] pc=0x%08lx sp_after=0x%08lx r7=0x%08lx\n",
+                                                       (unsigned long)f.pc_fetch,
+                                                       (unsigned long)mm_cpu_get_active_sp(&cpu),
+                                                       (unsigned long)cpu.r[7]);
+                                            }
                                         } else {
                                             cpu.r[d.rd] = cpu.r[d.rm];
                                         }
@@ -1603,7 +1793,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                         return MM_EXEC_CONTINUE;
                                                     }
                                                     if (d.rd == 15u) {
-                                                        if (!handle_pc_write(&cpu, &map, val, &it_pattern, &it_remaining, &it_cond)) {
+                                                        if (!handle_pc_write(&cpu, &map, &scs, val, &it_pattern, &it_remaining, &it_cond)) {
                                                             done = MM_TRUE;
                                                         }
                                                         return MM_EXEC_CONTINUE;
@@ -1618,7 +1808,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     return MM_EXEC_CONTINUE;
                                                 }
                                                 if (d.rd == 15u) {
-                                                    if (!handle_pc_write(&cpu, &map, val, &it_pattern, &it_remaining, &it_cond)) {
+                                                    if (!handle_pc_write(&cpu, &map, &scs, val, &it_pattern, &it_remaining, &it_cond)) {
                                                         done = MM_TRUE;
                                                     }
                                                     return MM_EXEC_CONTINUE;
@@ -1633,7 +1823,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     return MM_EXEC_CONTINUE;
                                                 }
                                                 if (d.rd == 15u) {
-                                                    if (!handle_pc_write(&cpu, &map, val, &it_pattern, &it_remaining, &it_cond)) {
+                                                    if (!handle_pc_write(&cpu, &map, &scs, val, &it_pattern, &it_remaining, &it_cond)) {
                                                         done = MM_TRUE;
                                                     }
                                                     return MM_EXEC_CONTINUE;
@@ -1694,7 +1884,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                               }
                                           } break;
                         case MM_OP_STR_IMM: {
-                                                mm_u32 addr = cpu.r[d.rn] + d.imm;
+                                                mm_u32 base = cpu.r[d.rn];
+                                                mm_u32 addr = base + d.imm;
                                                 if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.r[d.rd])) {
                                                     if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                     return MM_EXEC_CONTINUE;
@@ -1717,7 +1908,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                      }
                                                      new_rn = addr + d.imm;
                                                      if (d.rd == 15u) {
-                                                         if (!handle_pc_write(&cpu, &map, val, &it_pattern, &it_remaining, &it_cond)) {
+                                                         if (!handle_pc_write(&cpu, &map, &scs, val, &it_pattern, &it_remaining, &it_cond)) {
                                                              done = MM_TRUE;
                                                          }
                                                      } else {
@@ -1737,7 +1928,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                          return MM_EXEC_CONTINUE;
                                                      }
                                                      if (d.rd == 15u) {
-                                                         if (!handle_pc_write(&cpu, &map, val, &it_pattern, &it_remaining, &it_cond)) {
+                                                         if (!handle_pc_write(&cpu, &map, &scs, val, &it_pattern, &it_remaining, &it_cond)) {
                                                              done = MM_TRUE;
                                                          }
                                                      } else {
@@ -1814,11 +2005,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                      }
                                                  } break;
                         case MM_OP_STR_PRE_IMM: {
-                                                     mm_u32 addr = cpu.r[d.rn] + d.imm;
-                                                     if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.r[d.rd])) {
-                                                         if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
-                                                         return MM_EXEC_CONTINUE;
-                                                     }
+                                                    mm_u32 addr = cpu.r[d.rn] + d.imm;
+                                                    if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.r[d.rd])) {
+                                                        if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                        return MM_EXEC_CONTINUE;
+                                                    }
                                                      if (d.rn == 13u) {
                                                          EXEC_SET_SP(addr);
                                                      } else {
@@ -2043,11 +2234,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_u32 reg;
                                             mm_u32 start;
                                             mm_u32 addr;
-                                            mm_u32 base = cpu.r[d.rn];
+                                            mm_u32 base = (d.rn == 13u) ? mm_cpu_get_active_sp(&cpu) : cpu.r[d.rn];
                                             mm_bool exc_return_taken = MM_FALSE;
 
                                             if (stack_trace_enabled() && d.rn == 13u) {
-                                                printf("[STACK_LDMSTM] kind=%s opc=%lu w=%lu mask=0x%04lx base=0x%08lx mode=%d sec=%d sp_active=0x%08lx\n",
+                                                printf("[STACK_LDMSTM] kind=%s opc=%lu w=%lu mask=0x%04lx base=0x%08lx mode=%d sec=%d sp_active=0x%08lx pc=0x%08lx\n",
                                                        (d.kind == MM_OP_LDM) ? "LDM" : "STM",
                                                        (unsigned long)opc,
                                                        (unsigned long)wbit,
@@ -2055,7 +2246,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                        (unsigned long)base,
                                                        (int)cpu.mode,
                                                        (int)cpu.sec_state,
-                                                       (unsigned long)mm_cpu_get_active_sp(&cpu));
+                                                       (unsigned long)mm_cpu_get_active_sp(&cpu),
+                                                       (unsigned long)f.pc_fetch);
                                             }
 
                                             for (reg = 0; reg < 16u; ++reg) {
@@ -2096,12 +2288,22 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                         if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                         break;
                                                     }
-                                                    if (reg == 15u) {
-                                                        if (!handle_pc_write(&cpu, &map, val, &it_pattern, &it_remaining, &it_cond)) {
-                                                            done = MM_TRUE;
-                                                        }
-                                                        exc_return_taken = (val & 0xffffff00u) == 0xffffff00u;
-                                                    } else {
+                                                if (reg == 15u) {
+                                                    if (svc_stack_trace_enabled() && (cpu.xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+                                                        printf("[LDM_PC_WRITE] pc=0x%08lx sp=0x%08lx val=0x%08lx lr=0x%08lx sec=%d mode=%d ipsr=%lu\n",
+                                                               (unsigned long)f.pc_fetch,
+                                                               (unsigned long)mm_cpu_get_active_sp(&cpu),
+                                                               (unsigned long)val,
+                                                               (unsigned long)cpu.r[14],
+                                                               (int)cpu.sec_state,
+                                                               (int)cpu.mode,
+                                                               (unsigned long)(cpu.xpsr & 0x1ffu));
+                                                    }
+                                                    if (!handle_pc_write(&cpu, &map, &scs, val, &it_pattern, &it_remaining, &it_cond)) {
+                                                        done = MM_TRUE;
+                                                    }
+                                                    exc_return_taken = (val & 0xffffff00u) == 0xffffff00u;
+                                                } else {
                                                         cpu.r[reg] = val;
                                                     }
                                                 }
@@ -2112,7 +2314,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             }
 
 
-                                            if (wbit && !done && !exc_return_taken) {
+                                            if (exc_return_taken) {
+                                                /* Exception return unstack already updated SP. */
+                                                break;
+                                            }
+                                            if (wbit && !done) {
                                                 mm_bool base_in_list = (mask & (1u << d.rn)) != 0u;
                                                 if (d.kind == MM_OP_LDM && base_in_list) {
                                                     /* LDM with base in list: no writeback; base is loaded from memory. */
@@ -2120,12 +2326,17 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 }
                                                 /* Write-back: IA increments by 4*count; DB decrements by 4*count. */
                                                 if (opc == 2u) {
-                                                    cpu.r[d.rn] = base - 4u * count;
+                                                    if (d.rn == 13u) {
+                                                        EXEC_SET_SP(base - 4u * count);
+                                                    } else {
+                                                        cpu.r[d.rn] = base - 4u * count;
+                                                    }
                                                 } else {
-                                                    cpu.r[d.rn] = base + 4u * count;
-                                                }
-                                                if (d.rn == 13u) {
-                                                    EXEC_SET_SP(cpu.r[13]);
+                                                    if (d.rn == 13u) {
+                                                        EXEC_SET_SP(base + 4u * count);
+                                                    } else {
+                                                        cpu.r[d.rn] = base + 4u * count;
+                                                    }
                                                 }
                                             }
                                         } break;
@@ -2148,10 +2359,14 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                         /* Hint: currently no scheduler hook; treat as NOP. */
                                         break;
                         case MM_OP_SVC: {
-                                            mm_u32 ret_pc = f.pc_fetch + d.len;
+                                            /* SVC is a 16-bit instruction; return to the following halfword. */
+                                            mm_u32 ret_pc = f.pc_fetch + 2u;
                                             if (enter_exception == 0 ||
                                                 !enter_exception(&cpu, &map, &scs, MM_VECT_SVCALL, ret_pc, cpu.xpsr)) {
                                                 done = MM_TRUE;
+                                            } else {
+                                                /* Sync IT state to the handler xPSR after exception entry. */
+                                                itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                                             }
                                         } break;
                         case MM_OP_PUSH: {
@@ -2170,13 +2385,13 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  count++;
                                              }
                                              addr = sp - (mm_u32)count * 4u;
-                                             for (reg = 0; reg <= 7; ++reg) {
-                                                 if ((mask & (1u << reg)) == 0u) {
-                                                     continue;
-                                                 }
-                                                 if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.r[reg])) {
-                                                     if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
-                                                     break;
+                                            for (reg = 0; reg <= 7; ++reg) {
+                                                if ((mask & (1u << reg)) == 0u) {
+                                                    continue;
+                                                }
+                                                if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.r[reg])) {
+                                                    if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                    break;
                                                  }
                                                  addr += 4u;
                                              }
@@ -2188,14 +2403,71 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  }
                                              }
                                              if (!done) {
+                                                 if (svc_stack_trace_enabled()) {
+                                                     printf("[PUSH_SP] pc=0x%08lx sp_before=0x%08lx count=%lu\n",
+                                                            (unsigned long)f.pc_fetch,
+                                                            (unsigned long)sp,
+                                                            (unsigned long)count);
+                                                 }
                                                  EXEC_SET_SP(sp - (mm_u32)count * 4u);
+                                                 if (svc_stack_trace_enabled()) {
+                                                     printf("[PUSH_SP] pc=0x%08lx sp_after=0x%08lx\n",
+                                                            (unsigned long)f.pc_fetch,
+                                                            (unsigned long)mm_cpu_get_active_sp(&cpu));
+                                                 }
                                              }
                                          } break;
                         case MM_OP_POP: {
                                             mm_u32 sp = mm_cpu_get_active_sp(&cpu);
+                                            mm_u32 sp_start = sp;
                                             mm_u16 mask = (mm_u16)d.imm;
                                             int reg;
                                             mm_bool exc_return_taken = MM_FALSE;
+                                            mm_u32 pop_count = 0;
+                                            if (svc_stack_trace_enabled() && (mask & 0x0100u) != 0u) {
+                                                mm_u32 w0 = 0, w1 = 0;
+                                                mm_bool ok0 = mm_memmap_read(&map, cpu.sec_state, sp, 4u, &w0);
+                                                mm_bool ok1 = mm_memmap_read(&map, cpu.sec_state, sp + 4u, 4u, &w1);
+                                                printf("[POP_PRE] pc=0x%08lx sp=0x%08lx word0=%s0x%08lx word1=%s0x%08lx\n",
+                                                       (unsigned long)f.pc_fetch,
+                                                       (unsigned long)sp,
+                                                       ok0 ? "" : "!!", (unsigned long)w0,
+                                                       ok1 ? "" : "!!", (unsigned long)w1);
+                                            }
+                                            if (svc_stack_trace_enabled() && (cpu.xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+                                                for (reg = 0; reg < 16; ++reg) {
+                                                    if (reg > 7 && reg != 15) {
+                                                        continue;
+                                                    }
+                                                    if (reg == 15) {
+                                                        if ((mask & 0x0100u) == 0u) continue;
+                                                    } else {
+                                                        if ((mask & (1u << reg)) == 0u) continue;
+                                                    }
+                                                    pop_count++;
+                                                }
+                                                printf("[POP_BEGIN] pc=0x%08lx sp=0x%08lx mask=0x%04lx count=%lu lr=0x%08lx sec=%d mode=%d ipsr=%lu\n",
+                                                       (unsigned long)f.pc_fetch,
+                                                       (unsigned long)sp_start,
+                                                       (unsigned long)mask,
+                                                       (unsigned long)pop_count,
+                                                       (unsigned long)cpu.r[14],
+                                                       (int)cpu.sec_state,
+                                                       (int)cpu.mode,
+                                                       (unsigned long)(cpu.xpsr & 0x1ffu));
+                                                {
+                                                    mm_u32 w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+                                                    mm_bool ok0 = mm_memmap_read(&map, cpu.sec_state, sp_start, 4u, &w0);
+                                                    mm_bool ok1 = mm_memmap_read(&map, cpu.sec_state, sp_start + 4u, 4u, &w1);
+                                                    mm_bool ok2 = mm_memmap_read(&map, cpu.sec_state, sp_start + 8u, 4u, &w2);
+                                                    mm_bool ok3 = mm_memmap_read(&map, cpu.sec_state, sp_start + 12u, 4u, &w3);
+                                                    printf("[POP_BEGIN] stack@sp: %s0x%08lx %s0x%08lx %s0x%08lx %s0x%08lx\n",
+                                                           ok0 ? "" : "!!", (unsigned long)w0,
+                                                           ok1 ? "" : "!!", (unsigned long)w1,
+                                                           ok2 ? "" : "!!", (unsigned long)w2,
+                                                           ok3 ? "" : "!!", (unsigned long)w3);
+                                                }
+                                            }
                                             /* TODO: check the boundaries of memory of the operators */
                                             for (reg = 0; reg < 16; ++reg) {
                                                 mm_u32 val;
@@ -2212,10 +2484,50 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     break;
                                                 }
                                                 if (reg == 15) {
-                                                    if (!handle_pc_write(&cpu, &map, val, &it_pattern, &it_remaining, &it_cond)) {
+                                                    mm_bool is_exc_return = (val & 0xffffff00u) == 0xffffff00u;
+                                                    if (is_exc_return) {
+                                                        mm_u32 sp_after = sp + 4u;
+                                                        EXEC_SET_SP(sp_after);
+                                                        sp = sp_after;
+                                                        if (!handle_pc_write(&cpu, &map, &scs, val, &it_pattern, &it_remaining, &it_cond)) {
+                                                            done = MM_TRUE;
+                                                        }
+                                                        exc_return_taken = MM_TRUE;
+                                                        break;
+                                                    }
+                                                    if (pop_trace_enabled()) {
+                                                        mm_bool suspicious = MM_FALSE;
+                                                        if ((val & 0xF0000000u) == 0u) {
+                                                            suspicious = MM_TRUE;
+                                                        } else if (map.flash.buffer != 0) {
+                                                            if (val < map.flash.base || val >= (map.flash.base + map.flash.length)) {
+                                                                suspicious = MM_TRUE;
+                                                            }
+                                                        }
+                                                        if (suspicious) {
+                                                            printf("[POP_PC] pc=0x%08lx sp=0x%08lx val=0x%08lx sec=%d mode=%d msp_ns=0x%08lx psp_ns=0x%08lx\n",
+                                                                   (unsigned long)f.pc_fetch,
+                                                                   (unsigned long)sp,
+                                                                   (unsigned long)val,
+                                                                   (int)cpu.sec_state,
+                                                                   (int)cpu.mode,
+                                                                   (unsigned long)cpu.msp_ns,
+                                                                   (unsigned long)cpu.psp_ns);
+                                                        }
+                                                    }
+                                                    if (svc_stack_trace_enabled() && (cpu.xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+                                                        printf("[POP_PC_WRITE] pc=0x%08lx sp=0x%08lx val=0x%08lx lr=0x%08lx sec=%d mode=%d ipsr=%lu\n",
+                                                               (unsigned long)f.pc_fetch,
+                                                               (unsigned long)sp,
+                                                               (unsigned long)val,
+                                                               (unsigned long)cpu.r[14],
+                                                               (int)cpu.sec_state,
+                                                               (int)cpu.mode,
+                                                               (unsigned long)(cpu.xpsr & 0x1ffu));
+                                                    }
+                                                    if (!handle_pc_write(&cpu, &map, &scs, val, &it_pattern, &it_remaining, &it_cond)) {
                                                         done = MM_TRUE;
                                                     }
-                                                    exc_return_taken = (val & 0xffffff00u) == 0xffffff00u;
                                                 } else {
                                                     cpu.r[reg] = val;
                                                 }
@@ -2226,6 +2538,16 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             }
                                             if (!exc_return_taken) {
                                                 EXEC_SET_SP(sp);
+                                                if (svc_stack_trace_enabled() && (cpu.xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+                                                    printf("[POP_END] sp_start=0x%08lx sp_end=0x%08lx r13=0x%08lx msp_s=0x%08lx msp_ns=0x%08lx psp_s=0x%08lx psp_ns=0x%08lx\n",
+                                                           (unsigned long)sp_start,
+                                                           (unsigned long)sp,
+                                                           (unsigned long)cpu.r[13],
+                                                           (unsigned long)cpu.msp_s,
+                                                           (unsigned long)cpu.msp_ns,
+                                                           (unsigned long)cpu.psp_s,
+                                                           (unsigned long)cpu.psp_ns);
+                                                }
                                             }
                                         } break;
                         default:

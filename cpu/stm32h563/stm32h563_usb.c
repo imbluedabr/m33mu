@@ -67,6 +67,7 @@ struct stm32h563_usb {
 
 static struct stm32h563_usb g_usb;
 static int g_usb_trace = -1;
+static int g_usb_pma_trace = -1;
 static mm_u32 g_usb_last_ep_read[8] = {
     0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
     0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu
@@ -83,6 +84,15 @@ static mm_bool usb_trace_enabled(void)
         g_usb_trace = (v && v[0] != '\0') ? 1 : 0;
     }
     return g_usb_trace ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool usb_pma_trace_enabled(void)
+{
+    if (g_usb_pma_trace < 0) {
+        const char *v = getenv("M33MU_USB_PMA_TRACE");
+        g_usb_pma_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
+    return g_usb_pma_trace ? MM_TRUE : MM_FALSE;
 }
 
 static void usb_trace(const char *fmt, ...)
@@ -517,6 +527,12 @@ static mm_bool usb_pma_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_
     if (offset + size_bytes > USB_PMA_SIZE) return MM_FALSE;
     for (i = 0; i < size_bytes; ++i) {
         g_usb.pma[offset + i] = (mm_u8)((value >> (8u * i)) & 0xFFu);
+    }
+    if (usb_pma_trace_enabled()) {
+        if (offset < 0x40u) {
+            printf("[USB_PMA_BTABLE] off=0x%03x size=%u val=0x%08x\n",
+                   (unsigned)offset, (unsigned)size_bytes, (unsigned)value);
+        }
     }
     if (usb_trace_enabled()) {
         mm_u16 tx_addr = 0;

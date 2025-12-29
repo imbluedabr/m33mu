@@ -50,6 +50,7 @@ struct mm_execute_ctx {
     mm_bool *done;
     mm_bool (*handle_pc_write)(struct mm_cpu *cpu,
                                struct mm_memmap *map,
+                               struct mm_scs *scs,
                                mm_u32 value,
                                mm_u8 *it_pattern,
                                mm_u8 *it_remaining,
@@ -69,6 +70,7 @@ struct mm_execute_ctx {
                                  mm_u32 ufsr_bits);
     mm_bool (*exc_return_unstack)(struct mm_cpu *cpu,
                                   struct mm_memmap *map,
+                                  struct mm_scs *scs,
                                   mm_u32 exc_ret);
     mm_bool (*enter_exception)(struct mm_cpu *cpu,
                                struct mm_memmap *map,

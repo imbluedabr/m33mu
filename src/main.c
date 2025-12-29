@@ -60,6 +60,7 @@
 #include <stdlib.h>
 
 #define CCR_DIV_0_TRP (1u << 4)
+#define CCR_STKALIGN (1u << 9)
 #define UFSR_UNDEFINSTR (1u << 16)
 #define UFSR_DIVBYZERO (1u << 25)
 #define UFSR_STKOF (1u << 20)
@@ -117,6 +118,60 @@ static mm_u32 cfg_total_ram(const struct mm_target_cfg *cfg)
         return total;
     }
     return cfg->ram_size_s;
+}
+
+static void dump_cpu_regs(const struct mm_cpu *cpu, const char *tag)
+{
+    if (cpu == 0 || tag == 0) {
+        return;
+    }
+    printf("[%s] r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx r4=0x%08lx r5=0x%08lx r6=0x%08lx r7=0x%08lx\n",
+           tag,
+           (unsigned long)cpu->r[0], (unsigned long)cpu->r[1],
+           (unsigned long)cpu->r[2], (unsigned long)cpu->r[3],
+           (unsigned long)cpu->r[4], (unsigned long)cpu->r[5],
+           (unsigned long)cpu->r[6], (unsigned long)cpu->r[7]);
+    printf("[%s] r8=0x%08lx r9=0x%08lx r10=0x%08lx r11=0x%08lx r12=0x%08lx r13=0x%08lx r14=0x%08lx r15=0x%08lx\n",
+           tag,
+           (unsigned long)cpu->r[8], (unsigned long)cpu->r[9],
+           (unsigned long)cpu->r[10], (unsigned long)cpu->r[11],
+           (unsigned long)cpu->r[12], (unsigned long)cpu->r[13],
+           (unsigned long)cpu->r[14], (unsigned long)cpu->r[15]);
+    printf("[%s] xpsr=0x%08lx ipsr=%lu mode=%d sec=%d ctrl_s=0x%08lx ctrl_ns=0x%08lx msp_s=0x%08lx msp_ns=0x%08lx psp_s=0x%08lx psp_ns=0x%08lx active_sp=0x%08lx\n",
+           tag,
+           (unsigned long)cpu->xpsr,
+           (unsigned long)(cpu->xpsr & 0x1ffu),
+           (int)cpu->mode,
+           (int)cpu->sec_state,
+           (unsigned long)cpu->control_s,
+           (unsigned long)cpu->control_ns,
+           (unsigned long)cpu->msp_s,
+           (unsigned long)cpu->msp_ns,
+           (unsigned long)cpu->psp_s,
+           (unsigned long)cpu->psp_ns,
+           (unsigned long)mm_cpu_get_active_sp((struct mm_cpu *)cpu));
+}
+
+static void dump_exc_stack_state(const struct mm_cpu *cpu, const char *tag)
+{
+    mm_u32 i;
+    mm_u32 max;
+    if (cpu == 0 || tag == 0) {
+        return;
+    }
+    max = cpu->exc_depth;
+    if (max > MM_EXC_STACK_MAX) {
+        max = MM_EXC_STACK_MAX;
+    }
+    printf("[%s] exc_depth=%u\n", tag, (unsigned)cpu->exc_depth);
+    for (i = 0; i < max; ++i) {
+        printf("[%s] exc[%u] sp=0x%08lx use_psp=%u sec=%u\n",
+               tag,
+               (unsigned)i,
+               (unsigned long)cpu->exc_sp[i],
+               (unsigned)cpu->exc_use_psp[i],
+               (unsigned)cpu->exc_sec[i]);
+    }
 }
 
 static mm_bool parse_pc_trace_range(const char *s, mm_u32 *start_out, mm_u32 *end_out)
@@ -725,6 +780,28 @@ static mm_bool stack_trace_enabled(void)
     return g_stack_trace ? MM_TRUE : MM_FALSE;
 }
 
+static int g_svc_stack_trace = -1;
+
+static mm_bool svc_stack_trace_enabled(void)
+{
+    if (g_svc_stack_trace < 0) {
+        const char *v = getenv("M33MU_SVC_STACK_TRACE");
+        g_svc_stack_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
+    return g_svc_stack_trace ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool primask_blocks_current(const struct mm_cpu *cpu)
+{
+    if (cpu == 0) {
+        return MM_FALSE;
+    }
+    if (cpu->sec_state == MM_NONSECURE) {
+        return cpu->primask_ns != 0u;
+    }
+    return cpu->primask_s != 0u;
+}
+
 static mm_bool prot_mux_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_state sec, mm_u32 addr, mm_u32 size_bytes)
 {
     (void)opaque;
@@ -748,29 +825,35 @@ static mm_bool allow_system_reset(const struct mm_target_cfg *cfg, const char *c
 static mm_u32 exc_return_encode(enum mm_sec_state sec, mm_bool use_psp, mm_bool to_thread)
 {
     /* EXC_RETURN encodings (Armv8-M, DDI0553):
-     *  bits[31:8] are always 0xFFFFFF
-     *  bit6 selects target security state (1=Secure, 0=Non-secure)
-     *  bit3 selects Thread(1) vs Handler(0) return
-     *  bit2 selects PSP(1) vs MSP(0) when returning to Thread
-     *
-     * Typical values:
-     *  Secure Thread/MSP: 0xFFFFFFF9
-     *  Secure Thread/PSP: 0xFFFFFFFD
-     *  Secure Handler/MSP:0xFFFFFFF1
-     *  Non-sec Thread/MSP:0xFFFFFFB9
-     *  Non-sec Thread/PSP:0xFFFFFFBD
-     *  Non-sec Handler/MSP:0xFFFFFFB1
+     *  bits[31:24] = 0xFF, bits[23:7] = RES1
+     *  bit6 S      = stack security (1=Secure, 0=Non-secure)
+     *  bit5 DCRS   = 1 (default callee stacking)
+     *  bit4 FType  = 1 (no FP context)
+     *  bit3 Mode   = 1 Thread, 0 Handler
+     *  bit2 SPSEL  = 1 PSP, 0 MSP
+     *  bit1 RES0
+     *  bit0 ES     = 1 Secure, 0 Non-secure
      */
-    mm_u32 base = to_thread
-        ? ((sec == MM_NONSECURE) ? 0xFFFFFFB9u : 0xFFFFFFF9u)
-        : ((sec == MM_NONSECURE) ? 0xFFFFFFB1u : 0xFFFFFFF1u);
-    if (to_thread && use_psp) {
-        base |= 0x4u; /* SPSEL bit */
+    mm_u32 base = 0xFFFFFF80u;
+    if (sec == MM_SECURE) {
+        base |= (1u << 6); /* Secure stack */
+        base |= 1u;        /* ES=Secure */
+    }
+    base |= (1u << 5);     /* DCRS */
+    base |= (1u << 4);     /* FType */
+    if (to_thread) {
+        base |= (1u << 3);
+        if (use_psp) {
+            base |= (1u << 2);
+        }
     }
     return base;
 }
 
-static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_u32 exc_ret)
+static mm_bool exc_return_unstack(struct mm_cpu *cpu,
+                                  struct mm_memmap *map,
+                                  struct mm_scs *scs,
+                                  mm_u32 exc_ret)
 {
     struct mm_exc_return_info info;
     mm_u32 sp;
@@ -782,6 +865,7 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_
     mm_u32 control_s_val;
     mm_u32 control_ns_val;
     int i;
+    (void)scs;
 
     info = mm_exc_return_decode(exc_ret);
     if (!info.valid) {
@@ -790,8 +874,16 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_
         }
         return MM_FALSE;
     }
+    if (svc_stack_trace_enabled() && (cpu->xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+        dump_cpu_regs(cpu, "SVC_RETURN_PRE");
+        dump_exc_stack_state(cpu, "SVC_RETURN_PRE");
+    }
+    if (stack_trace_enabled()) {
+        dump_cpu_regs(cpu, "EXC_UNSTACK_PRE");
+        dump_exc_stack_state(cpu, "EXC_UNSTACK_PRE");
+    }
 
-    if (stack_trace_enabled() && info.target_sec == MM_SECURE) {
+    if (stack_trace_enabled()) {
         printf("[EXC_UNSTACK] exc_ret=0x%08lx target_sec=%d to_thread=%d use_psp=%d mode=%d cur_sec=%d msp_s=0x%08lx msp_ns=0x%08lx psp_s=0x%08lx psp_ns=0x%08lx ctrl_s=0x%08lx ctrl_ns=0x%08lx\n",
                (unsigned long)exc_ret,
                (int)info.target_sec,
@@ -807,31 +899,65 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_
                (unsigned long)cpu->control_ns);
     }
 
-    /* Prefer the recorded SP from exception entry to avoid guessing. */
+    /* Unstack from live PSP on Thread+PSP returns (OS may switch PSP).
+     * For Thread+MSP returns, prefer recorded MSP for this exception level. */
+    if (stack_trace_enabled() ||
+        (svc_stack_trace_enabled() && (cpu->xpsr & 0x1ffu) == MM_VECT_SVCALL)) {
+        printf("[EXC_STACK_POP] exc_ret=0x%08lx depth_before=%u\n",
+               (unsigned long)exc_ret,
+               (unsigned)cpu->exc_depth);
+        dump_exc_stack_state(cpu, "EXC_STACK_POP_PRE");
+    }
     if (cpu->exc_depth > 0) {
         cpu->exc_depth--;
-        sp = cpu->exc_sp[cpu->exc_depth];
-        /* Optional: warn if EXC_RETURN disagrees with recorded stack choice. */
-        if (cpu->exc_sec[cpu->exc_depth] != info.target_sec) {
-            /* Fall back to architectural SP selection if security mismatched. */
-            if (info.use_psp) {
-                sp = (info.target_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s;
-            } else {
-                sp = (info.target_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
-            }
+    }
+    if (stack_trace_enabled() ||
+        (svc_stack_trace_enabled() && (cpu->xpsr & 0x1ffu) == MM_VECT_SVCALL)) {
+        printf("[EXC_STACK_POP] exc_ret=0x%08lx depth_after=%u\n",
+               (unsigned long)exc_ret,
+               (unsigned)cpu->exc_depth);
+        dump_exc_stack_state(cpu, "EXC_STACK_POP_POST");
+    }
+    if (info.use_psp) {
+        mm_u32 live_psp = (info.target_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s;
+        if (live_psp != 0u) {
+            sp = live_psp;
+        } else {
+            sp = (cpu->exc_depth < MM_EXC_STACK_MAX) ? cpu->exc_sp[cpu->exc_depth]
+                                                     : ((info.target_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s);
         }
     } else {
-        /* Fallback to architectural selection if no recorded frame. */
-        if (info.use_psp) {
-            sp = (info.target_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s;
+        mm_u32 live_msp = (info.target_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
+        if (live_msp != 0u) {
+            sp = live_msp;
         } else {
-            sp = (info.target_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
+            sp = (cpu->exc_depth < MM_EXC_STACK_MAX) ? cpu->exc_sp[cpu->exc_depth]
+                                                     : ((info.target_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s);
         }
     }
-    if (stack_trace_enabled() && info.target_sec == MM_SECURE) {
-        printf("[EXC_UNSTACK] chosen sp=0x%08lx exc_depth=%u\n",
+    if (stack_trace_enabled() || svc_stack_trace_enabled()) {
+        printf("[EXC_UNSTACK_PRE] exc_ret=0x%08lx use_psp=%d sp_start=0x%08lx msp_ns=0x%08lx psp_ns=0x%08lx\n",
+               (unsigned long)exc_ret,
+               (int)info.use_psp,
                (unsigned long)sp,
-               (unsigned)cpu->exc_depth);
+               (unsigned long)cpu->msp_ns,
+               (unsigned long)cpu->psp_ns);
+    }
+    if (stack_trace_enabled()) {
+        mm_u32 rec_sp = 0;
+        mm_u8 rec_use_psp = 0;
+        mm_u8 rec_sec = 0;
+        if (cpu->exc_depth < MM_EXC_STACK_MAX) {
+            rec_sp = cpu->exc_sp[cpu->exc_depth];
+            rec_use_psp = cpu->exc_use_psp[cpu->exc_depth];
+            rec_sec = cpu->exc_sec[cpu->exc_depth];
+        }
+        printf("[EXC_UNSTACK] chosen sp=0x%08lx exc_depth=%u rec_sp=0x%08lx rec_use_psp=%u rec_sec=%u\n",
+               (unsigned long)sp,
+               (unsigned)cpu->exc_depth,
+               (unsigned long)rec_sp,
+               (unsigned)rec_use_psp,
+               (unsigned)rec_sec);
     }
 
     msp_s_val = cpu->msp_s;
@@ -848,6 +974,42 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_
             return MM_FALSE;
         }
     }
+    if (stack_trace_enabled() || svc_stack_trace_enabled()) {
+        printf("[EXC_UNSTACK_FRAME] r0=%08lx r1=%08lx r2=%08lx r3=%08lx r12=%08lx lr=%08lx pc=%08lx xpsr=%08lx\n",
+               (unsigned long)frame[0],
+               (unsigned long)frame[1],
+               (unsigned long)frame[2],
+               (unsigned long)frame[3],
+               (unsigned long)frame[4],
+               (unsigned long)frame[5],
+               (unsigned long)frame[6],
+               (unsigned long)frame[7]);
+    }
+    if (svc_stack_trace_enabled() &&
+        info.use_psp &&
+        info.to_thread &&
+        (cpu->xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+        mm_u32 sp_after = sp + 32u;
+        if ((frame[7] & (1u << 9)) != 0u) {
+            sp_after += 4u;
+        }
+        printf("[SVC_STACK_RETURN] sp=0x%08lx sp_after=0x%08lx r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx r12=0x%08lx lr=0x%08lx pc=0x%08lx xpsr=0x%08lx psp_ns=0x%08lx ctrl_ns=0x%08lx handler_lr=0x%08lx ipsr=%lu msp_ns=0x%08lx\n",
+               (unsigned long)sp,
+               (unsigned long)sp_after,
+               (unsigned long)frame[0],
+               (unsigned long)frame[1],
+               (unsigned long)frame[2],
+               (unsigned long)frame[3],
+               (unsigned long)frame[4],
+               (unsigned long)frame[5],
+               (unsigned long)frame[6],
+               (unsigned long)frame[7],
+               (unsigned long)cpu->psp_ns,
+               (unsigned long)cpu->control_ns,
+               (unsigned long)exc_ret,
+               (unsigned long)(cpu->xpsr & 0x1ffu),
+               (unsigned long)cpu->msp_ns);
+    }
     {
         mm_u32 pc_raw = frame[6];
         mm_bool pc_suspect = MM_FALSE;
@@ -858,7 +1020,7 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_
                 pc_suspect = MM_TRUE;
             }
         }
-        if (pc_suspect && stack_trace_enabled() && info.target_sec == MM_SECURE) {
+        if (pc_suspect && stack_trace_enabled()) {
             printf("[EXC_UNSTACK] sec=%d sp=0x%08lx r0=%08lx r1=%08lx r2=%08lx r3=%08lx r12=%08lx lr=%08lx pc=%08lx xpsr=%08lx\n",
                    (int)info.target_sec,
                    (unsigned long)sp,
@@ -890,6 +1052,9 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_
     }
 
     sp += 32u;
+    if ((frame[7] & (1u << 9)) != 0u) {
+        sp += 4u;
+    }
     if (info.use_psp) {
         if (info.target_sec == MM_NONSECURE) cpu->psp_ns = sp;
         else cpu->psp_s = sp;
@@ -897,16 +1062,55 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_
         if (info.target_sec == MM_NONSECURE) cpu->msp_ns = sp;
         else cpu->msp_s = sp;
     }
-    /* Mirror active SP into R13 for thread execution. */
-    if (info.use_psp) {
-        cpu->r[13] = (info.target_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s;
-    } else {
+    if (stack_trace_enabled() || svc_stack_trace_enabled()) {
+        printf("[EXC_UNSTACK_SP] exc_ret=0x%08lx use_psp=%d sp_final=0x%08lx\n",
+               (unsigned long)exc_ret,
+               (int)info.use_psp,
+               (unsigned long)sp);
+    }
+    /*
+     * On exception return to Thread mode, EXC_RETURN.SPSEL selects the
+     * stack used for unstacking. Some firmware (e.g., frosted) programs
+     * CONTROL.SPSEL in the handler to switch to PSP after return; preserve
+     * an already-set SPSEL bit rather than unconditionally clearing it.
+     */
+    if (info.to_thread) {
+        if (info.target_sec == MM_NONSECURE) {
+            if (info.use_psp) {
+                cpu->control_ns |= 0x2u;
+            } else if ((cpu->control_ns & 0x2u) == 0u) {
+                cpu->control_ns &= ~0x2u;
+            }
+        } else {
+            if (info.use_psp) {
+                cpu->control_s |= 0x2u;
+            } else if ((cpu->control_s & 0x2u) == 0u) {
+                cpu->control_s &= ~0x2u;
+            }
+        }
+    }
+    /* Mirror active SP into R13: handler always MSP; thread uses CONTROL.SPSEL. */
+    if (!info.to_thread) {
         cpu->r[13] = (info.target_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
+    } else {
+        mm_u32 ctrl = (info.target_sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s;
+        if ((ctrl & 0x2u) != 0u) {
+            cpu->r[13] = (info.target_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s;
+        } else {
+            cpu->r[13] = (info.target_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
+        }
     }
 
+    if (stack_trace_enabled() && cpu->sec_state != info.target_sec) {
+        printf("[SEC_STATE] exc_return sec=%d->%d to_thread=%d use_psp=%d\n",
+               (int)cpu->sec_state,
+               (int)info.target_sec,
+               (int)info.to_thread,
+               (int)info.use_psp);
+    }
     cpu->sec_state = info.target_sec;
     cpu->mode = info.to_thread ? MM_THREAD : MM_HANDLER;
-    if (stack_trace_enabled() && info.target_sec == MM_SECURE) {
+    if (stack_trace_enabled()) {
         printf("[EXC_UNSTACK] new pc=0x%08lx sp=0x%08lx r13=0x%08lx mode=%d sec=%d\n",
                (unsigned long)cpu->r[15],
                (unsigned long)((info.use_psp)
@@ -916,11 +1120,20 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu, struct mm_memmap *map, mm_
                (int)cpu->mode,
                (int)cpu->sec_state);
     }
+    if (svc_stack_trace_enabled() && (cpu->xpsr & 0x1ffu) == 0u) {
+        dump_cpu_regs(cpu, "SVC_RETURN_POST");
+        dump_exc_stack_state(cpu, "SVC_RETURN_POST");
+    }
+    if (stack_trace_enabled()) {
+        dump_cpu_regs(cpu, "EXC_UNSTACK_POST");
+        dump_exc_stack_state(cpu, "EXC_UNSTACK_POST");
+    }
     return MM_TRUE;
 }
 
 static mm_bool handle_pc_write(struct mm_cpu *cpu,
                                struct mm_memmap *map,
+                               struct mm_scs *scs,
                                mm_u32 value,
                                mm_u8 *it_pattern,
                                mm_u8 *it_remaining,
@@ -988,6 +1201,9 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
     }
 
     if (scs->pend_st) {
+        if (primask_blocks_current(cpu)) {
+            return MM_TRUE;
+        }
         if (!enter_exception(cpu, map, scs, MM_VECT_SYSTICK, cpu->r[15] & ~1u, cpu->xpsr)) {
             if (done) *done = MM_TRUE;
         } else {
@@ -996,6 +1212,9 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         return MM_TRUE;
     }
     if (scs->pend_sv) {
+        if (primask_blocks_current(cpu)) {
+            return MM_TRUE;
+        }
         if (!enter_exception(cpu, map, scs, MM_VECT_PENDSV, cpu->r[15] & ~1u, cpu->xpsr)) {
             if (done) *done = MM_TRUE;
         } else {
@@ -1052,6 +1271,11 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             return MM_TRUE;
         }
 
+        if (*it_remaining > 0u && itstate_get(cpu->xpsr) == 0u) {
+            *it_pattern = 0;
+            *it_remaining = 0;
+            *it_cond = 0;
+        }
         execute_it = MM_TRUE;
         if (*it_remaining > 0u && d.kind != MM_OP_IT) {
             mm_bool cond_true = MM_FALSE;
@@ -1130,18 +1354,45 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
 /* Handle writes to PC; detect EXC_RETURN magic values and perform unstack. */
 static mm_bool handle_pc_write(struct mm_cpu *cpu,
                                struct mm_memmap *map,
+                               struct mm_scs *scs,
                                mm_u32 value,
                                mm_u8 *it_pattern,
                                mm_u8 *it_remaining,
                                mm_u8 *it_cond)
 {
+    if ((value & 1u) == 0u && (value & 0xffffff00u) != 0xffffff00u) {
+        if (!raise_usage_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr, (1u << 16))) {
+            return MM_FALSE;
+        }
+        return MM_TRUE;
+    }
     if ((value & 0xffffff00u) == 0xffffff00u) {
-        if (!exc_return_unstack(cpu, map, value)) {
+        if (svc_stack_trace_enabled() && (cpu->xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+            printf("[EXC_RETURN_WRITE] value=0x%08lx pc=0x%08lx lr=0x%08lx mode=%d sec=%d\n",
+                   (unsigned long)value,
+                   (unsigned long)cpu->r[15],
+                   (unsigned long)cpu->r[14],
+                   (int)cpu->mode,
+                   (int)cpu->sec_state);
+            dump_cpu_regs(cpu, "EXC_RETURN_WRITE");
+            dump_exc_stack_state(cpu, "EXC_RETURN_WRITE");
+        }
+        if (!exc_return_unstack(cpu, map, scs, value)) {
             printf("EXC_RETURN unstack failed\n");
             return MM_FALSE;
         }
         itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
         return MM_TRUE;
+    }
+    if (svc_stack_trace_enabled() && (cpu->xpsr & 0x1ffu) == MM_VECT_SVCALL) {
+        printf("[PC_WRITE] value=0x%08lx pc=0x%08lx lr=0x%08lx mode=%d sec=%d\n",
+               (unsigned long)value,
+               (unsigned long)cpu->r[15],
+               (unsigned long)cpu->r[14],
+               (int)cpu->mode,
+               (int)cpu->sec_state);
+        dump_cpu_regs(cpu, "PC_WRITE");
+        dump_exc_stack_state(cpu, "PC_WRITE");
     }
     cpu->r[15] = value | 1u;
     return MM_TRUE;
@@ -1214,12 +1465,21 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
 
     sp = use_psp_entry ? ((sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s)
                        : ((sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s);
-    for (i = 7; i >= 0; --i) {
-        sp -= 4u;
-        if (!mm_memmap_write(map, sec, sp, 4u, frame[i])) {
-            printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)sp);
-            return MM_FALSE;
+    if ((scs->ccr & CCR_STKALIGN) != 0u && (sp & 7u) != 0u) {
+        sp -= 4u; /* Align stack to 8-byte boundary. */
+        frame[7] |= (1u << 9); /* Stack alignment padding flag. */
+    } else {
+        frame[7] &= ~(1u << 9);
+    }
+    {
+        mm_u32 sp_frame = sp - 32u;
+        for (i = 0; i < 8; ++i) {
+            if (!mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
+                printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
+                return MM_FALSE;
+            }
         }
+        sp = sp_frame;
     }
     if (use_psp_entry) {
         if (sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
@@ -1231,6 +1491,15 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
         cpu->exc_sec[cpu->exc_depth] = sec;
         cpu->exc_depth++;
+    }
+    if (stack_trace_enabled()) {
+        printf("[EXC_STACK_PUSH] exc=%lu pushed_sp=0x%08lx use_psp=%u sec=%u new_depth=%u\n",
+               (unsigned long)MM_VECT_HARDFAULT,
+               (unsigned long)sp,
+               (unsigned)use_psp_entry,
+               (unsigned)sec,
+               (unsigned)cpu->exc_depth);
+        dump_exc_stack_state(cpu, "EXC_STACK_PUSH");
     }
     /* Handler mode always uses MSP (ARM ARM DDI0553). Set R13 accordingly. */
     cpu->r[13] = (sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
@@ -1385,6 +1654,12 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     use_psp_entry = (cpu->mode == MM_THREAD) && ((sec == MM_NONSECURE ? cpu->control_ns : cpu->control_s) & 0x2u);
     sp = use_psp_entry ? ((sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s)
                        : ((sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s);
+    if ((scs->ccr & CCR_STKALIGN) != 0u && (sp & 7u) != 0u) {
+        sp -= 4u; /* Align stack to 8-byte boundary. */
+        frame[7] |= (1u << 9); /* Stack alignment padding flag. */
+    } else {
+        frame[7] &= ~(1u << 9);
+    }
     msp_s_val = cpu->msp_s;
     msp_ns_val = cpu->msp_ns;
     psp_s_val = cpu->psp_s;
@@ -1443,15 +1718,18 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     if (g_quit_on_faults) {
         return MM_FALSE;
     }
-    for (i = 7; i >= 0; --i) {
-        mm_bool ok;
-        sp -= 4u;
-        ok = mm_memmap_write(map, sec, sp, 4u, frame[i]);
-        if (!ok) {
-            /* Stack write failed: escalate to HardFault (per ARMv8-M, stacking fault escalates). */
-            printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)sp);
-            return MM_FALSE;
+    {
+        mm_u32 sp_frame = sp - 32u;
+        for (i = 0; i < 8; ++i) {
+            mm_bool ok = mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i]);
+            if (!ok) {
+                /* Stack write failed: escalate to HardFault (per ARMv8-M, stacking fault escalates). */
+                printf("HardFault: stacking failed at 0x%08lx\n",
+                       (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
+                return MM_FALSE;
+            }
         }
+        sp = sp_frame;
     }
     if (use_psp_entry) {
         if (sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
@@ -1503,6 +1781,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     mm_bool use_psp_entry;
     enum mm_mode pre_mode;
     mm_u32 exc_ret_val;
+    mm_bool tail_chain = MM_FALSE;
     int i;
 
     if (cpu == 0 || map == 0 || scs == 0) {
@@ -1511,6 +1790,17 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
 
     sec = cpu->sec_state;
     pre_mode = cpu->mode;
+    if (pre_mode == MM_HANDLER) {
+        tail_chain = MM_FALSE;
+    } else {
+        mm_u32 lr = cpu->r[14];
+        if ((lr & 0xffffff00u) == 0xffffff00u) {
+            struct mm_exc_return_info info = mm_exc_return_decode(lr);
+            if (info.valid && info.to_thread) {
+                tail_chain = MM_TRUE;
+            }
+        }
+    }
 
     if (exc_num >= 16u) {
         vtor = (handler_sec == MM_NONSECURE) ? scs->vtor_ns : scs->vtor_s;
@@ -1520,13 +1810,6 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
             if (fallback_vtor != vtor) {
                 (void)mm_vector_read(map, handler_sec, fallback_vtor, exc_num, &handler);
             }
-        }
-        if (exc_num == (16u + 74u)) {
-            printf("[IRQ_ENTER] irq=74 sec=%d vtor=0x%08lx handler=0x%08lx pc=0x%08lx\n",
-                   (int)handler_sec,
-                   (unsigned long)vtor,
-                   (unsigned long)handler,
-                   (unsigned long)cpu->r[15]);
         }
     } else {
         (void)mm_exception_read_handler(map, scs, handler_sec, (enum mm_vector_index)exc_num, &handler);
@@ -1560,11 +1843,24 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     frame[6] = return_pc | 1u;
     frame[7] = xpsr_in | 0x01000000u; /* preserve full xPSR/IT/flags/IPSR; ensure T */
 
-    use_psp_entry = (pre_mode == MM_THREAD) && (((sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s) & 0x2u);
-    exc_ret_val = exc_return_encode(sec, use_psp_entry, pre_mode == MM_THREAD);
+    if (pre_mode == MM_HANDLER) {
+        use_psp_entry = MM_FALSE;
+        exc_ret_val = exc_return_encode(sec, MM_FALSE, MM_FALSE);
+    } else {
+        use_psp_entry = (((sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s) & 0x2u) != 0u;
+        exc_ret_val = tail_chain ? cpu->r[14] : exc_return_encode(sec, use_psp_entry, MM_TRUE);
+    }
 
     sp = use_psp_entry ? ((sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s)
                        : ((sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s);
+    if (!tail_chain) {
+        if ((scs->ccr & CCR_STKALIGN) != 0u && (sp & 7u) != 0u) {
+            sp -= 4u; /* Align stack to 8-byte boundary. */
+            frame[7] |= (1u << 9); /* Stack alignment padding flag. */
+        } else {
+            frame[7] &= ~(1u << 9);
+        }
+    }
     if (stack_trace_enabled()) {
         printf("[EXC_ENTER] exc=%lu pre_mode=%d sec=%d handler_sec=%d use_psp=%d sp=0x%08lx ret_pc=0x%08lx xpsr=0x%08lx handler=0x%08lx msp_s=0x%08lx msp_ns=0x%08lx psp_s=0x%08lx psp_ns=0x%08lx ctrl_s=0x%08lx ctrl_ns=0x%08lx\n",
                (unsigned long)exc_num,
@@ -1583,28 +1879,97 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
                (unsigned long)cpu->control_s,
                (unsigned long)cpu->control_ns);
     }
-    for (i = 7; i >= 0; --i) {
-        sp -= 4u;
-        if (!mm_memmap_write(map, sec, sp, 4u, frame[i])) {
-            printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)sp);
-            return MM_FALSE;
+    if (svc_stack_trace_enabled() &&
+        exc_num == MM_VECT_SVCALL &&
+        pre_mode == MM_THREAD) {
+        dump_cpu_regs(cpu, "SVC_ENTER_PRE_STACK");
+        dump_exc_stack_state(cpu, "SVC_ENTER_PRE_STACK");
+    }
+    if (stack_trace_enabled()) {
+        dump_cpu_regs(cpu, "EXC_ENTER_PRE_STACK");
+        dump_exc_stack_state(cpu, "EXC_ENTER_PRE_STACK");
+    }
+    if (svc_stack_trace_enabled() &&
+        exc_num == MM_VECT_SVCALL &&
+        pre_mode == MM_THREAD &&
+        use_psp_entry) {
+        printf("[SVC_STACK_ENTER] svc_pc=0x%08lx ret_pc=0x%08lx sp=0x%08lx r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx r12=0x%08lx lr=0x%08lx pc=0x%08lx xpsr=0x%08lx psp_ns=0x%08lx ctrl_ns=0x%08lx handler_lr=0x%08lx ipsr=%lu msp_ns=0x%08lx\n",
+               (unsigned long)cpu->r[15],
+               (unsigned long)return_pc,
+               (unsigned long)sp,
+               (unsigned long)frame[0],
+               (unsigned long)frame[1],
+               (unsigned long)frame[2],
+               (unsigned long)frame[3],
+               (unsigned long)frame[4],
+               (unsigned long)frame[5],
+               (unsigned long)frame[6],
+               (unsigned long)frame[7],
+               (unsigned long)cpu->psp_ns,
+               (unsigned long)cpu->control_ns,
+               (unsigned long)exc_ret_val,
+               (unsigned long)exc_num,
+               (unsigned long)cpu->msp_ns);
+    }
+    if (!tail_chain) {
+        {
+            mm_u32 sp_frame = sp - 32u;
+            for (i = 0; i < 8; ++i) {
+                if (!mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
+                    printf("HardFault: stacking failed at 0x%08lx\n",
+                           (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
+                    return MM_FALSE;
+                }
+            }
+            sp = sp_frame;
+        }
+        if (use_psp_entry) {
+            if (sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
+        } else {
+            if (sec == MM_NONSECURE) cpu->msp_ns = sp; else cpu->msp_s = sp;
+        }
+        if (cpu->exc_depth < MM_EXC_STACK_MAX) {
+            cpu->exc_sp[cpu->exc_depth] = sp;
+            cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
+            cpu->exc_sec[cpu->exc_depth] = sec;
+            cpu->exc_depth++;
         }
     }
-    if (use_psp_entry) {
-        if (sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
-    } else {
-        if (sec == MM_NONSECURE) cpu->msp_ns = sp; else cpu->msp_s = sp;
+    /* Exception handlers always use MSP; mirror it into r13 for handler prologue. */
+    cpu->r[13] = (sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
+    if (svc_stack_trace_enabled() &&
+        exc_num == MM_VECT_SVCALL &&
+        pre_mode == MM_THREAD) {
+        dump_cpu_regs(cpu, "SVC_ENTER_POST_STACK");
+        dump_exc_stack_state(cpu, "SVC_ENTER_POST_STACK");
     }
-    if (cpu->exc_depth < MM_EXC_STACK_MAX) {
-        cpu->exc_sp[cpu->exc_depth] = sp;
-        cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
-        cpu->exc_sec[cpu->exc_depth] = sec;
-        cpu->exc_depth++;
+    if (stack_trace_enabled()) {
+        dump_cpu_regs(cpu, "EXC_ENTER_POST_STACK");
+        dump_exc_stack_state(cpu, "EXC_ENTER_POST_STACK");
     }
     cpu->r[13] = (handler_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
     cpu->xpsr = (xpsr_in & 0xF8000000u) | 0x01000000u | (exc_num & 0x1FFu);
     cpu->r[14] = exc_ret_val;
     cpu->mode = MM_HANDLER;
+    /* On exception entry, CONTROL.SPSEL becomes 0 for the handler security state. */
+    if (handler_sec == MM_NONSECURE) {
+        cpu->control_ns &= ~0x2u;
+    } else {
+        cpu->control_s &= ~0x2u;
+    }
+    if (stack_trace_enabled()) {
+        printf("[EXC_ENTER_SPSEL] sec=%d control_s=0x%08lx control_ns=0x%08lx\n",
+               (int)handler_sec,
+               (unsigned long)cpu->control_s,
+               (unsigned long)cpu->control_ns);
+    }
+    if (stack_trace_enabled() && cpu->sec_state != handler_sec) {
+        printf("[SEC_STATE] enter exc=%lu sec=%d->%d mode=%d\n",
+               (unsigned long)exc_num,
+               (int)cpu->sec_state,
+               (int)handler_sec,
+               (int)cpu->mode);
+    }
     cpu->sec_state = handler_sec;
     cpu->r[15] = handler | 1u;
     cpu->sleeping = MM_FALSE;
@@ -1664,8 +2029,6 @@ int main(int argc, char **argv)
     mm_u64 tui_steps_offset = 0;
     mm_u64 tui_steps_latched = 0;
     mm_bool last_running = MM_TRUE;
-    mm_bool opt_pc_trace = MM_FALSE;
-    mm_bool opt_pc_trace_mem = MM_FALSE;
     mm_bool opt_strcmp_trace = MM_FALSE;
     mm_bool opt_usb = MM_FALSE;
     int usb_port = 3240;
@@ -1677,8 +2040,6 @@ int main(int argc, char **argv)
     struct mm_tpm_tis_cfg tpm_cfgs[4];
     int tpm_count = 0;
 #endif
-    mm_u32 pc_trace_start = 0;
-    mm_u32 pc_trace_end = 0;
     mm_u32 strcmp_trace_start = 0;
     mm_u32 strcmp_trace_end = 0;
     mm_u32 strcmp_entry = 0;
@@ -1686,8 +2047,6 @@ int main(int argc, char **argv)
     mm_u32 strcmp_entry_r0 = 0;
     mm_bool strcmp_after_it = MM_FALSE;
     mm_bool opt_no_tz = MM_FALSE;
-    const char *pc_trace_env = getenv("M33MU_PC_TRACE");
-    const char *pc_trace_mem_env = getenv("M33MU_PC_TRACE_MEM");
     const char *strcmp_trace_env = getenv("M33MU_STRCMP_TRACE");
     const char *strcmp_entry_env = getenv("M33MU_STRCMP_ENTRY");
     const char *memwatch_env = getenv("M33MU_MEMWATCH");
@@ -1697,14 +2056,6 @@ int main(int argc, char **argv)
     mm_u32 capstone_pc = 0;
     mm_bool opt_capstone_pc = MM_FALSE;
 
-    if (pc_trace_env != 0 && pc_trace_env[0] != '\0') {
-        if (parse_pc_trace_range(pc_trace_env, &pc_trace_start, &pc_trace_end)) {
-            opt_pc_trace = MM_TRUE;
-        }
-    }
-    if (pc_trace_mem_env != 0 && pc_trace_mem_env[0] != '\0') {
-        opt_pc_trace_mem = MM_TRUE;
-    }
     if (strcmp_trace_env != 0 && strcmp_trace_env[0] != '\0') {
         if (parse_pc_trace_range(strcmp_trace_env, &strcmp_trace_start, &strcmp_trace_end)) {
             opt_strcmp_trace = MM_TRUE;
@@ -2629,7 +2980,7 @@ int main(int argc, char **argv)
 
                 /* Handle pending system exceptions (SysTick, PendSV). */
 handle_pending:
-                if (scs.pend_st) {
+                if (cpu.mode == MM_THREAD && scs.pend_st) {
                     if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {
                         done = MM_TRUE;
                     } else {
@@ -2637,7 +2988,7 @@ handle_pending:
                     }
                     continue;
                 }
-                if (scs.pend_sv) {
+                if (cpu.mode == MM_THREAD && scs.pend_sv) {
                     if (!enter_exception(&cpu, &map, &scs, MM_VECT_PENDSV, cpu.r[15] & ~1u, cpu.xpsr)) {
                         done = MM_TRUE;
                     } else {
@@ -2705,62 +3056,6 @@ handle_pending:
                     }
                     d = mm_decode_t32(&f);
                     mm_memmap_set_last_pc(f.pc_fetch);
-                    if (opt_pc_trace) {
-                        mm_u32 pc = f.pc_fetch | 1u;
-                        if (pc >= pc_trace_start && pc <= pc_trace_end) {
-                            printf("[PC_TRACE] PC=0x%08lx insn=0x%08lx len=%u kind=%u rn=%u rd=%u rm=%u imm=0x%08lx r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx r4=0x%08lx r5=0x%08lx r6=0x%08lx r7=0x%08lx r8=0x%08lx r9=0x%08lx r10=0x%08lx r11=0x%08lx r12=0x%08lx sp=0x%08lx lr=0x%08lx xpsr=0x%08lx it_pat=0x%02x it_rem=%u it_cond=0x%02x\n",
-                                   (unsigned long)pc,
-                                   (unsigned long)f.insn,
-                                   (unsigned)d.len,
-                                   (unsigned)d.kind,
-                                   (unsigned)d.rn,
-                                   (unsigned)d.rd,
-                                   (unsigned)d.rm,
-                                   (unsigned long)d.imm,
-                                   (unsigned long)cpu.r[0],
-                                   (unsigned long)cpu.r[1],
-                                   (unsigned long)cpu.r[2],
-                                   (unsigned long)cpu.r[3],
-                                   (unsigned long)cpu.r[4],
-                                   (unsigned long)cpu.r[5],
-                                   (unsigned long)cpu.r[6],
-                                   (unsigned long)cpu.r[7],
-                                   (unsigned long)cpu.r[8],
-                                   (unsigned long)cpu.r[9],
-                                   (unsigned long)cpu.r[10],
-                                   (unsigned long)cpu.r[11],
-                                   (unsigned long)cpu.r[12],
-                                   (unsigned long)mm_cpu_get_active_sp(&cpu),
-                                   (unsigned long)cpu.r[14],
-                                   (unsigned long)cpu.xpsr,
-                                   (unsigned)it_pattern,
-                                   (unsigned)it_remaining,
-                                   (unsigned)it_cond);
-                            if (opt_pc_trace_mem) {
-                                mm_u32 addr = cpu.r[6];
-                                mm_u32 prev = addr - 8u;
-                                mm_u32 v0 = 0;
-                                mm_u32 v1 = 0;
-                                mm_u32 v2 = 0;
-                                mm_u32 v3 = 0;
-                                mm_bool ok0 = mm_memmap_read(&map, cpu.sec_state, prev, 4u, &v0);
-                                mm_bool ok1 = mm_memmap_read(&map, cpu.sec_state, prev + 4u, 4u, &v1);
-                                mm_bool ok2 = mm_memmap_read(&map, cpu.sec_state, addr, 4u, &v2);
-                                mm_bool ok3 = mm_memmap_read(&map, cpu.sec_state, addr + 4u, 4u, &v3);
-                                if (ok0 && ok1 && ok2 && ok3) {
-                                    printf("[PC_TRACE_MEM] r6=0x%08lx prev[0]=0x%08lx prev[1]=0x%08lx next[0]=0x%08lx next[1]=0x%08lx\n",
-                                           (unsigned long)addr,
-                                           (unsigned long)v0,
-                                           (unsigned long)v1,
-                                           (unsigned long)v2,
-                                           (unsigned long)v3);
-                                } else {
-                                    printf("[PC_TRACE_MEM] r6=0x%08lx prev=<fault> next=<fault>\n",
-                                           (unsigned long)addr);
-                                }
-                            }
-                        }
-                    }
                     if (opt_strcmp_trace) {
                         mm_u32 pc = f.pc_fetch | 1u;
                         if (pc >= strcmp_trace_start && pc <= strcmp_trace_end) {
@@ -2825,6 +3120,11 @@ handle_pending:
                         continue;
                     }
 
+                    if (it_remaining > 0u && itstate_get(cpu.xpsr) == 0u) {
+                        it_pattern = 0;
+                        it_remaining = 0;
+                        it_cond = 0;
+                    }
                     /* ITSTATE handling: if inside IT block and not IT instruction, conditionally execute. */
                     execute_it = MM_TRUE;
                     if (it_remaining > 0u && d.kind != MM_OP_IT) {

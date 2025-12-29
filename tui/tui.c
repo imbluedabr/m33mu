@@ -1093,7 +1093,7 @@ static void tui_draw(struct mm_tui *tui)
                 y++;
             }
             eth_backend = mm_eth_backend_type_get();
-            eth_link = mm_eth_backend_is_up();
+            eth_link = mm_eth_backend_link_up();
             eth_mac_ok = mm_stm32h563_eth_get_mac(eth_mac);
             if (eth_mac_ok) {
                 snprintf(mac_buf, sizeof(mac_buf), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -1109,10 +1109,11 @@ static void tui_draw(struct mm_tui *tui)
                 const char *spec = mm_eth_backend_spec();
                 const char *backend_name = (eth_backend == MM_ETH_BACKEND_TAP) ? "tap" : "vde";
                 const char *spec_label = (eth_backend == MM_ETH_BACKEND_TAP) ? "iface" : "sock";
-                snprintf(buf, sizeof(buf), "ETH: backend=%s %s=%s link=%s mac=%s",
+                snprintf(buf, sizeof(buf), "ETH: backend=%s %s=%s conn=%s link=%s mac=%s",
                          backend_name,
                          spec_label,
                          (spec != 0 && spec[0] != '\0') ? spec : "n/a",
+                         mm_eth_backend_is_up() ? "yes" : "no",
                          eth_link ? "up" : "down",
                          mac_buf);
                 tui_draw_text(split_x + 2, y, inner_x + inner_w - 1,

@@ -38,8 +38,8 @@ static int test_basic_decode(void)
 static int test_nonsecure_target(void)
 {
     struct mm_exc_return_info info;
-    /* Non-secure, return to Handler using MSP, basic frame (0xFFFFFFB1). */
-    info = mm_exc_return_decode(0xFFFFFFB1u);
+    /* Non-secure, return to Handler using MSP, basic frame (0xFFFFFFB0). */
+    info = mm_exc_return_decode(0xFFFFFFB0u);
     if (!info.valid) return 1;
     if (info.use_psp) return 1;
     if (info.to_thread) return 1;

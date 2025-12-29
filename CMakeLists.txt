@@ -156,9 +156,27 @@ endif()
 # 4) Optional vde-2 detection
 # -----------------------------------------------------------------------------
 set(M33MU_HAS_VDE FALSE)
+set(M33MU_HAS_VDE_SWITCH FALSE)
+set(VDE_SWITCH_PROGRAM "")
 
 if(PKG_CONFIG_FOUND)
   pkg_check_modules(PC_VDE QUIET vdeplug)
+endif()
+
+find_program(VDE_SWITCH_PROGRAM
+  NAMES vde_switch
+  HINTS /usr/bin /usr/local/bin
+  NO_CMAKE_FIND_ROOT_PATH
+)
+if(NOT VDE_SWITCH_PROGRAM)
+  if(EXISTS "/usr/bin/vde_switch")
+    set(VDE_SWITCH_PROGRAM "/usr/bin/vde_switch")
+  elseif(EXISTS "/usr/local/bin/vde_switch")
+    set(VDE_SWITCH_PROGRAM "/usr/local/bin/vde_switch")
+  endif()
+endif()
+if(VDE_SWITCH_PROGRAM)
+  set(M33MU_HAS_VDE_SWITCH TRUE)
 endif()
 
 find_path(VDE_INCLUDE_DIR
@@ -176,6 +194,15 @@ if(VDE_INCLUDE_DIR AND VDE_LIBRARY)
   set_target_properties(vdeplug::vdeplug PROPERTIES
     IMPORTED_LOCATION "${VDE_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${VDE_INCLUDE_DIR}"
+  )
+elseif(M33MU_HAS_VDE_SWITCH)
+  list(APPEND M33MU_CONFIG_WARNINGS
+    "vde_switch found but libvdeplug headers/libs missing: VDE backend disabled."
+  )
+endif()
+if(M33MU_HAS_VDE AND NOT M33MU_HAS_VDE_SWITCH)
+  list(APPEND M33MU_CONFIG_WARNINGS
+    "vde_switch not found: VDE backend may be unusable at runtime."
   )
 endif()
 
@@ -432,6 +459,11 @@ if(M33MU_HAS_VDE)
 else()
   set(M33MU_STATUS_VDE "${M33MU_COLOR_RED}not found${M33MU_COLOR_RESET}")
 endif()
+if(M33MU_HAS_VDE_SWITCH)
+  set(M33MU_STATUS_VDE_SWITCH "${M33MU_COLOR_GREEN}vde_switch${M33MU_COLOR_RESET}")
+else()
+  set(M33MU_STATUS_VDE_SWITCH "${M33MU_COLOR_RED}no vde_switch${M33MU_COLOR_RESET}")
+endif()
 if(M33MU_HAS_NCURSES)
   set(M33MU_STATUS_NCURSES "${M33MU_COLOR_GREEN}detected${M33MU_COLOR_RESET}")
 else()
@@ -439,7 +471,7 @@ else()
 endif()
 message(STATUS "${M33MU_COLOR_YELLOW}  capstone: ${M33MU_STATUS_CAPSTONE}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  TPM/libtpms: ${M33MU_STATUS_TPM}${M33MU_COLOR_RESET}")
-message(STATUS "${M33MU_COLOR_YELLOW}  vde-2: ${M33MU_STATUS_VDE}${M33MU_COLOR_RESET}")
+message(STATUS "${M33MU_COLOR_YELLOW}  vde-2: ${M33MU_STATUS_VDE} (${M33MU_STATUS_VDE_SWITCH})${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  ncurses: ${M33MU_STATUS_NCURSES}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  tests enabled: ${M33MU_BUILD_TESTS}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_MAGENTA}  --------------------------------------------${M33MU_COLOR_RESET}")

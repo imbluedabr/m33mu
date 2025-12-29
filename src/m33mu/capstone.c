@@ -833,8 +833,8 @@ mm_bool capstone_cross_check(const struct mm_fetch_result *fetch, const struct m
     address = (uint64_t)fetch->pc_fetch;
     count = cs_disasm(g_capstone.handle, code, size, address, 1, &insn);
     if (count == 0 || insn == 0) {
-        mm_bool allow = MM_FALSE;
         const char *kind_name = "unknown";
+        mm_bool allow = MM_FALSE;
         switch (dec->kind) {
             case MM_OP_SG: kind_name = "SG"; allow = MM_TRUE; break;
             case MM_OP_BXNS: kind_name = "BXNS"; allow = MM_TRUE; break;
@@ -850,11 +850,8 @@ mm_bool capstone_cross_check(const struct mm_fetch_result *fetch, const struct m
             default: break;
         }
         if (allow) {
-            printf("[CAPSTONE] decode skipped PC=0x%08lx len=%u raw=0x%08lx kind=%s\n",
-                   (unsigned long)(fetch->pc_fetch | 1u),
-                   (unsigned)fetch->len,
-                   (unsigned long)fetch->insn,
-                   kind_name);
+            (void)kind_name;
+            /* Skip ARMv8-M instruction not supported by capstone */
             return MM_TRUE;
         }
         printf("[CAPSTONE] decode failed PC=0x%08lx len=%u raw=0x%08lx kind=%u\n",
