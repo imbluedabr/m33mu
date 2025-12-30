@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "stm32h563/stm32h563_usart.h"
 #include "stm32h563/stm32h563_mmio.h"
 #include "stm32h563/stm32h563_usb.h"
@@ -44,6 +45,7 @@
 #define CR1_TXEIE (1u << 7)
 
 #define ISR_RXNE (1u << 5)
+#define ISR_TC   (1u << 6)
 #define ISR_TXE  (1u << 7)
 
 struct usart_inst {
@@ -61,11 +63,18 @@ struct usart_inst {
     enum mm_sec_state current_sec;
     mm_u8 macro_match;
     mm_bool watch_macro;
+    mm_bool rx_trace;
 };
 
 static struct usart_inst usarts[12];
 static size_t usart_count = 0;
 static struct mm_nvic *g_nvic = 0;
+
+static mm_bool uart_rx_trace_enabled(void)
+{
+    const char *v = getenv("M33MU_UART_RX_TRACE");
+    return (v && v[0] != '\0') ? MM_TRUE : MM_FALSE;
+}
 
 static mm_bool clock_apb2_usart1(struct usart_inst *u)
 {
@@ -120,6 +129,7 @@ static void ensure_enabled(struct usart_inst *u)
         if (mm_uart_io_open(&u->io, u->base)) {
             /* Mark TXE empty */
             u->regs[USART_ISR / 4] |= ISR_TXE;
+            u->regs[USART_ISR / 4] |= ISR_TC;
             if (mm_tui_is_active()) {
                 mm_tui_attach_uart(u->label, u->io.name);
             }
@@ -145,11 +155,22 @@ static mm_bool usart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
         mm_u32 v = mm_uart_io_has_rx(&u->io) ? mm_uart_io_read(&u->io) : 0u;
         *value_out = v;
         u->regs[USART_ISR / 4] &= ~ISR_RXNE;
+        if (u->rx_trace) {
+            printf("[USART_RX_RDR] base=0x%08lx byte=0x%02lx\n",
+                   (unsigned long)u->base,
+                   (unsigned long)(v & 0xffu));
+        }
         return MM_TRUE;
     }
     if (offset == USART_ISR) {
-        /* Keep TXE set so firmware polls see the line idle immediately. */
+        /* Keep TXE/TC set so firmware polls see the line idle immediately. */
         u->regs[USART_ISR / 4] |= ISR_TXE;
+        u->regs[USART_ISR / 4] |= ISR_TC;
+        if (u->rx_trace) {
+            printf("[USART_ISR_READ] base=0x%08lx isr=0x%08lx\n",
+                   (unsigned long)u->base,
+                   (unsigned long)u->regs[USART_ISR / 4]);
+        }
     }
     memcpy(value_out, (mm_u8 *)u->regs + offset, size_bytes);
     return MM_TRUE;
@@ -186,8 +207,17 @@ static mm_bool usart_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
         }
         mm_uart_io_queue_tx(&u->io, (mm_u8)value);
         u->regs[USART_ISR / 4] &= ~ISR_TXE;
+        u->regs[USART_ISR / 4] &= ~ISR_TC;
         if (mm_uart_io_flush(&u->io) && mm_uart_io_tx_empty(&u->io)) {
             u->regs[USART_ISR / 4] |= ISR_TXE;
+            u->regs[USART_ISR / 4] |= ISR_TC;
+        }
+        return MM_TRUE;
+    }
+    if (offset == USART_ICR) {
+        /* Clear flags by writing 1 to ICR bits. */
+        if ((value & ISR_TC) != 0u) {
+            u->regs[USART_ISR / 4] &= ~ISR_TC;
         }
         return MM_TRUE;
     }
@@ -202,9 +232,13 @@ static void poll_instance(struct usart_inst *u)
 
     if (mm_uart_io_poll(&u->io)) {
         u->regs[USART_ISR / 4] |= ISR_RXNE;
+        if (u->rx_trace) {
+            printf("[USART_RXNE_SET] base=0x%08lx\n", (unsigned long)u->base);
+        }
     }
     if (mm_uart_io_tx_empty(&u->io)) {
         u->regs[USART_ISR / 4] |= ISR_TXE;
+        u->regs[USART_ISR / 4] |= ISR_TC;
     }
     /* Interrupts */
     if (g_nvic != 0 && u->irq >= 0) {
@@ -235,7 +269,7 @@ void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
         0x40008000u, 0x40006800u, 0x40006C00u, 0x40008400u
     };
     static const int irq_map[] = {
-        37, 38, 39, 52, 53, 71, 82, 83, 140, 141, 142, 143
+        58, 59, 60, 61, 62, 85, 98, 99, 100, 86, 87, 101
     };
     static const char *labels[] = {
         "USART1", "USART2", "USART3", "UART4", "UART5", "USART6",
@@ -257,6 +291,7 @@ void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
         memset(u, 0, sizeof(*u));
         u->base = bases[i];
         u->regs[USART_ISR / 4] = ISR_TXE; /* idle empty */
+        u->rx_trace = uart_rx_trace_enabled();
         mm_uart_io_init(&u->io);
         if (i < (sizeof(labels) / sizeof(labels[0]))) {
             strncpy(u->label, labels[i], sizeof(u->label) - 1u);

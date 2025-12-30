@@ -320,11 +320,65 @@ static void tui_append_text(struct mm_tui *tui, const char *buf, size_t len)
     }
 }
 
+static void tui_clear_serial(struct mm_tui *tui)
+{
+    tui->serial_line_count = 0;
+    tui->serial_line_head = 0;
+    tui->serial_cur_len = 0;
+    tui->serial_cur_line[0] = '\0';
+}
+
+static void tui_serial_flush_escape(struct mm_tui *tui)
+{
+    mm_u8 i;
+    for (i = 0; i < tui->serial_esc_len; ++i) {
+        char c = tui->serial_esc_buf[i];
+        if (c == '\n') {
+            tui_push_serial_line(tui);
+        } else if (c == '\r') {
+            /* ignore */
+        } else {
+            if (tui->serial_cur_len + 1u < TUI_MAX_COLS) {
+                tui->serial_cur_line[tui->serial_cur_len++] = c;
+            }
+        }
+    }
+}
+
 static void tui_append_serial_text(struct mm_tui *tui, const char *buf, size_t len)
 {
     size_t i;
     for (i = 0; i < len; ++i) {
         char c = buf[i];
+        if (tui->serial_esc_active) {
+            if (tui->serial_esc_len + 1u < (mm_u8)sizeof(tui->serial_esc_buf)) {
+                tui->serial_esc_buf[tui->serial_esc_len++] = c;
+            } else {
+                tui_serial_flush_escape(tui);
+                tui->serial_esc_len = 0;
+                tui->serial_esc_active = MM_FALSE;
+            }
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+                tui->serial_esc_buf[tui->serial_esc_len] = '\0';
+                if (strcmp(tui->serial_esc_buf, "\x1b[2J") == 0) {
+                    tui_clear_serial(tui);
+                } else if (strcmp(tui->serial_esc_buf, "\x1b[H") == 0 ||
+                           strcmp(tui->serial_esc_buf, "\x1b[1;1H") == 0) {
+                    /* ignore cursor home */
+                } else {
+                    tui_serial_flush_escape(tui);
+                }
+                tui->serial_esc_len = 0;
+                tui->serial_esc_active = MM_FALSE;
+            }
+            continue;
+        }
+        if (c == '\x1b') {
+            tui->serial_esc_active = MM_TRUE;
+            tui->serial_esc_len = 0;
+            tui->serial_esc_buf[tui->serial_esc_len++] = c;
+            continue;
+        }
         if (c == '\n') {
             tui_push_serial_line(tui);
         } else if (c == '\r') {
@@ -486,14 +540,6 @@ static const char *tui_window2_title(const struct mm_tui *tui)
     }
 }
 
-static void tui_serial_backspace(struct mm_tui *tui)
-{
-    if (tui->serial_cur_len > 0) {
-        tui->serial_cur_len--;
-        tui->serial_cur_line[tui->serial_cur_len] = '\0';
-    }
-}
-
 static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod)
 {
     if (tui == 0) return;
@@ -507,30 +553,18 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
     if (tui->window2_mode == MM_TUI_WIN2_UART && tui->serial_fd >= 0) {
         mm_u8 b = 0;
         mm_bool send = MM_FALSE;
-        mm_bool backspace = MM_FALSE;
-        mm_bool enter = MM_FALSE;
         if (key == KEY_ENTER || ch == '\n' || ch == '\r') {
             b = '\r';
             send = MM_TRUE;
-            enter = MM_TRUE;
         } else if (key == KEY_BACKSPACE || ch == 0x7Fu || ch == 0x08u) {
             b = 0x7Fu;
             send = MM_TRUE;
-            backspace = MM_TRUE;
         } else if (ch != 0) {
             b = (mm_u8)ch;
             send = MM_TRUE;
         }
         if (send) {
             (void)write(tui->serial_fd, &b, 1);
-            if (backspace) {
-                tui_serial_backspace(tui);
-            } else if (enter) {
-                tui_append_serial_text(tui, "\n", 1);
-            } else {
-                tui_append_serial_text(tui, (const char *)&b, 1);
-            }
-            tui->input_dirty = MM_TRUE;
         }
     }
     if (key == KEY_LEFT) {
@@ -1548,10 +1582,14 @@ void mm_tui_attach_uart(const char *label, const char *path)
 {
     int fd;
     struct termios tio;
+    const char *want = getenv("M33MU_TUI_UART");
     if (g_tui == 0 || !g_tui->active) return;
     if (path == 0) return;
+    if (want && label && strcmp(want, label) != 0) {
+        return;
+    }
     if (g_tui->serial_fd >= 0) return;
-    fd = open(path, O_RDONLY | O_NONBLOCK);
+    fd = open(path, O_RDWR | O_NONBLOCK);
     if (fd < 0) return;
     if (tcgetattr(fd, &tio) == 0) {
         tio.c_iflag &= ~(ICRNL | INLCR | IGNCR);

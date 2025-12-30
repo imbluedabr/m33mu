@@ -33,6 +33,16 @@
 mm_bool mm_tui_is_active(void);
 
 static mm_bool g_uart_stdout = MM_FALSE;
+static int g_uart_rx_trace = -1;
+
+static mm_bool uart_rx_trace_enabled(void)
+{
+    if (g_uart_rx_trace < 0) {
+        const char *v = getenv("M33MU_UART_RX_TRACE");
+        g_uart_rx_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
+    return g_uart_rx_trace ? MM_TRUE : MM_FALSE;
+}
 
 static int uart_open_pty(char *out, size_t outlen)
 {
@@ -150,6 +160,9 @@ mm_bool mm_uart_io_poll(struct mm_uart_io *io)
             io->rx_byte = b;
             io->rx_pending = MM_TRUE;
             new_rx = MM_TRUE;
+            if (uart_rx_trace_enabled()) {
+                printf("[UART_RX_POLL] fd=%d byte=0x%02x\n", io->fd, (unsigned)b);
+            }
         }
     }
     return new_rx;
@@ -175,6 +188,9 @@ mm_u8 mm_uart_io_read(struct mm_uart_io *io)
     if (io->rx_pending) {
         v = io->rx_byte;
         io->rx_pending = MM_FALSE;
+        if (uart_rx_trace_enabled()) {
+            printf("[UART_RX_READ] fd=%d byte=0x%02x\n", io->fd, (unsigned)v);
+        }
     }
     return v;
 }

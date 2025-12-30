@@ -102,6 +102,9 @@ struct mm_tui {
     size_t serial_line_head;
     char serial_cur_line[512];
     size_t serial_cur_len;
+    char serial_esc_buf[16];
+    mm_u8 serial_esc_len;
+    mm_bool serial_esc_active;
     int width;
     int height;
 };
