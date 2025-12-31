@@ -2055,6 +2055,8 @@ int main(int argc, char **argv)
     mm_u32 memwatch_size = 0;
     mm_u32 capstone_pc = 0;
     mm_bool opt_capstone_pc = MM_FALSE;
+    mm_bool opt_boot_offset = MM_FALSE;
+    mm_u32 boot_offset = 0;
 
     if (strcmp_trace_env != 0 && strcmp_trace_env[0] != '\0') {
         if (parse_pc_trace_range(strcmp_trace_env, &strcmp_trace_start, &strcmp_trace_end)) {
@@ -2126,6 +2128,12 @@ int main(int argc, char **argv)
             opt_meminfo = MM_TRUE;
         } else if (strcmp(argv[i], "--no-tz") == 0) {
             opt_no_tz = MM_TRUE;
+        } else if (strncmp(argv[i], "--boot-offset=", 14) == 0) {
+            if (!parse_hex_u32(argv[i] + 14, &boot_offset)) {
+                fprintf(stderr, "invalid boot offset: %s\n", argv[i]);
+                return 1;
+            }
+            opt_boot_offset = MM_TRUE;
         } else if (strncmp(argv[i], "--spiflash:", 11) == 0) {
             if (spiflash_count >= (int)(sizeof(spiflash_cfgs) / sizeof(spiflash_cfgs[0]))) {
                 fprintf(stderr, "too many spiflash configs\n");
@@ -2219,6 +2227,7 @@ int main(int argc, char **argv)
                         "[--capstone] [--capstone-verbose] "
 #endif
                         "[--uart-stdout] [--quit-on-faults] [--meminfo] [--no-tz] [--gdb-symbols <elf>] "
+                        "[--boot-offset=0xN] "
                         "[--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]] "
                         "[--usb[:port=<n>]] "
                         "[--tap[:name]] [--vde[:/path/to/vde.ctl]] "
@@ -2254,6 +2263,12 @@ int main(int argc, char **argv)
             }
         }
         fprintf(stderr, "\n");
+        return 1;
+    }
+    if (opt_boot_offset && (boot_offset + 8u > cfg.flash_size_s)) {
+        fprintf(stderr, "boot offset 0x%08lx out of bounds (flash size 0x%08lx)\n",
+                (unsigned long)boot_offset,
+                (unsigned long)cfg.flash_size_s);
         return 1;
     }
 
@@ -2417,14 +2432,15 @@ int main(int argc, char **argv)
             mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE);
             mm_memmap_configure_ram(&map, &cfg, ram, MM_FALSE);
             {
-                mm_u32 boot_offset = default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
+                mm_u32 boot_offset_local = opt_boot_offset ? boot_offset
+                    : default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
                 if (opt_no_tz) {
                     force_ns_boot = MM_TRUE;
                     cfg.mpcbb_block_secure = 0;
                     cfg.mpcbb_block_size = 0;
                     printf("[TZ] TrustZone disabled via --no-tz\n");
                 } else if (cfg.ram_base_s != cfg.ram_base_ns) {
-                    if (mm_vector_read(&map, MM_SECURE, cfg.flash_base_s + boot_offset, 0u, &initial_sp)) {
+                    if (mm_vector_read(&map, MM_SECURE, cfg.flash_base_s + boot_offset_local, 0u, &initial_sp)) {
                         if ((initial_sp & 0xF0000000u) == 0x20000000u) {
                             force_ns_boot = MM_TRUE;
                             cfg.mpcbb_block_secure = 0;
@@ -2546,7 +2562,8 @@ int main(int argc, char **argv)
             /* Reset CPU state */
             {
                 int i;
-                mm_u32 boot_offset = default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
+                mm_u32 boot_offset_local = opt_boot_offset ? boot_offset
+                    : default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
                 for (i = 0; i < 16; ++i) cpu.r[i] = 0;
                 cpu.xpsr = 0;
                 cpu.sec_state = MM_SECURE;
@@ -2560,11 +2577,11 @@ int main(int argc, char **argv)
                 cpu.msp_s = cpu.msp_ns = 0;
                 cpu.psp_s = cpu.psp_ns = 0;
                 if (force_ns_boot) {
-                    cpu.vtor_s = cfg.flash_base_ns + boot_offset;
-                    cpu.vtor_ns = cfg.flash_base_ns + boot_offset;
+                    cpu.vtor_s = cfg.flash_base_ns + boot_offset_local;
+                    cpu.vtor_ns = cfg.flash_base_ns + boot_offset_local;
                 } else {
-                    cpu.vtor_s = cfg.flash_base_s + boot_offset;
-                    cpu.vtor_ns = cfg.flash_base_ns + boot_offset;
+                    cpu.vtor_s = cfg.flash_base_s + boot_offset_local;
+                    cpu.vtor_ns = cfg.flash_base_ns + boot_offset_local;
                 }
                 cpu.exc_depth = 0;
                 cpu.tz_depth = 0;
@@ -2584,8 +2601,8 @@ int main(int argc, char **argv)
                     cpu1.faultmask_s = cpu1.faultmask_ns = 0;
                     cpu1.msp_s = cpu1.msp_ns = 0;
                     cpu1.psp_s = cpu1.psp_ns = 0;
-                    cpu1.vtor_s = cfg.flash_base_s + boot_offset;
-                    cpu1.vtor_ns = cfg.flash_base_ns + boot_offset;
+                    cpu1.vtor_s = cfg.flash_base_s + boot_offset_local;
+                    cpu1.vtor_ns = cfg.flash_base_ns + boot_offset_local;
                     cpu1.exc_depth = 0;
                     cpu1.tz_depth = 0;
                     cpu1.sleeping = MM_TRUE;
