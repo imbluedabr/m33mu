@@ -23,6 +23,7 @@
 #include <string.h>
 #include "stm32l552/stm32l552_usart.h"
 #include "stm32l552/stm32l552_mmio.h"
+#include "stm32l552/stm32l552_usb.h"
 #include "m33mu/target_hal.h"
 
 /* Minimal register offsets */
@@ -234,6 +235,7 @@ void mm_stm32l552_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
     mm_u32 *tz1_cfgr2 = (tz1 != 0) ? tz1 + (0x14u / 4u) : 0;
     g_nvic = nvic;
     mm_stm32l552_rng_set_nvic(nvic);
+    mm_stm32l552_usb_set_nvic(nvic);
     if (usart_count == 0) {
         usart_count = sizeof(bases) / sizeof(bases[0]);
     }
@@ -286,6 +288,8 @@ void mm_stm32l552_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
         reg.opaque = u;
         reg.read = usart_read;
         reg.write = usart_write;
+        mmio_bus_register_region(bus, &reg);
+        reg.base = bases[i] + 0x10000000u;
         mmio_bus_register_region(bus, &reg);
     }
 }

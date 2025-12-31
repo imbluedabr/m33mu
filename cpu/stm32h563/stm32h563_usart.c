@@ -340,6 +340,8 @@ void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
         reg.read = usart_read;
         reg.write = usart_write;
         mmio_bus_register_region(bus, &reg);
+        reg.base = bases[i] + 0x10000000u;
+        mmio_bus_register_region(bus, &reg);
     }
 }
 

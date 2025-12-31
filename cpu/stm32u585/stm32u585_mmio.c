@@ -93,6 +93,43 @@ extern void mm_system_request_reset(void);
 #define WWDG_SEC_BASE 0x50002C00u
 #define WWDG_SIZE     0x400u
 
+/* UCPD1 base addresses */
+#define UCPD1_BASE     0x4000DC00u
+#define UCPD1_SEC_BASE 0x5000DC00u
+#define UCPD1_SIZE     0x400u
+
+/* CRS base addresses */
+#define CRS_BASE     0x40006000u
+#define CRS_SEC_BASE 0x50006000u
+#define CRS_SIZE     0x400u
+
+/* OTG FS base addresses */
+#define OTG_FS_BASE     0x42040000u
+#define OTG_FS_SEC_BASE 0x52040000u
+#define OTG_FS_SIZE     0x88000u
+
+/* UCPD1 register offsets (subset) */
+#define UCPD_CFGR1 0x000u
+#define UCPD_CR    0x00Cu
+#define UCPD_IMR   0x010u
+#define UCPD_SR    0x014u
+#define UCPD_ICR   0x018u
+
+/* UCPD1 bits (subset) */
+#define UCPD_CFGR1_UCPDEN (1u << 31)
+#define UCPD_CR_ANAMODE   (1u << 9)
+#define UCPD_CR_CCENABLE_0 (1u << 10)
+#define UCPD_CR_CCENABLE_1 (1u << 11)
+#define UCPD_CR_CCENABLE_BOTH (UCPD_CR_CCENABLE_0 | UCPD_CR_CCENABLE_1)
+#define UCPD_SR_TYPECEVT1 (1u << 14)
+#define UCPD_SR_TYPECEVT2 (1u << 15)
+#define UCPD_SR_TYPEC_VSTATE_CC1_Pos 16u
+#define UCPD_SR_TYPEC_VSTATE_CC2_Pos 18u
+#define UCPD_SR_TYPEC_VSTATE_CC_Msk (0x3u << UCPD_SR_TYPEC_VSTATE_CC1_Pos)
+#define UCPD_SR_TYPEC_VSTATE_CC2_Msk (0x3u << UCPD_SR_TYPEC_VSTATE_CC2_Pos)
+#define UCPD_ICR_TYPECEVT1CF (1u << 14)
+#define UCPD_ICR_TYPECEVT2CF (1u << 15)
+
 #define RNG_CR_OFFSET   0x0u
 #define RNG_SR_OFFSET   0x4u
 #define RNG_DR_OFFSET   0x8u
@@ -224,6 +261,17 @@ struct gpdma_state {
     mm_u32 regs[0x1000 / 4];
 };
 
+struct ucpd_state {
+    mm_u32 cfgr1;
+    mm_u32 cr;
+    mm_u32 imr;
+    mm_u32 sr;
+};
+
+struct otg_state {
+    mm_u32 regs[OTG_FS_SIZE / 4];
+};
+
 /* uintptr_t substitute for C90 */
 typedef unsigned long mm_uptr;
 
@@ -242,6 +290,12 @@ static struct simple_blk tzsc2_s;
 static struct simple_blk tzsc2_ns;
 static struct simple_blk tzic2_s;
 static struct simple_blk tzic2_ns;
+static struct simple_blk crs;
+static struct simple_blk crs_sec;
+static struct ucpd_state ucpd1_state;
+static struct ucpd_state ucpd1_state_sec;
+static struct otg_state otg_fs;
+static struct otg_state otg_fs_sec;
 static struct mpcbb_state mpcbb[4];
 static struct rng_state rng;
 static struct exti_state exti;
@@ -264,6 +318,122 @@ static mm_u32 stm32u585_gpio_bank_read_moder(void *opaque, int bank);
 static mm_bool stm32u585_gpio_bank_clock(void *opaque, int bank);
 static mm_u32 stm32u585_gpio_bank_read_seccfgr(void *opaque, int bank);
 static void exti_gpio_update(int bank, mm_u32 old_level, mm_u32 new_level);
+
+static void ucpd_update_attach(struct ucpd_state *u)
+{
+    if (u == 0) {
+        return;
+    }
+    if ((u->cfgr1 & UCPD_CFGR1_UCPDEN) == 0u) {
+        return;
+    }
+    if ((u->cr & (UCPD_CR_ANAMODE | UCPD_CR_CCENABLE_BOTH)) != (UCPD_CR_ANAMODE | UCPD_CR_CCENABLE_BOTH)) {
+        return;
+    }
+    if ((u->sr & (UCPD_SR_TYPECEVT1 | UCPD_SR_TYPECEVT2)) == 0u) {
+        u->sr |= UCPD_SR_TYPECEVT1;
+    }
+    u->sr &= ~(UCPD_SR_TYPEC_VSTATE_CC_Msk | UCPD_SR_TYPEC_VSTATE_CC2_Msk);
+    u->sr |= (3u << UCPD_SR_TYPEC_VSTATE_CC1_Pos);
+}
+
+static mm_bool ucpd_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct ucpd_state *u = (struct ucpd_state *)opaque;
+    mm_u32 value = 0;
+    if (u == 0 || value_out == 0) {
+        return MM_FALSE;
+    }
+    if (size_bytes != 4u) {
+        return MM_FALSE;
+    }
+    ucpd_update_attach(u);
+    switch (offset) {
+    case UCPD_CFGR1:
+        value = u->cfgr1;
+        break;
+    case UCPD_CR:
+        value = u->cr;
+        break;
+    case UCPD_IMR:
+        value = u->imr;
+        break;
+    case UCPD_SR:
+        value = u->sr;
+        break;
+    default:
+        value = 0;
+        break;
+    }
+    *value_out = value;
+    return MM_TRUE;
+}
+
+static mm_bool ucpd_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct ucpd_state *u = (struct ucpd_state *)opaque;
+    if (u == 0) {
+        return MM_FALSE;
+    }
+    if (size_bytes != 4u) {
+        return MM_FALSE;
+    }
+    switch (offset) {
+    case UCPD_CFGR1:
+        u->cfgr1 = value;
+        ucpd_update_attach(u);
+        return MM_TRUE;
+    case UCPD_CR:
+        u->cr = value;
+        ucpd_update_attach(u);
+        return MM_TRUE;
+    case UCPD_IMR:
+        u->imr = value;
+        return MM_TRUE;
+    case UCPD_ICR:
+        if ((value & UCPD_ICR_TYPECEVT1CF) != 0u) {
+            u->sr &= ~UCPD_SR_TYPECEVT1;
+        }
+        if ((value & UCPD_ICR_TYPECEVT2CF) != 0u) {
+            u->sr &= ~UCPD_SR_TYPECEVT2;
+        }
+        return MM_TRUE;
+    default:
+        return MM_TRUE;
+    }
+}
+
+static mm_bool otg_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct otg_state *o = (struct otg_state *)opaque;
+    if (o == 0 || value_out == 0) {
+        return MM_FALSE;
+    }
+    if (size_bytes == 0 || size_bytes > 4u) {
+        return MM_FALSE;
+    }
+    if ((offset + size_bytes) > OTG_FS_SIZE) {
+        return MM_FALSE;
+    }
+    memcpy(value_out, (mm_u8 *)o->regs + offset, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool otg_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct otg_state *o = (struct otg_state *)opaque;
+    if (o == 0) {
+        return MM_FALSE;
+    }
+    if (size_bytes == 0 || size_bytes > 4u) {
+        return MM_FALSE;
+    }
+    if ((offset + size_bytes) > OTG_FS_SIZE) {
+        return MM_FALSE;
+    }
+    memcpy((mm_u8 *)o->regs + offset, &value, size_bytes);
+    return MM_TRUE;
+}
 
 static mm_bool flash_trace_enabled(void)
 {
@@ -310,6 +480,12 @@ void mm_stm32u585_mmio_reset(void)
     memset(&tzsc2_ns, 0, sizeof(tzsc2_ns));
     memset(&tzic2_s, 0, sizeof(tzic2_s));
     memset(&tzic2_ns, 0, sizeof(tzic2_ns));
+    memset(&crs, 0, sizeof(crs));
+    memset(&crs_sec, 0, sizeof(crs_sec));
+    memset(&ucpd1_state, 0, sizeof(ucpd1_state));
+    memset(&ucpd1_state_sec, 0, sizeof(ucpd1_state_sec));
+    memset(&otg_fs, 0, sizeof(otg_fs));
+    memset(&otg_fs_sec, 0, sizeof(otg_fs_sec));
     memset(&rng, 0, sizeof(rng));
     memset(&exti, 0, sizeof(exti));
     memset(&iwdg, 0, sizeof(iwdg));
@@ -780,17 +956,26 @@ static void rcc_update_ready(struct rcc_state *r)
     r->regs[0] = cr;
 }
 
+static mm_u64 rcc_msi_hz(const struct rcc_state *r)
+{
+    (void)r;
+    /* wolfboot HAL uses MSI @ 48 MHz as PLL source. */
+    return 48000000ull;
+}
+
+#if 0
 static mm_u64 rcc_pll1_p_clk(const struct rcc_state *r)
 {
     mm_u32 pllcfgr = r->regs[RCC_PLL1CFGR / 4];
     mm_u32 plldivr = r->regs[RCC_PLL1DIVR / 4];
     mm_u32 src = pllcfgr & 0x3u;
     mm_u64 fin = 0;
-    mm_u32 divm = (pllcfgr >> 8) & 0x3fu;
+    mm_u32 divm = ((pllcfgr >> 8) & 0x3fu) + 1u;
     mm_u32 n = (plldivr & 0x1ffu) + 1u;
     mm_u32 p = ((plldivr >> 9) & 0x7fu) + 1u;
 
-    if (src == 1u) fin = 64000000ull; /* HSI */
+    if (src == 0u) fin = rcc_msi_hz(r); /* MSI */
+    else if (src == 1u) fin = 64000000ull; /* HSI */
     else if (src == 2u) fin = 4000000ull; /* CSI */
     else if (src == 3u) fin = 8000000ull; /* HSE */
     else fin = 0;
@@ -799,6 +984,29 @@ static mm_u64 rcc_pll1_p_clk(const struct rcc_state *r)
         return 0;
     }
     return (fin / (mm_u64)divm) * (mm_u64)n / (mm_u64)p;
+}
+#endif
+
+static mm_u64 rcc_pll1_r_clk(const struct rcc_state *r)
+{
+    mm_u32 pllcfgr = r->regs[RCC_PLL1CFGR / 4];
+    mm_u32 plldivr = r->regs[RCC_PLL1DIVR / 4];
+    mm_u32 src = pllcfgr & 0x3u;
+    mm_u64 fin = 0;
+    mm_u32 divm = ((pllcfgr >> 8) & 0x3fu) + 1u;
+    mm_u32 n = (plldivr & 0x1ffu) + 1u;
+    mm_u32 rdiv = ((plldivr >> 25) & 0x7fu) + 1u;
+
+    if (src == 0u) fin = rcc_msi_hz(r); /* MSI */
+    else if (src == 1u) fin = 64000000ull; /* HSI */
+    else if (src == 2u) fin = 4000000ull; /* CSI */
+    else if (src == 3u) fin = 8000000ull; /* HSE */
+    else fin = 0;
+
+    if (fin == 0 || divm == 0u || rdiv == 0u) {
+        return 0;
+    }
+    return (fin / (mm_u64)divm) * (mm_u64)n / (mm_u64)rdiv;
 }
 
 static void rcc_update_sysclk(struct rcc_state *r)
@@ -813,7 +1021,7 @@ static void rcc_update_sysclk(struct rcc_state *r)
     if (sw == 0u) sys = 64000000ull;
     else if (sw == 1u) sys = 4000000ull;
     else if (sw == 2u) sys = 8000000ull;
-    else if (sw == 3u) sys = rcc_pll1_p_clk(r);
+    else if (sw == 3u) sys = rcc_pll1_r_clk(r);
 
     if (hpre >= 8u) {
         switch (hpre) {
@@ -1543,6 +1751,42 @@ mm_bool mm_stm32u585_register_mmio(struct mmio_bus *bus)
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
     /* PWR secure alias */
     reg.base = PWR_SEC_BASE;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* UCPD1 */
+    reg.base = UCPD1_BASE;
+    reg.size = UCPD1_SIZE;
+    reg.opaque = &ucpd1_state;
+    reg.read = ucpd_read;
+    reg.write = ucpd_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    /* UCPD1 secure alias */
+    reg.base = UCPD1_SEC_BASE;
+    reg.opaque = &ucpd1_state_sec;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* CRS */
+    reg.base = CRS_BASE;
+    reg.size = CRS_SIZE;
+    reg.opaque = &crs;
+    reg.read = simple_blk_read;
+    reg.write = simple_blk_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    /* CRS secure alias */
+    reg.base = CRS_SEC_BASE;
+    reg.opaque = &crs_sec;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* OTG FS */
+    reg.base = OTG_FS_BASE;
+    reg.size = OTG_FS_SIZE;
+    reg.opaque = &otg_fs;
+    reg.read = otg_read;
+    reg.write = otg_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    /* OTG FS secure alias */
+    reg.base = OTG_FS_SEC_BASE;
+    reg.opaque = &otg_fs_sec;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     /* FLASH controller */
