@@ -1349,10 +1349,16 @@ static struct mm_decoded decode_32(mm_u32 insn)
             d.undefined = MM_FALSE;
             return d;
         } else if (opcode == 0x4u) { /* EOR (register) */
-            d.kind = MM_OP_EOR_REG;
-            d.rn = rn;
-            d.rd = rd;
-            d.rm = rm;
+            if (rd == 0x0fu) {
+                d.kind = MM_OP_TEQ_REG;
+                d.rn = rn;
+                d.rm = rm;
+            } else {
+                d.kind = MM_OP_EOR_REG;
+                d.rn = rn;
+                d.rd = rd;
+                d.rm = rm;
+            }
             d.imm = (type << 5) | imm5;
             d.undefined = MM_FALSE;
             return d;
@@ -1567,7 +1573,9 @@ static struct mm_decoded decode_32(mm_u32 insn)
         case 0x1u: d.kind = MM_OP_BIC_REG; break;   /* BIC (imm) */
         case 0x2u: d.kind = MM_OP_ORR_REG; break;   /* ORR (imm) */
         case 0x3u: d.kind = MM_OP_ORN_IMM; break;   /* ORN (imm) */
-        case 0x4u: d.kind = MM_OP_EOR_REG; break;   /* EOR (imm) */
+        case 0x4u:
+            d.kind = (rd == 15u) ? MM_OP_TEQ_IMM : MM_OP_EOR_REG; /* TEQ alias when Rd==PC */
+            break;   /* EOR (imm) */
         case 0xAu: d.kind = MM_OP_ADC_IMM; break;   /* ADC (imm) */
         case 0x8u:
             if (rd == 15u && sbit != 0u) {

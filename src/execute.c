@@ -225,6 +225,16 @@ mm_u8 itstate_advance(mm_u8 itstate)
     return next;
 }
 
+static void itstate_clear(mm_u32 *xpsr, mm_u8 *it_pattern, mm_u8 *it_remaining, mm_u8 *it_cond)
+{
+    if (xpsr != 0) {
+        *xpsr = itstate_set(*xpsr, 0u);
+    }
+    if (it_pattern != 0) *it_pattern = 0;
+    if (it_remaining != 0) *it_remaining = 0;
+    if (it_cond != 0) *it_cond = 0;
+}
+
 void itstate_sync_from_xpsr(mm_u32 xpsr, mm_u8 *pattern_out, mm_u8 *remaining_out, mm_u8 *cond_out)
 {
     mm_u8 raw = itstate_get(xpsr);
@@ -394,6 +404,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                             {
                                 mm_u32 target = (f.pc_fetch + 4u + d.imm) | 1u;
                                 cpu.r[15] = target;
+                                itstate_clear(&cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                             }
                             break;
                         case MM_OP_B_COND:
@@ -425,6 +436,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     if (take) {
                                                         mm_u32 target = (f.pc_fetch + 4u + d.imm) | 1u;
                                                         cpu.r[15] = target;
+                                                        itstate_clear(&cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                                                     }
                                                 } break;
                         case MM_OP_CBZ:
@@ -434,6 +446,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                              mm_bool take = (d.kind == MM_OP_CBZ) ? zero : (!zero);
                                              if (take) {
                                                  cpu.r[15] = (f.pc_fetch + 4u + d.imm) | 1u;
+                                                 itstate_clear(&cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                                              } else {
                                                  /* Fall-through already handled by PC increment in fetch/decode. */
                                              }
@@ -466,6 +479,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                cpu.r[15] = cpu.tz_ret_pc[cpu.tz_depth] | 1u;
                                                cpu.r[14] = cpu.tz_ret_pc[cpu.tz_depth] | 1u;
                                                EXEC_SET_SP(mm_cpu_get_active_sp(&cpu));
+                                               itstate_clear(&cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                                            } else {
                                                if (svc_stack_trace_enabled() && (cpu.xpsr & 0x1ffu) == MM_VECT_SVCALL) {
                                                    printf("[BX_PC_WRITE] pc=0x%08lx rm=%u target=0x%08lx lr=0x%08lx sp=0x%08lx sec=%d mode=%d ipsr=%lu\n",
@@ -487,6 +501,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                            mm_u32 target = cpu.r[d.rm];
                                            cpu.r[14] = (f.pc_fetch + d.len) | 1u;
                                            cpu.r[15] = target | 1u;
+                                           itstate_clear(&cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                                        } break;
                         case MM_OP_SG:
                                        mm_tz_exec_sg(&cpu);
@@ -503,6 +518,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                            mm_u32 target = (f.pc_fetch + 4u + d.imm) | 1u;
                                            cpu.r[14] = (f.pc_fetch + 4u) | 1u;
                                            cpu.r[15] = target;
+                                           itstate_clear(&cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                                        }
                                        break;
                         case MM_OP_MOV_IMM: {
@@ -939,6 +955,33 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
                                                     if (carry_out) cpu.xpsr |= (1u << 29);
                                                 }
+                                            } break;
+                        case MM_OP_TEQ_REG: {
+                                                mm_u32 lhs = cpu.r[d.rn];
+                                                mm_u32 rhs;
+                                                mm_bool carry_out = (cpu.xpsr & (1u << 29)) != 0u;
+                                                rhs = shift_reg_operand(cpu.r[d.rm], d.imm, cpu.xpsr, &carry_out);
+                                                {
+                                                    mm_u32 res = lhs ^ rhs;
+                                                    cpu.xpsr &= ~(0xE0000000u);
+                                                    if (res == 0u) cpu.xpsr |= (1u << 30);
+                                                    if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                                    if (carry_out) cpu.xpsr |= (1u << 29);
+                                                }
+                                            } break;
+                        case MM_OP_TEQ_IMM: {
+                                                mm_u32 imm12 = (((d.raw >> 26) & 1u) << 11) |
+                                                               (((d.raw >> 12) & 0x7u) << 8) |
+                                                               (d.raw & 0xffu);
+                                                mm_u32 imm32 = 0;
+                                                mm_bool carry_out = (cpu.xpsr & (1u << 29)) != 0u;
+                                                mm_u32 res;
+                                                mm_thumb_expand_imm12_c(imm12, carry_out, &imm32, &carry_out);
+                                                res = cpu.r[d.rn] ^ imm32;
+                                                cpu.xpsr &= ~(0xE0000000u);
+                                                if (res == 0u) cpu.xpsr |= (1u << 30);
+                                                if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                                if (carry_out) cpu.xpsr |= (1u << 29);
                                             } break;
                         case MM_OP_TST_REG: {
                                                 mm_u32 rhs = cpu.r[d.rm];

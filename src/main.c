@@ -1395,6 +1395,10 @@ static mm_bool handle_pc_write(struct mm_cpu *cpu,
         dump_exc_stack_state(cpu, "PC_WRITE");
     }
     cpu->r[15] = value | 1u;
+    cpu->xpsr = itstate_set(cpu->xpsr, 0u);
+    if (it_pattern) *it_pattern = 0;
+    if (it_remaining) *it_remaining = 0;
+    if (it_cond) *it_cond = 0;
     return MM_TRUE;
 }
 

@@ -67,6 +67,8 @@ enum mm_op_kind {
     MM_OP_CMP_REG,
     MM_OP_AND_REG,
     MM_OP_EOR_REG,
+    MM_OP_TEQ_REG,
+    MM_OP_TEQ_IMM,
     MM_OP_ORR_REG,
     MM_OP_BIC_REG,
     MM_OP_TST_REG,
