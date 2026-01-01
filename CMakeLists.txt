@@ -54,6 +54,7 @@ set(M33MU_INCLUDE_DIRS
 file(GLOB M33MU_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_SOURCE_DIR}/src/*.c"
   "${CMAKE_SOURCE_DIR}/src/m33mu/*.c"
+  "${CMAKE_SOURCE_DIR}/cpu/*.c"
   "${CMAKE_SOURCE_DIR}/cpu/*/*.c"
   "${CMAKE_SOURCE_DIR}/tui/*.c"
 )

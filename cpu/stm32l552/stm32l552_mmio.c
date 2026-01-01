@@ -36,6 +36,7 @@
 #include "m33mu/memmap.h"
 #include "m33mu/flash_persist.h"
 #include "m33mu/gpio.h"
+#include "stm32_crypto.h"
 
 extern void mm_system_request_reset(void);
 
@@ -306,54 +307,7 @@ struct rng_state {
     mm_bool dr_valid;
 };
 
-struct hash_state {
-    mm_u32 regs[HASH_SIZE / 4];
-    mm_u8 *msg;
-    mm_u32 msg_len;
-    mm_u32 msg_cap;
-    mm_u32 nblw;
-    mm_u32 nbwp;
-    mm_u32 nbwe;
-    mm_u8 digest[64];
-    mm_u32 digest_len;
-    mm_bool digest_ready;
-    mm_bool busy;
-    mm_bool dinne;
-};
-
-struct aes_state {
-    mm_u32 regs[AES_SIZE / 4];
-    mm_u32 key_words[8];
-    mm_u32 key_written;
-    mm_u32 iv_words[4];
-    mm_u8 in_block[16];
-    mm_u8 out_block[16];
-    mm_u8 tag[16];
-    mm_u8 in_words;
-    mm_u8 out_word;
-    mm_bool out_ready;
-    mm_bool key_valid;
-    mm_bool tag_ready;
-    mm_u32 npblb;
-    mm_u32 algo_mode;
-    mm_u8 *aad;
-    mm_u32 aad_len;
-    mm_u32 aad_cap;
-    mm_u8 *payload;
-    mm_u32 payload_len;
-    mm_u32 payload_cap;
-    mm_bool gcm_inited;
-    mm_bool ccm_inited;
-    mm_u8 ccm_nonce[16];
-    mm_u32 ccm_nonce_len;
-    mm_u32 ccm_tag_len;
-    mm_u8 ccm_ctr[16];
-    mm_bool ccm_ctr_valid;
-#ifdef M33MU_HAS_WOLFSSL
-    Aes gcm_aes;
-    Aes ccm_ctr_aes;
-#endif
-};
+#include "stm32_crypto_priv.h"
 
 struct exti_state {
     mm_u32 regs[EXTI_SIZE / 4];
@@ -399,20 +353,6 @@ struct ucpd_state {
     mm_u32 cr;
     mm_u32 imr;
     mm_u32 sr;
-};
-
-struct hash_ctx {
-    struct hash_state *state;
-    mm_bool secure_alias;
-    struct rcc_state *rcc;
-    struct simple_blk *tzsc;
-};
-
-struct aes_ctx {
-    struct aes_state *state;
-    mm_bool secure_alias;
-    struct rcc_state *rcc;
-    struct simple_blk *tzsc;
 };
 
 struct pka_ctx {
@@ -553,275 +493,6 @@ static mm_bool ucpd_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
     }
 }
 
-static mm_u32 bitrev32(mm_u32 v)
-{
-    mm_u32 r = 0u;
-    mm_u32 i;
-    for (i = 0u; i < 32u; ++i) {
-        r <<= 1;
-        r |= (v & 1u);
-        v >>= 1;
-    }
-    return r;
-}
-
-static mm_u32 apply_datatype(mm_u32 value, mm_u32 datatype)
-{
-    switch (datatype & 0x3u) {
-    case 1u:
-        return (value << 16) | (value >> 16);
-    case 2u:
-        return ((value & 0x000000ffu) << 24) |
-               ((value & 0x0000ff00u) << 8)  |
-               ((value & 0x00ff0000u) >> 8)  |
-               ((value & 0xff000000u) >> 24);
-    case 3u:
-        return bitrev32(value);
-    default:
-        break;
-    }
-    return value;
-}
-
-static mm_u32 read_be_word(const mm_u8 *buf)
-{
-    return ((mm_u32)buf[0] << 24) |
-           ((mm_u32)buf[1] << 16) |
-           ((mm_u32)buf[2] << 8) |
-           (mm_u32)buf[3];
-}
-
-static mm_bool aes_buf_ensure(mm_u8 **buf, mm_u32 *cap, mm_u32 need)
-{
-    mm_u32 new_cap;
-    mm_u8 *new_buf;
-    if (need <= *cap) return MM_TRUE;
-    new_cap = (*cap != 0u) ? *cap : 64u;
-    while (new_cap < need) {
-        new_cap *= 2u;
-        if (new_cap < *cap) return MM_FALSE;
-    }
-    new_buf = (mm_u8 *)realloc(*buf, new_cap);
-    if (new_buf == 0) return MM_FALSE;
-    *buf = new_buf;
-    *cap = new_cap;
-    return MM_TRUE;
-}
-
-static mm_bool aes_buf_append(mm_u8 **buf, mm_u32 *len, mm_u32 *cap, const mm_u8 *data, mm_u32 size)
-{
-    if (!aes_buf_ensure(buf, cap, *len + size)) return MM_FALSE;
-    memcpy(*buf + *len, data, size);
-    *len += size;
-    return MM_TRUE;
-}
-
-static void aes_reset_auth_state(struct aes_state *a)
-{
-    a->aad_len = 0u;
-    a->payload_len = 0u;
-    a->tag_ready = MM_FALSE;
-    a->gcm_inited = MM_FALSE;
-    a->ccm_inited = MM_FALSE;
-    a->ccm_ctr_valid = MM_FALSE;
-}
-
-static void aes_build_iv_rev(const struct aes_state *a, mm_u8 *iv_out)
-{
-    mm_u32 i;
-    for (i = 0u; i < 4u; ++i) {
-        mm_u32 w = a->iv_words[3u - i];
-        iv_out[i * 4u] = (mm_u8)(w & 0xffu);
-        iv_out[i * 4u + 1u] = (mm_u8)((w >> 8) & 0xffu);
-        iv_out[i * 4u + 2u] = (mm_u8)((w >> 16) & 0xffu);
-        iv_out[i * 4u + 3u] = (mm_u8)((w >> 24) & 0xffu);
-    }
-}
-
-static void aes_ccm_init_from_b0(struct aes_state *a)
-{
-    mm_u8 b0[16];
-    mm_u32 flags;
-    mm_u32 l_val;
-    mm_u32 tag_len;
-    aes_build_iv_rev(a, b0);
-    flags = b0[0];
-    l_val = (flags & 0x7u) + 1u;
-    tag_len = (((flags >> 3) & 0x7u) * 2u) + 2u;
-    a->ccm_nonce_len = 15u - l_val;
-    if (a->ccm_nonce_len > sizeof(a->ccm_nonce)) {
-        a->ccm_nonce_len = sizeof(a->ccm_nonce);
-    }
-    memcpy(a->ccm_nonce, &b0[1], a->ccm_nonce_len);
-    a->ccm_tag_len = tag_len;
-    memset(a->ccm_ctr, 0, sizeof(a->ccm_ctr));
-    a->ccm_ctr[0] = (mm_u8)(l_val - 1u);
-    memcpy(&a->ccm_ctr[1], a->ccm_nonce, a->ccm_nonce_len);
-    a->ccm_ctr[15] = 1u;
-    a->ccm_ctr_valid = MM_TRUE;
-    a->ccm_inited = MM_TRUE;
-}
-
-static void hash_reset_state(struct hash_state *h)
-{
-    h->msg_len = 0u;
-    h->nblw = 0u;
-    h->nbwp = 0u;
-    h->nbwe = 0x11u;
-    h->digest_len = 0u;
-    h->digest_ready = MM_FALSE;
-    h->busy = MM_FALSE;
-    h->dinne = MM_FALSE;
-    h->regs[HASH_SR / 4u] = 0u;
-}
-
-static mm_bool hash_ensure_capacity(struct hash_state *h, mm_u32 extra)
-{
-    mm_u32 need = h->msg_len + extra;
-    mm_u32 new_cap;
-    mm_u8 *new_buf;
-    if (need <= h->msg_cap) return MM_TRUE;
-    new_cap = h->msg_cap ? h->msg_cap : 64u;
-    while (new_cap < need) {
-        new_cap *= 2u;
-        if (new_cap < h->msg_cap) return MM_FALSE;
-    }
-    new_buf = (mm_u8 *)realloc(h->msg, new_cap);
-    if (new_buf == 0) return MM_FALSE;
-    h->msg = new_buf;
-    h->msg_cap = new_cap;
-    return MM_TRUE;
-}
-
-static mm_bool hash_append_word(struct hash_state *h, mm_u32 value, mm_u32 datatype)
-{
-    mm_u32 word;
-    mm_u8 *dst;
-    if (!hash_ensure_capacity(h, 4u)) return MM_FALSE;
-    word = apply_datatype(value, datatype);
-    dst = h->msg + h->msg_len;
-    dst[0] = (mm_u8)(word & 0xffu);
-    dst[1] = (mm_u8)((word >> 8) & 0xffu);
-    dst[2] = (mm_u8)((word >> 16) & 0xffu);
-    dst[3] = (mm_u8)((word >> 24) & 0xffu);
-    h->msg_len += 4u;
-    h->nbwp++;
-    if (h->nbwe > 0u) {
-        h->nbwe--;
-    }
-    h->dinne = MM_TRUE;
-    return MM_TRUE;
-}
-
-static void hash_set_digest_regs(struct hash_state *h)
-{
-    mm_u32 i;
-    mm_u32 words = h->digest_len / 4u;
-    for (i = 0u; i < 5u; ++i) {
-        mm_u32 off = (HASH_HRA0 / 4u) + i;
-        if (i < words) {
-            h->regs[off] = read_be_word(h->digest + i * 4u);
-        } else {
-            h->regs[off] = 0u;
-        }
-    }
-    for (i = 0u; i < 16u; ++i) {
-        mm_u32 off = (HASH_HR0 / 4u) + i;
-        if (i < words) {
-            h->regs[off] = read_be_word(h->digest + i * 4u);
-        } else {
-            h->regs[off] = 0u;
-        }
-    }
-}
-
-static void hash_compute_digest(struct hash_state *h, mm_u32 algo)
-{
-    const mm_u8 *data = h->msg;
-    mm_u32 len = h->msg_len;
-    mm_u8 last_buf[4];
-    mm_u32 last_len = 0u;
-    mm_u32 nblw = h->nblw & HASH_STR_NBLW_MASK;
-    if (nblw != 0u && len >= 4u) {
-        mm_u32 valid_bits = nblw;
-        mm_u32 valid_bytes = (valid_bits + 7u) / 8u;
-        mm_u32 bytes_before = len - 4u;
-        mm_u32 rem_bits = valid_bits % 8u;
-        memcpy(last_buf, h->msg + bytes_before, 4u);
-        if (rem_bits != 0u && valid_bytes > 0u) {
-            mm_u8 mask = (mm_u8)((1u << rem_bits) - 1u);
-            last_buf[valid_bytes - 1u] &= mask;
-        }
-        data = h->msg;
-        len = bytes_before;
-        last_len = valid_bytes;
-    }
-
-    h->digest_len = 0u;
-#ifdef M33MU_HAS_WOLFSSL
-    switch (algo & 0x3u) {
-    case 0x0u: {
-        wc_Sha sha;
-        wc_InitSha(&sha);
-        wc_ShaUpdate(&sha, data, len);
-        if (last_len != 0u) wc_ShaUpdate(&sha, last_buf, last_len);
-        wc_ShaFinal(&sha, h->digest);
-        h->digest_len = 20u;
-        break;
-    }
-    case 0x1u: {
-        wc_Sha224 sha;
-        wc_InitSha224(&sha);
-        wc_Sha224Update(&sha, data, len);
-        if (last_len != 0u) wc_Sha224Update(&sha, last_buf, last_len);
-        wc_Sha224Final(&sha, h->digest);
-        h->digest_len = 28u;
-        break;
-    }
-    case 0x2u: {
-        wc_Sha256 sha;
-        wc_InitSha256(&sha);
-        wc_Sha256Update(&sha, data, len);
-        if (last_len != 0u) wc_Sha256Update(&sha, last_buf, last_len);
-        wc_Sha256Final(&sha, h->digest);
-        h->digest_len = 32u;
-        break;
-    }
-    case 0x3u: {
-        wc_Sha384 sha;
-        wc_InitSha384(&sha);
-        wc_Sha384Update(&sha, data, len);
-        if (last_len != 0u) wc_Sha384Update(&sha, last_buf, last_len);
-        wc_Sha384Final(&sha, h->digest);
-        h->digest_len = 48u;
-        break;
-    }
-    default:
-        break;
-    }
-#else
-    (void)algo;
-#endif
-    if (h->digest_len == 0u) {
-        memset(h->digest, 0, sizeof(h->digest));
-        h->digest_len = 32u;
-    }
-    hash_set_digest_regs(h);
-    h->digest_ready = MM_TRUE;
-}
-
-static mm_u32 hash_status_word(struct hash_state *h)
-{
-    mm_u32 sr = 0u;
-    sr |= HASH_SR_DINIS;
-    if (h->digest_ready) sr |= HASH_SR_DCIS;
-    if (h->busy) sr |= HASH_SR_BUSY;
-    if (h->dinne) sr |= HASH_SR_DINNE;
-    sr |= (h->nbwp & 0x1fu) << HASH_SR_NBWP_SHIFT;
-    sr |= (h->nbwe & 0x1fu) << HASH_SR_NBWE_SHIFT;
-    return sr;
-}
-
 static mm_bool tzsc_requires_secure(const struct simple_blk *tzsc, mm_u32 bit)
 {
     mm_u32 seccfgr2 = tzsc->regs[TZSC_SECCFGR2_OFFSET / 4u];
@@ -834,9 +505,10 @@ static mm_bool hash_clock_enabled(const struct rcc_state *rcc)
     return ((ahb2enr >> 17) & 1u) != 0u;
 }
 
-static mm_bool aes_clock_enabled(const struct rcc_state *rcc)
+static mm_bool aes_clock_enabled(const struct rcc_state *rcc, mm_bool is_saes)
 {
     mm_u32 ahb2enr = rcc->regs[0x4c / 4];
+    (void)is_saes;
     return ((ahb2enr >> 16) & 1u) != 0u;
 }
 
@@ -845,8 +517,9 @@ static mm_bool hash_requires_secure(const struct simple_blk *tzsc)
     return tzsc_requires_secure(tzsc, TZSC_HASHSEC_BIT);
 }
 
-static mm_bool aes_requires_secure(const struct simple_blk *tzsc)
+static mm_bool aes_requires_secure(const struct simple_blk *tzsc, mm_bool is_saes)
 {
+    (void)is_saes;
     return tzsc_requires_secure(tzsc, TZSC_AESSEC_BIT);
 }
 
@@ -861,28 +534,6 @@ static mm_bool pka_requires_secure(const struct simple_blk *tzsc)
     return tzsc_requires_secure(tzsc, TZSC_PKASEC_BIT);
 }
 
-static mm_bool hash_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
-{
-    struct hash_ctx *ctx = (struct hash_ctx *)opaque;
-    struct hash_state *h = ctx->state;
-    if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if ((offset + size_bytes) > HASH_SIZE) return MM_FALSE;
-    if (!hash_clock_enabled(ctx->rcc)) {
-        *value_out = 0u;
-        return MM_TRUE;
-    }
-    if (!ctx->secure_alias && hash_requires_secure(ctx->tzsc)) {
-        *value_out = 0u;
-        return MM_TRUE;
-    }
-    if (offset == HASH_SR) {
-        mm_u32 sr = hash_status_word(h);
-        memcpy(value_out, &sr, size_bytes);
-        return MM_TRUE;
-    }
-    memcpy(value_out, (mm_u8 *)h->regs + offset, size_bytes);
-    return MM_TRUE;
-}
 
 static mm_bool pka_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
@@ -899,66 +550,6 @@ static mm_bool pka_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
     return mm_pka_read(ctx->state, offset, size_bytes, value_out);
 }
 
-static mm_bool hash_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
-{
-    struct hash_ctx *ctx = (struct hash_ctx *)opaque;
-    struct hash_state *h = ctx->state;
-    mm_u32 datatype;
-    mm_u32 algo;
-    if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if ((offset + size_bytes) > HASH_SIZE) return MM_FALSE;
-    if (!hash_clock_enabled(ctx->rcc)) {
-        return MM_TRUE;
-    }
-    if (!ctx->secure_alias && hash_requires_secure(ctx->tzsc)) {
-        return MM_TRUE;
-    }
-    if (offset == HASH_CR) {
-        datatype = (value >> HASH_CR_DATATYPE_SHIFT) & 0x3u;
-        algo = (value >> HASH_CR_ALGO_SHIFT) & 0x3u;
-        h->regs[HASH_CR / 4u] = value & ~(HASH_CR_INIT);
-        if ((value & HASH_CR_INIT) != 0u) {
-            hash_reset_state(h);
-            h->regs[HASH_CR / 4u] = value & ~(HASH_CR_INIT);
-            h->regs[HASH_CR / 4u] = (h->regs[HASH_CR / 4u] & ~(0x3u << HASH_CR_ALGO_SHIFT)) |
-                                    ((algo & 0x3u) << HASH_CR_ALGO_SHIFT);
-        }
-        h->regs[HASH_CR / 4u] = (h->regs[HASH_CR / 4u] & ~(0x3u << HASH_CR_DATATYPE_SHIFT)) |
-                                ((datatype & 0x3u) << HASH_CR_DATATYPE_SHIFT);
-        return MM_TRUE;
-    }
-    if (offset == HASH_DIN) {
-        datatype = (h->regs[HASH_CR / 4u] >> HASH_CR_DATATYPE_SHIFT) & 0x3u;
-        hash_append_word(h, value, datatype);
-        return MM_TRUE;
-    }
-    if (offset == HASH_STR) {
-        h->regs[HASH_STR / 4u] = value;
-        h->nblw = value & HASH_STR_NBLW_MASK;
-        if ((value & HASH_STR_DCAL) != 0u) {
-            algo = (h->regs[HASH_CR / 4u] >> HASH_CR_ALGO_SHIFT) & 0x3u;
-            h->busy = MM_TRUE;
-            hash_compute_digest(h, algo);
-            h->busy = MM_FALSE;
-            h->dinne = MM_FALSE;
-        }
-        return MM_TRUE;
-    }
-    if (offset == HASH_SR) {
-        h->regs[HASH_SR / 4u] &= ~(value & (HASH_SR_DINIS | HASH_SR_DCIS));
-        if ((value & HASH_SR_DCIS) != 0u) {
-            h->digest_ready = MM_FALSE;
-        }
-        return MM_TRUE;
-    }
-    if (offset == HASH_IMR || offset >= HASH_CSR0) {
-        memcpy((mm_u8 *)h->regs + offset, &value, size_bytes);
-        return MM_TRUE;
-    }
-    memcpy((mm_u8 *)h->regs + offset, &value, size_bytes);
-    return MM_TRUE;
-}
-
 static mm_bool pka_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
     struct pka_ctx *ctx = (struct pka_ctx *)opaque;
@@ -970,461 +561,6 @@ static mm_bool pka_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
         return MM_TRUE;
     }
     return mm_pka_write(ctx->state, offset, size_bytes, value);
-}
-
-static mm_bool aes_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
-{
-    struct aes_ctx *ctx = (struct aes_ctx *)opaque;
-    struct aes_state *a = ctx->state;
-    mm_u32 val;
-    if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if ((offset + size_bytes) > AES_SIZE) return MM_FALSE;
-    if (!aes_clock_enabled(ctx->rcc)) {
-        *value_out = 0u;
-        return MM_TRUE;
-    }
-    if (!ctx->secure_alias && aes_requires_secure(ctx->tzsc)) {
-        *value_out = 0u;
-        return MM_TRUE;
-    }
-    if (offset == AES_SR) {
-        val = a->regs[AES_SR / 4u] & ~(AES_SR_CCF | AES_SR_KEYVALID | AES_SR_BUSY);
-        if (a->out_ready) val |= AES_SR_CCF;
-        if (a->key_valid) val |= AES_SR_KEYVALID;
-        memcpy(value_out, &val, size_bytes);
-        return MM_TRUE;
-    }
-    if (offset == AES_DOUTR) {
-        mm_u32 datatype = (a->regs[AES_CR / 4u] >> AES_CR_DATATYPE_SHIFT) & 0x3u;
-        if (!a->out_ready || a->out_word >= 4u) {
-            *value_out = 0u;
-            return MM_TRUE;
-        }
-        val = (mm_u32)a->out_block[a->out_word * 4u] |
-              ((mm_u32)a->out_block[a->out_word * 4u + 1u] << 8) |
-              ((mm_u32)a->out_block[a->out_word * 4u + 2u] << 16) |
-              ((mm_u32)a->out_block[a->out_word * 4u + 3u] << 24);
-        val = apply_datatype(val, datatype);
-        a->out_word++;
-        memcpy(value_out, &val, size_bytes);
-        return MM_TRUE;
-    }
-    memcpy(value_out, (mm_u8 *)a->regs + offset, size_bytes);
-    return MM_TRUE;
-}
-
-static void aes_build_key(struct aes_state *a, mm_u8 *key_out, mm_u32 key_len)
-{
-    mm_u32 i;
-    mm_u32 words = key_len / 4u;
-    for (i = 0u; i < words; ++i) {
-        mm_u32 w = a->key_words[i];
-        key_out[i * 4u] = (mm_u8)(w & 0xffu);
-        key_out[i * 4u + 1u] = (mm_u8)((w >> 8) & 0xffu);
-        key_out[i * 4u + 2u] = (mm_u8)((w >> 16) & 0xffu);
-        key_out[i * 4u + 3u] = (mm_u8)((w >> 24) & 0xffu);
-    }
-}
-
-static void aes_build_iv(struct aes_state *a, mm_u8 *iv_out)
-{
-    mm_u32 i;
-    for (i = 0u; i < 4u; ++i) {
-        mm_u32 w = a->iv_words[i];
-        iv_out[i * 4u] = (mm_u8)(w & 0xffu);
-        iv_out[i * 4u + 1u] = (mm_u8)((w >> 8) & 0xffu);
-        iv_out[i * 4u + 2u] = (mm_u8)((w >> 16) & 0xffu);
-        iv_out[i * 4u + 3u] = (mm_u8)((w >> 24) & 0xffu);
-    }
-}
-
-static void aes_store_iv(struct aes_state *a, const mm_u8 *iv_in)
-{
-    mm_u32 i;
-    for (i = 0u; i < 4u; ++i) {
-        a->iv_words[i] = (mm_u32)iv_in[i * 4u] |
-                         ((mm_u32)iv_in[i * 4u + 1u] << 8) |
-                         ((mm_u32)iv_in[i * 4u + 2u] << 16) |
-                         ((mm_u32)iv_in[i * 4u + 3u] << 24);
-    }
-}
-
-#ifdef M33MU_HAS_WOLFSSL
-static void aes_store_iv_words(struct aes_state *a, const word32 *iv_words)
-{
-    mm_u32 i;
-    mm_u8 iv_bytes[16];
-    for (i = 0u; i < 4u; ++i) {
-        mm_u32 w = (mm_u32)iv_words[i];
-        iv_bytes[i * 4u] = (mm_u8)(w & 0xffu);
-        iv_bytes[i * 4u + 1u] = (mm_u8)((w >> 8) & 0xffu);
-        iv_bytes[i * 4u + 2u] = (mm_u8)((w >> 16) & 0xffu);
-        iv_bytes[i * 4u + 3u] = (mm_u8)((w >> 24) & 0xffu);
-    }
-    aes_store_iv(a, iv_bytes);
-}
-#endif
-
-static void aes_process_block(struct aes_state *a)
-{
-    mm_u8 key[32];
-    mm_u8 iv[16];
-    mm_u32 key_len = (a->regs[AES_CR / 4u] & AES_CR_KEYSIZE) ? 32u : 16u;
-    mm_u32 mode = (a->regs[AES_CR / 4u] >> AES_CR_MODE_SHIFT) & 0x3u;
-    mm_u32 chmod = ((a->regs[AES_CR / 4u] >> AES_CR_CHMOD_SHIFT) & 0x3u) |
-                   ((a->regs[AES_CR / 4u] & AES_CR_CHMOD2) ? 0x4u : 0u);
-    mm_bool decrypt = (mode != 0u);
-#ifdef M33MU_HAS_WOLFSSL
-    Aes aes;
-#endif
-    if (!a->key_valid) {
-        memset(a->out_block, 0, sizeof(a->out_block));
-        a->out_ready = MM_TRUE;
-        a->out_word = 0u;
-        a->regs[AES_SR / 4u] |= AES_SR_CCF | AES_SR_WRERR;
-        a->regs[AES_SR / 4u] &= ~AES_SR_BUSY;
-        return;
-    }
-#ifdef M33MU_HAS_WOLFSSL
-    aes_build_key(a, key, key_len);
-    aes_build_iv(a, iv);
-    wc_AesInit(&aes, NULL, INVALID_DEVID);
-    if (chmod == 1u) {
-        wc_AesSetKey(&aes, key, key_len, iv, decrypt ? AES_DECRYPTION : AES_ENCRYPTION);
-        if (decrypt) {
-            wc_AesCbcDecrypt(&aes, a->out_block, a->in_block, 16u);
-        } else {
-            wc_AesCbcEncrypt(&aes, a->out_block, a->in_block, 16u);
-        }
-        aes_store_iv_words(a, aes.reg);
-    } else if (chmod == 2u) {
-        wc_AesSetKeyDirect(&aes, key, key_len, iv, AES_ENCRYPTION);
-        wc_AesCtrEncrypt(&aes, a->out_block, a->in_block, 16u);
-        aes_store_iv_words(a, aes.reg);
-    } else {
-        wc_AesSetKey(&aes, key, key_len, NULL, decrypt ? AES_DECRYPTION : AES_ENCRYPTION);
-        if (decrypt) {
-            wc_AesEcbDecrypt(&aes, a->out_block, a->in_block, 16u);
-        } else {
-            wc_AesEcbEncrypt(&aes, a->out_block, a->in_block, 16u);
-        }
-    }
-    wc_AesFree(&aes);
-#else
-    (void)key_len;
-    (void)key;
-    (void)iv;
-    memcpy(a->out_block, a->in_block, sizeof(a->out_block));
-#endif
-    a->out_ready = MM_TRUE;
-    a->out_word = 0u;
-    a->regs[AES_SR / 4u] |= AES_SR_CCF;
-    a->regs[AES_SR / 4u] &= ~AES_SR_BUSY;
-}
-
-static mm_u32 aes_algo_mode(const struct aes_state *a)
-{
-    mm_u32 cr = a->regs[AES_CR / 4u];
-    if ((cr & AES_CR_CHMOD2) != 0u) {
-        return 4u;
-    }
-    return (cr >> AES_CR_CHMOD_SHIFT) & 0x3u;
-}
-
-static mm_u32 aes_phase(const struct aes_state *a)
-{
-    return (a->regs[AES_CR / 4u] >> AES_CR_GCMPH_SHIFT) & 0x3u;
-}
-
-static void aes_prepare_gcm(struct aes_state *a, mm_bool decrypt)
-{
-#ifdef M33MU_HAS_WOLFSSL
-    mm_u8 key[32];
-    mm_u8 iv[16];
-    mm_u32 key_len = (a->regs[AES_CR / 4u] & AES_CR_KEYSIZE) ? 32u : 16u;
-    aes_build_key(a, key, key_len);
-    aes_build_iv(a, iv);
-#ifdef WOLFSSL_AESGCM_STREAM
-    if (decrypt) {
-        wc_AesGcmDecryptInit(&a->gcm_aes, key, key_len, iv, 16u);
-    } else {
-        wc_AesGcmEncryptInit(&a->gcm_aes, key, key_len, iv, 16u);
-    }
-#else
-    wc_AesGcmSetKey(&a->gcm_aes, key, key_len);
-#endif
-    a->gcm_inited = MM_TRUE;
-#else
-    (void)decrypt;
-#endif
-}
-
-static void aes_handle_gcm_block(struct aes_state *a, mm_u32 phase, mm_bool decrypt, const mm_u8 *in, mm_u32 len)
-{
-#ifdef M33MU_HAS_WOLFSSL
-#ifdef WOLFSSL_AESGCM_STREAM
-    if (!a->gcm_inited) {
-        aes_prepare_gcm(a, decrypt);
-    }
-    if (phase == 1u) {
-        wc_AesGcmEncryptUpdate(&a->gcm_aes, a->out_block, 0, 0, in, len);
-        return;
-    }
-    if (phase == 2u) {
-        if (decrypt) {
-            wc_AesGcmDecryptUpdate(&a->gcm_aes, a->out_block, in, len, 0, 0);
-        } else {
-            wc_AesGcmEncryptUpdate(&a->gcm_aes, a->out_block, in, len, 0, 0);
-        }
-        if (len < 16u) {
-            memset(a->out_block + len, 0, 16u - len);
-        }
-        a->out_ready = MM_TRUE;
-        a->out_word = 0u;
-    }
-#else
-    (void)decrypt;
-    if (phase == 1u) {
-        aes_buf_append(&a->aad, &a->aad_len, &a->aad_cap, in, len);
-        return;
-    }
-    if (phase == 2u) {
-        aes_buf_append(&a->payload, &a->payload_len, &a->payload_cap, in, len);
-        memset(a->out_block, 0, sizeof(a->out_block));
-        a->out_ready = MM_TRUE;
-        a->out_word = 0u;
-    }
-#endif
-#else
-    (void)phase;
-    (void)decrypt;
-    (void)in;
-    (void)len;
-#endif
-}
-
-static void aes_finalize_gcm(struct aes_state *a, mm_bool decrypt)
-{
-#ifdef M33MU_HAS_WOLFSSL
-#ifdef WOLFSSL_AESGCM_STREAM
-    if (!a->gcm_inited) {
-        aes_prepare_gcm(a, decrypt);
-    }
-    if (decrypt) {
-        int ret = wc_AesGcmDecryptFinal(&a->gcm_aes, a->tag, 16u);
-        (void)ret;
-    } else {
-        wc_AesGcmEncryptFinal(&a->gcm_aes, a->tag, 16u);
-    }
-#else
-    {
-        mm_u8 key[32];
-        mm_u8 iv[16];
-        mm_u32 key_len = (a->regs[AES_CR / 4u] & AES_CR_KEYSIZE) ? 32u : 16u;
-        aes_build_key(a, key, key_len);
-        aes_build_iv(a, iv);
-        wc_AesGcmSetKey(&a->gcm_aes, key, key_len);
-        if (decrypt) {
-            wc_AesGcmDecrypt(&a->gcm_aes, a->payload, a->payload, a->payload_len,
-                             iv, 16u, a->tag, 16u, a->aad, a->aad_len);
-        } else {
-            wc_AesGcmEncrypt(&a->gcm_aes, a->payload, a->payload, a->payload_len,
-                             iv, 16u, a->tag, 16u, a->aad, a->aad_len);
-        }
-    }
-#endif
-    memcpy(a->out_block, a->tag, 16u);
-    a->tag_ready = MM_TRUE;
-    a->out_ready = MM_TRUE;
-    a->out_word = 0u;
-#else
-    (void)decrypt;
-#endif
-}
-
-static void aes_handle_ccm_block(struct aes_state *a, mm_u32 phase, mm_bool decrypt, const mm_u8 *in, mm_u32 len)
-{
-#ifdef M33MU_HAS_WOLFSSL
-    mm_u8 key[32];
-    mm_u32 key_len;
-    if (!a->ccm_inited) {
-        aes_ccm_init_from_b0(a);
-    }
-    if (phase == 1u) {
-        aes_buf_append(&a->aad, &a->aad_len, &a->aad_cap, in, len);
-        return;
-    }
-    if (phase == 2u) {
-        mm_u8 out[16];
-        key_len = (a->regs[AES_CR / 4u] & AES_CR_KEYSIZE) ? 32u : 16u;
-        aes_build_key(a, key, key_len);
-        if (!a->ccm_ctr_valid) {
-            aes_ccm_init_from_b0(a);
-        }
-        wc_AesSetKeyDirect(&a->ccm_ctr_aes, key, key_len, a->ccm_ctr, AES_ENCRYPTION);
-        wc_AesCtrEncrypt(&a->ccm_ctr_aes, out, in, len);
-        memcpy(a->ccm_ctr, a->ccm_ctr_aes.reg, 16u);
-        memset(a->out_block, 0, 16u);
-        memcpy(a->out_block, out, len);
-        if (len < 16u) {
-            memset(a->out_block + len, 0, 16u - len);
-        }
-        a->out_ready = MM_TRUE;
-        a->out_word = 0u;
-        if (decrypt) {
-            aes_buf_append(&a->payload, &a->payload_len, &a->payload_cap, out, len);
-        } else {
-            aes_buf_append(&a->payload, &a->payload_len, &a->payload_cap, in, len);
-        }
-    }
-#else
-    (void)phase;
-    (void)decrypt;
-    (void)in;
-    (void)len;
-#endif
-}
-
-static void aes_finalize_ccm(struct aes_state *a, mm_bool decrypt)
-{
-#ifdef M33MU_HAS_WOLFSSL
-    mm_u8 key[32];
-    mm_u32 key_len = (a->regs[AES_CR / 4u] & AES_CR_KEYSIZE) ? 32u : 16u;
-    aes_build_key(a, key, key_len);
-    wc_AesCcmSetKey(&a->ccm_ctr_aes, key, key_len);
-    if (a->ccm_nonce_len == 0u) {
-        aes_ccm_init_from_b0(a);
-    }
-    if (decrypt) {
-        wc_AesCcmEncrypt(&a->ccm_ctr_aes, 0, a->payload, a->payload_len,
-                         a->ccm_nonce, a->ccm_nonce_len, a->tag, a->ccm_tag_len,
-                         a->aad, a->aad_len);
-    } else {
-        wc_AesCcmEncrypt(&a->ccm_ctr_aes, 0, a->payload, a->payload_len,
-                         a->ccm_nonce, a->ccm_nonce_len, a->tag, a->ccm_tag_len,
-                         a->aad, a->aad_len);
-    }
-    memset(a->out_block, 0, 16u);
-    memcpy(a->out_block, a->tag, a->ccm_tag_len > 16u ? 16u : a->ccm_tag_len);
-    a->tag_ready = MM_TRUE;
-    a->out_ready = MM_TRUE;
-    a->out_word = 0u;
-#else
-    (void)decrypt;
-#endif
-}
-
-static mm_bool aes_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
-{
-    struct aes_ctx *ctx = (struct aes_ctx *)opaque;
-    struct aes_state *a = ctx->state;
-    mm_u32 datatype;
-    if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if ((offset + size_bytes) > AES_SIZE) return MM_FALSE;
-    if (!aes_clock_enabled(ctx->rcc)) {
-        return MM_TRUE;
-    }
-    if (!ctx->secure_alias && aes_requires_secure(ctx->tzsc)) {
-        return MM_TRUE;
-    }
-    if (offset == AES_CR) {
-        mm_u32 prev = a->regs[AES_CR / 4u];
-        if ((value & AES_CR_IPRST) != 0u) {
-            memset(a, 0, sizeof(*a));
-        }
-        a->regs[AES_CR / 4u] = value;
-        a->npblb = (value >> AES_CR_NPBLB_SHIFT) & 0xFu;
-        if (((prev ^ value) & (AES_CR_CHMOD2 | AES_CR_CHMOD_MASK | AES_CR_GCMPH_MASK)) != 0u) {
-            aes_reset_auth_state(a);
-        }
-        if (((prev ^ value) & AES_CR_KEYSIZE) != 0u) {
-            a->key_written = 0u;
-            a->key_valid = MM_FALSE;
-            a->regs[AES_SR / 4u] &= ~AES_SR_KEYVALID;
-        }
-        if (((value & AES_CR_GCMPH_MASK) == AES_CR_GCMPH_MASK)) {
-            mm_u32 algo = aes_algo_mode(a);
-            mm_bool decrypt = ((a->regs[AES_CR / 4u] >> AES_CR_MODE_SHIFT) & 0x3u) != 0u;
-            if (algo == 3u) {
-                aes_finalize_gcm(a, decrypt);
-            } else if (algo == 4u) {
-                aes_finalize_ccm(a, decrypt);
-            }
-        }
-        return MM_TRUE;
-    }
-    if (offset == AES_KEYR0 || offset == AES_KEYR1 || offset == AES_KEYR2 || offset == AES_KEYR3 ||
-        offset == AES_KEYR4 || offset == AES_KEYR5 || offset == AES_KEYR6 || offset == AES_KEYR7) {
-        mm_u32 idx = (offset - AES_KEYR0) / 4u;
-        mm_u32 key_len = (a->regs[AES_CR / 4u] & AES_CR_KEYSIZE) ? 32u : 16u;
-        mm_u32 words = key_len / 4u;
-        mm_u32 mask;
-        if (idx < 8u) {
-            a->key_words[idx] = value;
-        }
-        if (idx < words) {
-            a->key_written |= (1u << idx);
-        }
-        mask = (words >= 8u) ? 0xFFu : ((1u << words) - 1u);
-        a->key_valid = ((a->key_written & mask) == mask) ? MM_TRUE : MM_FALSE;
-        a->regs[AES_SR / 4u] = (a->regs[AES_SR / 4u] & ~AES_SR_KEYVALID) |
-                               (a->key_valid ? AES_SR_KEYVALID : 0u);
-        return MM_TRUE;
-    }
-    if (offset == AES_IVR0 || offset == AES_IVR1 || offset == AES_IVR2 || offset == AES_IVR3) {
-        mm_u32 idx = (offset - AES_IVR0) / 4u;
-        if (idx < 4u) {
-            a->iv_words[idx] = value;
-        }
-        a->regs[offset / 4u] = value;
-        return MM_TRUE;
-    }
-    if (offset == AES_DINR) {
-        mm_u32 word;
-        mm_u32 algo;
-        mm_u32 phase;
-        mm_u32 valid_len = 16u;
-        if ((a->regs[AES_CR / 4u] & AES_CR_EN) == 0u) {
-            a->regs[AES_SR / 4u] |= AES_SR_WRERR;
-            return MM_TRUE;
-        }
-        datatype = (a->regs[AES_CR / 4u] >> AES_CR_DATATYPE_SHIFT) & 0x3u;
-        word = apply_datatype(value, datatype);
-        a->in_block[a->in_words * 4u] = (mm_u8)(word & 0xffu);
-        a->in_block[a->in_words * 4u + 1u] = (mm_u8)((word >> 8) & 0xffu);
-        a->in_block[a->in_words * 4u + 2u] = (mm_u8)((word >> 16) & 0xffu);
-        a->in_block[a->in_words * 4u + 3u] = (mm_u8)((word >> 24) & 0xffu);
-        a->in_words++;
-        if (a->in_words >= 4u) {
-            algo = aes_algo_mode(a);
-            phase = aes_phase(a);
-            if (a->npblb != 0u && a->npblb < 16u) {
-                valid_len = 16u - a->npblb;
-            }
-            a->regs[AES_SR / 4u] |= AES_SR_BUSY;
-            if (algo == 3u) {
-                mm_bool decrypt = ((a->regs[AES_CR / 4u] >> AES_CR_MODE_SHIFT) & 0x3u) != 0u;
-                aes_handle_gcm_block(a, phase, decrypt, a->in_block, valid_len);
-            } else if (algo == 4u) {
-                mm_bool decrypt = ((a->regs[AES_CR / 4u] >> AES_CR_MODE_SHIFT) & 0x3u) != 0u;
-                aes_handle_ccm_block(a, phase, decrypt, a->in_block, valid_len);
-            } else {
-                aes_process_block(a);
-            }
-            a->in_words = 0u;
-        }
-        return MM_TRUE;
-    }
-    if (offset == AES_ICR) {
-        if ((value & 1u) != 0u) {
-            a->regs[AES_SR / 4u] &= ~AES_SR_CCF;
-            a->out_ready = MM_FALSE;
-        }
-        a->regs[AES_ICR / 4u] = value;
-        return MM_TRUE;
-    }
-    memcpy((mm_u8 *)a->regs + offset, &value, size_bytes);
-    return MM_TRUE;
 }
 
 static mm_bool flash_trace_enabled(void)
@@ -1508,7 +644,7 @@ void mm_stm32l552_mmio_reset(void)
     /* RNG reset values */
     rng.regs[RNG_CR_OFFSET / 4] = 0x00871f00u;
     rng.regs[RNG_HTCR_OFFSET / 4] = 0x000072acu;
-    hash_reset_state(&hash_accel);
+    hash_reset_state(&hash_accel, MM_TRUE);
     mm_pka_reset(&pka_accel);
 
     /* FLASH reset values */
@@ -2687,18 +1823,28 @@ mm_bool mm_stm32l552_register_mmio(struct mmio_bus *bus)
     hash_ctx[0].secure_alias = MM_FALSE;
     hash_ctx[0].rcc = &rcc;
     hash_ctx[0].tzsc = &tzsc_s;
+    hash_ctx[0].clock_enabled = hash_clock_enabled;
+    hash_ctx[0].requires_secure = hash_requires_secure;
     hash_ctx[1].state = &hash_accel;
     hash_ctx[1].secure_alias = MM_TRUE;
     hash_ctx[1].rcc = &rcc;
     hash_ctx[1].tzsc = &tzsc_s;
+    hash_ctx[1].clock_enabled = hash_clock_enabled;
+    hash_ctx[1].requires_secure = hash_requires_secure;
     aes_ctx[0].state = &aes_accel;
     aes_ctx[0].secure_alias = MM_FALSE;
     aes_ctx[0].rcc = &rcc;
     aes_ctx[0].tzsc = &tzsc_s;
+    aes_ctx[0].is_saes = MM_FALSE;
+    aes_ctx[0].clock_enabled = aes_clock_enabled;
+    aes_ctx[0].requires_secure = aes_requires_secure;
     aes_ctx[1].state = &aes_accel;
     aes_ctx[1].secure_alias = MM_TRUE;
     aes_ctx[1].rcc = &rcc;
     aes_ctx[1].tzsc = &tzsc_s;
+    aes_ctx[1].is_saes = MM_FALSE;
+    aes_ctx[1].clock_enabled = aes_clock_enabled;
+    aes_ctx[1].requires_secure = aes_requires_secure;
     pka_ctx[0].state = &pka_accel;
     pka_ctx[0].secure_alias = MM_FALSE;
     pka_ctx[0].rcc = &rcc;
