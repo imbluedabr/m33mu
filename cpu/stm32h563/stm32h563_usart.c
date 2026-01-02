@@ -47,6 +47,8 @@
 #define ISR_RXNE (1u << 5)
 #define ISR_TC   (1u << 6)
 #define ISR_TXE  (1u << 7)
+#define ISR_TEACK (1u << 21)
+#define ISR_REACK (1u << 22)
 
 struct usart_inst {
     mm_u32 base;
@@ -66,7 +68,7 @@ struct usart_inst {
     mm_bool rx_trace;
 };
 
-static struct usart_inst usarts[12];
+static struct usart_inst usarts[13];
 static size_t usart_count = 0;
 static struct mm_nvic *g_nvic = 0;
 
@@ -113,6 +115,12 @@ static mm_bool clock_apb1henr_generic(struct usart_inst *u)
     return ((u->rcc_regs[0xa0 / 4] >> bit) & 1u) != 0u;
 }
 
+static mm_bool clock_apb3_lpuart1(struct usart_inst *u)
+{
+    if (u->rcc_regs == 0) return MM_TRUE;
+    return ((u->rcc_regs[0xa8 / 4] >> 6) & 1u) != 0u;
+}
+
 static void ensure_enabled(struct usart_inst *u)
 {
     mm_bool was;
@@ -137,6 +145,23 @@ static void ensure_enabled(struct usart_inst *u)
     } else if (!ue && was) {
         mm_uart_io_close(&u->io);
     }
+}
+
+static void usart_update_ack(struct usart_inst *u)
+{
+    mm_u32 cr1 = u->regs[USART_CR1 / 4];
+    mm_u32 isr = u->regs[USART_ISR / 4];
+    if ((cr1 & (CR1_UE | CR1_TE)) == (CR1_UE | CR1_TE)) {
+        isr |= ISR_TEACK;
+    } else {
+        isr &= ~ISR_TEACK;
+    }
+    if ((cr1 & (CR1_UE | CR1_RE)) == (CR1_UE | CR1_RE)) {
+        isr |= ISR_REACK;
+    } else {
+        isr &= ~ISR_REACK;
+    }
+    u->regs[USART_ISR / 4] = isr;
 }
 
 static mm_bool usart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
@@ -166,6 +191,7 @@ static mm_bool usart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
         /* Keep TXE/TC set so firmware polls see the line idle immediately. */
         u->regs[USART_ISR / 4] |= ISR_TXE;
         u->regs[USART_ISR / 4] |= ISR_TC;
+        usart_update_ack(u);
         if (u->rx_trace) {
             printf("[USART_ISR_READ] base=0x%08lx isr=0x%08lx\n",
                    (unsigned long)u->base,
@@ -222,6 +248,9 @@ static mm_bool usart_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
         return MM_TRUE;
     }
     memcpy((mm_u8 *)u->regs + offset, &value, size_bytes);
+    if (offset == USART_CR1) {
+        usart_update_ack(u);
+    }
     return MM_TRUE;
 }
 
@@ -266,14 +295,16 @@ void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
     static const mm_u32 bases[] = {
         0x40013800u, 0x40004400u, 0x40004800u, 0x40004C00u,
         0x40005000u, 0x40006400u, 0x40007800u, 0x40007C00u,
-        0x40008000u, 0x40006800u, 0x40006C00u, 0x40008400u
+        0x40008000u, 0x40006800u, 0x40006C00u, 0x40008400u,
+        0x44002400u
     };
     static const int irq_map[] = {
-        58, 59, 60, 61, 62, 85, 98, 99, 100, 86, 87, 101
+        58, 59, 60, 61, 62, 85, 98, 99, 100, 86, 87, 101, 63
     };
     static const char *labels[] = {
         "USART1", "USART2", "USART3", "UART4", "UART5", "USART6",
-        "UART7", "UART8", "UART9", "USART10", "USART11", "UART12"
+        "UART7", "UART8", "UART9", "USART10", "USART11", "UART12",
+        "LPUART1"
     };
     size_t i;
     mm_u32 *tz = mm_stm32h563_tzsc_regs();
@@ -330,6 +361,10 @@ void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
             else if (i == 9) { u->sec_bitmask = (1u << 22); }
             else if (i == 10) { u->sec_bitmask = (1u << 23); }
             else { u->sec_bitmask = 0; }
+        } else if (i == 12u) {
+            u->clock_on = clock_apb3_lpuart1;
+            u->sec_reg = tz2;
+            u->sec_bitmask = (1u << 25); /* SECCFGR2 LPUART1SEC bit25 */
         } else {
             u->clock_on = clock_apb1henr_generic;
             u->sec_bitmask = 0;

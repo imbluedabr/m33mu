@@ -50,6 +50,12 @@ extern void mm_system_request_reset(void);
 #define RCC_CFGR2    0x020u
 #define RCC_PLL1CFGR 0x028u
 #define RCC_PLL1DIVR 0x034u
+#define RCC_PLL2CFGR 0x02cu
+#define RCC_PLL3CFGR 0x030u
+#define RCC_PLL2DIVR 0x03cu
+#define RCC_PLL2FRACR 0x040u
+#define RCC_PLL3DIVR 0x044u
+#define RCC_PLL3FRACR 0x048u
 
 /* PWR base (system domain) */
 #define PWR_BASE     0x46020800u
@@ -1118,6 +1124,10 @@ static void rcc_update_ready(struct rcc_state *r)
     if ((cr & (1u << 16)) != 0u) cr |= (1u << 17); else cr &= ~(1u << 17);
     /* PLL1RDY bit25 follows PLL1ON bit24 */
     if ((cr & (1u << 24)) != 0u) cr |= (1u << 25); else cr &= ~(1u << 25);
+    /* PLL2RDY bit27 follows PLL2ON bit26 */
+    if ((cr & (1u << 26)) != 0u) cr |= (1u << 27); else cr &= ~(1u << 27);
+    /* PLL3RDY bit29 follows PLL3ON bit28 */
+    if ((cr & (1u << 28)) != 0u) cr |= (1u << 29); else cr &= ~(1u << 29);
     r->regs[0] = cr;
 }
 
@@ -1221,6 +1231,9 @@ static mm_bool rcc_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     }
     if (offset == RCC_CFGR1 || offset == RCC_CFGR2 ||
         offset == RCC_PLL1CFGR || offset == RCC_PLL1DIVR ||
+        offset == RCC_PLL2CFGR || offset == RCC_PLL3CFGR ||
+        offset == RCC_PLL2DIVR || offset == RCC_PLL2FRACR ||
+        offset == RCC_PLL3DIVR || offset == RCC_PLL3FRACR ||
         offset == RCC_CR) {
         rcc_update_sysclk(r);
     }

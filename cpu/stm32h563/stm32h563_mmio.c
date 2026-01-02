@@ -52,6 +52,12 @@ extern void mm_system_request_reset(void);
 #define RCC_CFGR2    0x020u
 #define RCC_PLL1CFGR 0x028u
 #define RCC_PLL1DIVR 0x034u
+#define RCC_PLL2CFGR 0x02cu
+#define RCC_PLL3CFGR 0x030u
+#define RCC_PLL2DIVR 0x03cu
+#define RCC_PLL2FRACR 0x040u
+#define RCC_PLL3DIVR 0x044u
+#define RCC_PLL3FRACR 0x048u
 #define RCC_BDCR     0x0f0u
 
 /* PWR base (system domain) */
@@ -120,6 +126,10 @@ extern void mm_system_request_reset(void);
 #define EXTI_BASE     0x44022000u
 #define EXTI_SEC_BASE 0x54022000u
 #define EXTI_SIZE     0x400u
+
+/* DBGMCU base address */
+#define DBGMCU_BASE   0x44024000u
+#define DBGMCU_SIZE   0x1000u
 
 /* IWDG/WWDG base addresses */
 #define IWDG_BASE     0x40003000u
@@ -400,6 +410,7 @@ static struct simple_blk ucpd1;
 static struct simple_blk ucpd1_sec;
 static struct simple_blk crs;
 static struct simple_blk crs_sec;
+static struct simple_blk dbgmcu;
 static struct simple_blk icache;
 static struct simple_blk dcache;
 static struct ucpd_state ucpd1_state;
@@ -591,6 +602,7 @@ void mm_stm32h563_mmio_reset(void)
     memset(&ucpd1_state_sec, 0, sizeof(ucpd1_state_sec));
     memset(&crs, 0, sizeof(crs));
     memset(&crs_sec, 0, sizeof(crs_sec));
+    memset(&dbgmcu, 0, sizeof(dbgmcu));
     memset(&icache, 0, sizeof(icache));
     memset(&dcache, 0, sizeof(dcache));
     memset(&rng, 0, sizeof(rng));
@@ -1101,6 +1113,10 @@ static void rcc_update_ready(struct rcc_state *r)
     if ((cr & (1u << 16)) != 0u) cr |= (1u << 17); else cr &= ~(1u << 17);
     /* PLL1RDY bit25 follows PLL1ON bit24 */
     if ((cr & (1u << 24)) != 0u) cr |= (1u << 25); else cr &= ~(1u << 25);
+    /* PLL2RDY bit27 follows PLL2ON bit26 */
+    if ((cr & (1u << 26)) != 0u) cr |= (1u << 27); else cr &= ~(1u << 27);
+    /* PLL3RDY bit29 follows PLL3ON bit28 */
+    if ((cr & (1u << 28)) != 0u) cr |= (1u << 29); else cr &= ~(1u << 29);
     r->regs[0] = cr;
 }
 
@@ -1183,6 +1199,9 @@ static mm_bool rcc_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     }
     if (offset == RCC_CFGR1 || offset == RCC_CFGR2 ||
         offset == RCC_PLL1CFGR || offset == RCC_PLL1DIVR ||
+        offset == RCC_PLL2CFGR || offset == RCC_PLL3CFGR ||
+        offset == RCC_PLL2DIVR || offset == RCC_PLL2FRACR ||
+        offset == RCC_PLL3DIVR || offset == RCC_PLL3FRACR ||
         offset == RCC_CR) {
         rcc_update_sysclk(r);
     }
@@ -2144,6 +2163,14 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     reg.write = exti_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
     reg.base = EXTI_SEC_BASE;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* DBGMCU */
+    reg.base = DBGMCU_BASE;
+    reg.size = DBGMCU_SIZE;
+    reg.opaque = &dbgmcu;
+    reg.read = simple_blk_read;
+    reg.write = simple_blk_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     /* IWDG (non-secure and secure aliases) */

@@ -1238,6 +1238,8 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         int pend_irq = mm_nvic_select_routed(nvic, cpu, &irq_sec);
         if (pend_irq >= 0) {
             mm_u32 exc_num = 16u + (mm_u32)pend_irq;
+            printf("[IRQ] irq=%d target=%s\n", pend_irq,
+                   (irq_sec == MM_NONSECURE) ? "NS" : "S");
             mm_nvic_set_pending(nvic, (mm_u32)pend_irq, MM_FALSE);
             if (!enter_exception_ex(cpu, map, scs, exc_num, cpu->r[15] & ~1u, cpu->xpsr, irq_sec)) {
                 if (done) *done = MM_TRUE;
@@ -1726,6 +1728,11 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
            (unsigned long)fault_xpsr,
            (unsigned long)handler,
            (unsigned long)exc_ret_val);
+    printf("[USGFLT] MSPLIM_S=0x%08lx MSPLIM_NS=0x%08lx PSPLIM_S=0x%08lx PSPLIM_NS=0x%08lx\n",
+           (unsigned long)cpu->msplim_s,
+           (unsigned long)cpu->msplim_ns,
+           (unsigned long)cpu->psplim_s,
+           (unsigned long)cpu->psplim_ns);
         {
             mm_u32 cfsr_dbg = 0;
             (void)mm_memmap_read(map, sec, 0xE000ED28u, 4u, &cfsr_dbg); /* SCB->CFSR */
@@ -3059,6 +3066,8 @@ handle_pending:
                     pend_irq = mm_nvic_select_routed(&nvic, &cpu, &irq_sec);
                     if (pend_irq >= 0) {
                         mm_u32 exc_num = 16u + (mm_u32)pend_irq;
+                        printf("[IRQ] irq=%d target=%s\n", pend_irq,
+                               (irq_sec == MM_NONSECURE) ? "NS" : "S");
                         /* Clear pending when accepted. */
                         mm_nvic_set_pending(&nvic, (mm_u32)pend_irq, MM_FALSE);
                         if (!enter_exception_ex(&cpu, &map, &scs, exc_num, cpu.r[15] & ~1u, cpu.xpsr, irq_sec)) {

@@ -1037,6 +1037,25 @@ static struct mm_decoded decode_32(mm_u32 insn)
         }
     }
 
+    /* LDAEX (word) */
+    if ((insn & 0xfff00ff0u) == 0xe8d00fe0u) {
+        d.kind = MM_OP_LDREX;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rd = (mm_u8)((insn >> 12) & 0x0fu);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* STLEX (word) */
+    if ((insn & 0xfff00ff0u) == 0xe8c00fe0u) {
+        d.kind = MM_OP_STREX;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rm = (mm_u8)((insn >> 12) & 0x0fu); /* Rt value */
+        d.rd = (mm_u8)(insn & 0x0fu);        /* Rd status */
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
     /* LDREX (word) */
     if ((insn & 0xfff00f00u) == 0xe8500f00u) {
         d.kind = MM_OP_LDREX;

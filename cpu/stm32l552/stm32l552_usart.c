@@ -45,6 +45,8 @@
 
 #define ISR_RXNE (1u << 5)
 #define ISR_TXE  (1u << 7)
+#define ISR_TEACK (1u << 21)
+#define ISR_REACK (1u << 22)
 
 struct usart_inst {
     mm_u32 base;
@@ -119,6 +121,23 @@ static void ensure_enabled(struct usart_inst *u)
     }
 }
 
+static void usart_update_ack(struct usart_inst *u)
+{
+    mm_u32 cr1 = u->regs[USART_CR1 / 4];
+    mm_u32 isr = u->regs[USART_ISR / 4];
+    if ((cr1 & (CR1_UE | CR1_TE)) == (CR1_UE | CR1_TE)) {
+        isr |= ISR_TEACK;
+    } else {
+        isr &= ~ISR_TEACK;
+    }
+    if ((cr1 & (CR1_UE | CR1_RE)) == (CR1_UE | CR1_RE)) {
+        isr |= ISR_REACK;
+    } else {
+        isr &= ~ISR_REACK;
+    }
+    u->regs[USART_ISR / 4] = isr;
+}
+
 static mm_bool usart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
     struct usart_inst *u = (struct usart_inst *)opaque;
@@ -140,6 +159,7 @@ static mm_bool usart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
     if (offset == USART_ISR) {
         /* Keep TXE set so firmware polls see the line idle immediately. */
         u->regs[USART_ISR / 4] |= ISR_TXE;
+        usart_update_ack(u);
     }
     memcpy(value_out, (mm_u8 *)u->regs + offset, size_bytes);
     return MM_TRUE;
@@ -182,6 +202,9 @@ static mm_bool usart_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
         return MM_TRUE;
     }
     memcpy((mm_u8 *)u->regs + offset, &value, size_bytes);
+    if (offset == USART_CR1) {
+        usart_update_ack(u);
+    }
     return MM_TRUE;
 }
 
