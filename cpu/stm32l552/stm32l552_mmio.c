@@ -26,6 +26,7 @@
 #include "m33mu/pka.h"
 #ifdef M33MU_HAS_WOLFSSL
 #include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/settings.h>
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/sha.h>
 #include <wolfssl/wolfcrypt/sha256.h>
@@ -355,13 +356,6 @@ struct ucpd_state {
     mm_u32 sr;
 };
 
-struct pka_ctx {
-    struct pka_state *state;
-    mm_bool secure_alias;
-    struct rcc_state *rcc;
-    struct simple_blk *tzsc;
-};
-
 /* uintptr_t substitute for C90 */
 typedef unsigned long mm_uptr;
 
@@ -534,34 +528,6 @@ static mm_bool pka_requires_secure(const struct simple_blk *tzsc)
     return tzsc_requires_secure(tzsc, TZSC_PKASEC_BIT);
 }
 
-
-static mm_bool pka_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
-{
-    struct pka_ctx *ctx = (struct pka_ctx *)opaque;
-    if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (!pka_clock_enabled(ctx->rcc)) {
-        *value_out = 0u;
-        return MM_TRUE;
-    }
-    if (!ctx->secure_alias && pka_requires_secure(ctx->tzsc)) {
-        *value_out = 0u;
-        return MM_TRUE;
-    }
-    return mm_pka_read(ctx->state, offset, size_bytes, value_out);
-}
-
-static mm_bool pka_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
-{
-    struct pka_ctx *ctx = (struct pka_ctx *)opaque;
-    if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (!pka_clock_enabled(ctx->rcc)) {
-        return MM_TRUE;
-    }
-    if (!ctx->secure_alias && pka_requires_secure(ctx->tzsc)) {
-        return MM_TRUE;
-    }
-    return mm_pka_write(ctx->state, offset, size_bytes, value);
-}
 
 static mm_bool flash_trace_enabled(void)
 {
@@ -1849,10 +1815,14 @@ mm_bool mm_stm32l552_register_mmio(struct mmio_bus *bus)
     pka_ctx[0].secure_alias = MM_FALSE;
     pka_ctx[0].rcc = &rcc;
     pka_ctx[0].tzsc = &tzsc_s;
+    pka_ctx[0].clock_enabled = pka_clock_enabled;
+    pka_ctx[0].requires_secure = pka_requires_secure;
     pka_ctx[1].state = &pka_accel;
     pka_ctx[1].secure_alias = MM_TRUE;
     pka_ctx[1].rcc = &rcc;
     pka_ctx[1].tzsc = &tzsc_s;
+    pka_ctx[1].clock_enabled = pka_clock_enabled;
+    pka_ctx[1].requires_secure = pka_requires_secure;
     rng.regs[RNG_CR_OFFSET / 4] = 0x00871f00u;
     rng.regs[RNG_HTCR_OFFSET / 4] = 0x000072acu;
     flash_ctl.regs[FLASH_ACR / 4] = 0x00000013u;

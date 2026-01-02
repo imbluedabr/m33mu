@@ -26,6 +26,7 @@
 #include "m33mu/pka.h"
 #ifdef M33MU_HAS_WOLFSSL
 #include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/settings.h>
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/sha.h>
 #include <wolfssl/wolfcrypt/sha256.h>
@@ -79,6 +80,13 @@ extern void mm_system_request_reset(void);
 #define GTZC_TZSC_SIZE 0x400u
 #define GTZC_TZIC_SIZE 0x400u
 #define GTZC_BLK_SIZE 0x1000u
+
+/* ICACHE/DCACHE base addresses (secure / non-secure aliases) */
+#define ICACHE_BASE     0x40030400u
+#define ICACHE_SEC_BASE 0x50030400u
+#define DCACHE_BASE     0x40031400u
+#define DCACHE_SEC_BASE 0x50031400u
+#define CACHE_SIZE      0x400u
 
 /* RNG base addresses */
 #define RNG_BASE     0x420c0800u
@@ -371,13 +379,6 @@ struct ucpd_state {
 
 #include "stm32_crypto_priv.h"
 
-struct pka_ctx {
-    struct pka_state *state;
-    mm_bool secure_alias;
-    struct rcc_state *rcc;
-    struct simple_blk *tzsc;
-};
-
 /* uintptr_t substitute for C90 */
 typedef unsigned long mm_uptr;
 
@@ -399,6 +400,8 @@ static struct simple_blk ucpd1;
 static struct simple_blk ucpd1_sec;
 static struct simple_blk crs;
 static struct simple_blk crs_sec;
+static struct simple_blk icache;
+static struct simple_blk dcache;
 static struct ucpd_state ucpd1_state;
 static struct ucpd_state ucpd1_state_sec;
 static struct mpcbb_state mpcbb[3];
@@ -537,34 +540,6 @@ static mm_bool pka_clock_enabled(const struct rcc_state *rcc)
 }
 
 
-static mm_bool pka_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
-{
-    struct pka_ctx *ctx = (struct pka_ctx *)opaque;
-    if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (!pka_clock_enabled(ctx->rcc)) {
-        return MM_TRUE;
-    }
-    if (!ctx->secure_alias && pka_requires_secure(ctx->tzsc)) {
-        return MM_TRUE;
-    }
-    return mm_pka_write(ctx->state, offset, size_bytes, value);
-}
-
-static mm_bool pka_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
-{
-    struct pka_ctx *ctx = (struct pka_ctx *)opaque;
-    if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (!pka_clock_enabled(ctx->rcc)) {
-        *value_out = 0u;
-        return MM_TRUE;
-    }
-    if (!ctx->secure_alias && pka_requires_secure(ctx->tzsc)) {
-        *value_out = 0u;
-        return MM_TRUE;
-    }
-    return mm_pka_read(ctx->state, offset, size_bytes, value_out);
-}
-
 
 static mm_bool flash_trace_enabled(void)
 {
@@ -616,6 +591,8 @@ void mm_stm32h563_mmio_reset(void)
     memset(&ucpd1_state_sec, 0, sizeof(ucpd1_state_sec));
     memset(&crs, 0, sizeof(crs));
     memset(&crs_sec, 0, sizeof(crs_sec));
+    memset(&icache, 0, sizeof(icache));
+    memset(&dcache, 0, sizeof(dcache));
     memset(&rng, 0, sizeof(rng));
     memset(&hash_accel, 0, sizeof(hash_accel));
     memset(&aes_accel, 0, sizeof(aes_accel));
@@ -1915,10 +1892,14 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     pka_ctx[0].secure_alias = MM_FALSE;
     pka_ctx[0].rcc = &rcc;
     pka_ctx[0].tzsc = &tzsc_s;
+    pka_ctx[0].clock_enabled = pka_clock_enabled;
+    pka_ctx[0].requires_secure = pka_requires_secure;
     pka_ctx[1].state = &pka_accel;
     pka_ctx[1].secure_alias = MM_TRUE;
     pka_ctx[1].rcc = &rcc;
     pka_ctx[1].tzsc = &tzsc_s;
+    pka_ctx[1].clock_enabled = pka_clock_enabled;
+    pka_ctx[1].requires_secure = pka_requires_secure;
     saes_ctx[0].state = &saes_accel;
     saes_ctx[0].secure_alias = MM_FALSE;
     saes_ctx[0].rcc = &rcc;
@@ -2047,6 +2028,26 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     /* GTZC TZIC non-secure alias */
     reg.base = GTZC_TZIC_NS_BASE;
     reg.opaque = &tzic_ns;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* ICACHE (non-secure and secure aliases) */
+    reg.base = ICACHE_BASE;
+    reg.size = CACHE_SIZE;
+    reg.opaque = &icache;
+    reg.read = simple_blk_read;
+    reg.write = simple_blk_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = ICACHE_SEC_BASE;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* DCACHE (non-secure and secure aliases) */
+    reg.base = DCACHE_BASE;
+    reg.size = CACHE_SIZE;
+    reg.opaque = &dcache;
+    reg.read = simple_blk_read;
+    reg.write = simple_blk_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = DCACHE_SEC_BASE;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     /* MPCBB1..3 (non-secure and secure aliases) */

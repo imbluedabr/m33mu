@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "m33mu/types.h"
 #include "stm32_crypto.h"
@@ -274,10 +275,10 @@ static void hash_compute_digest(struct hash_state *h, mm_u32 algo)
     mm_u8 last_buf[4];
     mm_u32 last_len = 0u;
     mm_u32 nblw = h->nblw & HASH_STR_NBLW_MASK;
-    if (nblw != 0u && len >= 4u) {
+    if (nblw != 0u && len > 0u) {
         mm_u32 valid_bits = nblw;
         mm_u32 valid_bytes = (valid_bits + 7u) / 8u;
-        mm_u32 bytes_before = len - 4u;
+        mm_u32 bytes_before = (len >= 4u) ? (len - 4u) : 0u;
         mm_u32 rem_bits = valid_bits % 8u;
         memcpy(last_buf, h->msg + bytes_before, 4u);
         if (valid_bytes < 4u) {
@@ -1177,5 +1178,25 @@ mm_bool aes_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
         return MM_TRUE;
     }
     memcpy((mm_u8 *)a->regs + offset, &value, size_bytes);
+    return MM_TRUE;
+}
+
+mm_bool pka_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    (void)opaque;
+    (void)offset;
+    (void)value;
+    if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    /* PKA emulation disabled. */
+    return MM_TRUE;
+}
+
+mm_bool pka_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    (void)opaque;
+    (void)offset;
+    if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    /* PKA emulation disabled. */
+    *value_out = 0u;
     return MM_TRUE;
 }

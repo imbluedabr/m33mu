@@ -2,6 +2,7 @@
 #define M33MU_STM32_CRYPTO_PRIV_H
 
 #include "m33mu/types.h"
+#include "m33mu/pka.h"
 
 #ifndef AES_SIZE
 #define AES_SIZE 0x400u
@@ -16,6 +17,7 @@ struct hash_state;
 
 #ifdef M33MU_HAS_WOLFSSL
 #include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/settings.h>
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/sha.h>
 #include <wolfssl/wolfcrypt/sha256.h>
@@ -103,6 +105,15 @@ struct aes_ctx {
     mm_bool is_saes;
     mm_bool (*clock_enabled)(const struct rcc_state *rcc, mm_bool is_saes);
     mm_bool (*requires_secure)(const struct simple_blk *tzsc, mm_bool is_saes);
+};
+
+struct pka_ctx {
+    struct pka_state *state;
+    mm_bool secure_alias;
+    struct rcc_state *rcc;
+    struct simple_blk *tzsc;
+    mm_bool (*clock_enabled)(const struct rcc_state *rcc);
+    mm_bool (*requires_secure)(const struct simple_blk *tzsc);
 };
 
 #endif /* M33MU_STM32_CRYPTO_PRIV_H */

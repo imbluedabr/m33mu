@@ -161,12 +161,37 @@ set(M33MU_HAS_WOLFSSL FALSE)
 
 if(M33MU_ENABLE_WOLFSSL)
   if(PKG_CONFIG_FOUND)
-    pkg_check_modules(PC_WOLFSSL QUIET wolfssl)
+    if(EXISTS "/usr/lib/x86_64-linux-gnu/pkgconfig/wolfssl.pc")
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env PKG_CONFIG_LIBDIR=/usr/lib/x86_64-linux-gnu/pkgconfig
+                ${PKG_CONFIG_EXECUTABLE} --cflags-only-I wolfssl
+        OUTPUT_VARIABLE _WOLFSSL_CFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env PKG_CONFIG_LIBDIR=/usr/lib/x86_64-linux-gnu/pkgconfig
+                ${PKG_CONFIG_EXECUTABLE} --libs-only-L wolfssl
+        OUTPUT_VARIABLE _WOLFSSL_LFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+    else()
+      pkg_check_modules(PC_WOLFSSL QUIET wolfssl)
+      set(_WOLFSSL_CFLAGS "${PC_WOLFSSL_CFLAGS_OTHER}")
+      set(_WOLFSSL_LFLAGS "${PC_WOLFSSL_LDFLAGS_OTHER}")
+    endif()
+  endif()
+
+  if(_WOLFSSL_CFLAGS)
+    string(REGEX MATCHALL "-I[^ ]+" _WOLFSSL_INCLUDE_FLAGS "${_WOLFSSL_CFLAGS}")
+    foreach(_inc_flag IN LISTS _WOLFSSL_INCLUDE_FLAGS)
+      string(REPLACE "-I" "" _inc_dir "${_inc_flag}")
+      list(APPEND _WOLFSSL_INCLUDE_DIRS "${_inc_dir}")
+    endforeach()
   endif()
 
   find_path(WOLFSSL_INCLUDE_DIR
     NAMES wolfssl/options.h wolfssl/ssl.h
-    HINTS ${PC_WOLFSSL_INCLUDE_DIRS}
+    HINTS ${_WOLFSSL_INCLUDE_DIRS} ${PC_WOLFSSL_INCLUDE_DIRS}
   )
   set(_WOLFSSL_SUFFIXES_SAVE ${CMAKE_FIND_LIBRARY_SUFFIXES})
   set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
@@ -315,6 +340,9 @@ endif()
 if(M33MU_HAS_WOLFSSL)
   target_compile_definitions(m33mu_lib PUBLIC M33MU_HAS_WOLFSSL=1)
   target_link_libraries(m33mu_lib PUBLIC wolfssl::wolfssl)
+  target_compile_definitions(m33mu_lib PRIVATE WOLFSSL_SP_INT_NEGATIVE)
+  target_include_directories(m33mu_lib SYSTEM BEFORE PRIVATE ${WOLFSSL_INCLUDE_DIR})
+  target_compile_options(m33mu_lib PRIVATE -isystem ${WOLFSSL_INCLUDE_DIR})
 endif()
 
 if(M33MU_HAS_VDE)

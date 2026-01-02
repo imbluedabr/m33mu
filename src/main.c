@@ -65,6 +65,14 @@
 #define UFSR_DIVBYZERO (1u << 25)
 #define UFSR_STKOF (1u << 20)
 
+/* BusFault Status Register (BFSR) bits within CFSR. */
+#define BFSR_IBUSERR   (1u << 8)
+#define BFSR_PRECISERR (1u << 9)
+#define BFSR_IMPRECISERR (1u << 10)
+#define BFSR_UNSTKERR  (1u << 11)
+#define BFSR_STKERR    (1u << 12)
+#define BFSR_BFARVALID (1u << 15)
+
 #define MM_CPU_HZ 64000000ull
 #define NS_PER_SEC 1000000000ull
 #define DEFAULT_BATCH_CYCLES 64ull         /* ~1 us @ 64 MHz */
@@ -90,6 +98,8 @@ static mm_u64 deadline_ns(mm_u64 vcycles, mm_u64 host0_ns, mm_u64 cpu_hz)
 
 static int load_file_at(const char *path, mm_u8 *dst, size_t max_len, mm_u32 offset, size_t *loaded);
 void mm_system_request_reset(void);
+static void record_bus_fault(struct mm_scs *scs, mm_u32 addr, mm_u32 bfsr_bits);
+static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struct mm_scs *scs, mm_u32 fault_pc, mm_u32 fault_xpsr);
 
 static mm_bool parse_hex_u32(const char *s, mm_u32 *out)
 {
@@ -971,7 +981,8 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
 
     for (i = 0; i < 8; ++i) {
         if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4), 4u, &frame[i])) {
-            return MM_FALSE;
+            record_bus_fault(scs, sp + (mm_u32)(i * 4), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+            return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
         }
     }
     if (stack_trace_enabled() || svc_stack_trace_enabled()) {
@@ -1361,6 +1372,12 @@ static mm_bool handle_pc_write(struct mm_cpu *cpu,
                                mm_u8 *it_cond)
 {
     if ((value & 1u) == 0u && (value & 0xffffff00u) != 0xffffff00u) {
+        if (getenv("M33MU_UNDEF_TRACE")) {
+            printf("[PC_WRITE_FAULT] pc=0x%08lx value=0x%08lx lr=0x%08lx\n",
+                   (unsigned long)(cpu->r[15] & ~1u),
+                   (unsigned long)value,
+                   (unsigned long)cpu->r[14]);
+        }
         if (!raise_usage_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr, (1u << 16))) {
             return MM_FALSE;
         }
@@ -1480,6 +1497,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         for (i = 0; i < 8; ++i) {
             if (!mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
                 printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
+                record_bus_fault(scs, sp_frame + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return MM_FALSE;
             }
         }
@@ -1512,6 +1530,17 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     cpu->mode = MM_HANDLER;
     cpu->r[15] = handler | 1u;
     return MM_TRUE;
+}
+
+static void record_bus_fault(struct mm_scs *scs, mm_u32 addr, mm_u32 bfsr_bits)
+{
+    if (scs == 0) {
+        return;
+    }
+    scs->cfsr |= bfsr_bits;
+    if ((bfsr_bits & BFSR_BFARVALID) != 0u) {
+        scs->bfar = addr;
+    }
 }
 
 /* Generic exception entry for synchronous SVC and asynchronous PendSV/SysTick/faults. */
@@ -1635,6 +1664,11 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
 
     if (ufsr_bits == 0u) {
         ufsr_bits = UFSR_UNDEFINSTR;
+    }
+    if ((ufsr_bits & UFSR_UNDEFINSTR) != 0u && getenv("M33MU_UNDEF_TRACE")) {
+        printf("[UNDEF_RAISE] fault_pc=0x%08lx xpsr=0x%08lx\n",
+               (unsigned long)fault_pc,
+               (unsigned long)fault_xpsr);
     }
     sec = cpu->sec_state;
     scs->cfsr |= ufsr_bits;
@@ -1922,7 +1956,8 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
                 if (!mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
                     printf("HardFault: stacking failed at 0x%08lx\n",
                            (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
-                    return MM_FALSE;
+                    record_bus_fault(scs, sp_frame + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
                 }
             }
             sp = sp_frame;
@@ -3131,6 +3166,13 @@ handle_pending:
                         }
                     }
                     if (d.undefined) {
+                        if (getenv("M33MU_UNDEF_TRACE")) {
+                            printf("[UNDEF] pc=0x%08lx len=%u raw=0x%08lx hw1=0x%04lx\n",
+                                   (unsigned long)f.pc_fetch,
+                                   (unsigned int)d.len,
+                                   (unsigned long)d.raw,
+                                   (unsigned long)(d.raw & 0xffffu));
+                        }
                         if (!raise_usage_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, (1u << 16))) {
                             printf("Unimplemented opcode 0x%08lx at PC=0x%08lx\n", (unsigned long)d.raw, (unsigned long)(f.pc_fetch | 1u));
                             if (opt_gdb) {

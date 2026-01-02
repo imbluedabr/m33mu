@@ -21,12 +21,15 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "m33mu/pka.h"
 
 #ifdef M33MU_HAS_WOLFSSL
 #include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/settings.h>
 #include <wolfssl/wolfcrypt/integer.h>
 #include <wolfssl/wolfcrypt/ecc.h>
+#include <wolfssl/wolfcrypt/error-crypt.h>
 #endif
 
 #define PKA_CR_OFFSET 0x000u
@@ -179,6 +182,9 @@
 #define PKA_STATUS_POINT_OFF 0xA3B7ul
 #define PKA_STATUS_SIG_S_ZERO 0xF946ul
 
+#define M33MU_PKA_DISABLED 1
+
+#if !defined(M33MU_PKA_DISABLED)
 static mm_bool pka_ram_in_range(mm_u32 offset, mm_u32 size_bytes)
 {
     if (offset < M33MU_PKA_RAM_OFFSET) return MM_FALSE;
@@ -193,12 +199,9 @@ static mm_u32 pka_ram_index(mm_u32 offset)
     return (offset - M33MU_PKA_RAM_OFFSET) / 4u;
 }
 
-static mm_u64 pka_read_u64(const struct pka_state *pka, mm_u32 offset)
+static mm_u32 pka_read_u32(const struct pka_state *pka, mm_u32 offset)
 {
-    mm_u32 idx = pka_ram_index(offset);
-    mm_u64 lo = (mm_u64)pka->ram[idx];
-    mm_u64 hi = (mm_u64)pka->ram[idx + 1u];
-    return lo | (hi << 32);
+    return pka->ram[pka_ram_index(offset)];
 }
 
 static void pka_write_u64(struct pka_state *pka, mm_u32 offset, mm_u64 value)
@@ -274,6 +277,68 @@ static mm_bool pka_read_mp(const struct pka_state *pka, mm_u32 offset, mm_u32 si
     return MM_TRUE;
 }
 
+static mm_bool pka_ecc_curve_supported(const mp_int *p, const mp_int *a,
+                                       const mp_int *b, const mp_int *n)
+{
+    static const char *const curves[][4] = {
+        /* secp256r1 / P-256 */
+        {
+            "FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF",
+            "FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC",
+            "5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B",
+            "FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551",
+        },
+    };
+    size_t i;
+    mm_bool ok = MM_FALSE;
+
+    for (i = 0; i < (sizeof(curves) / sizeof(curves[0])); ++i) {
+        mp_int tp;
+        mp_int ta;
+        mp_int tb;
+        mp_int tn;
+        int ret;
+        ret = mp_init(&tp);
+        if (ret != MP_OKAY) continue;
+        ret = mp_init(&ta);
+        if (ret != MP_OKAY) {
+            mp_clear(&tp);
+            continue;
+        }
+        ret = mp_init(&tb);
+        if (ret != MP_OKAY) {
+            mp_clear(&ta);
+            mp_clear(&tp);
+            continue;
+        }
+        ret = mp_init(&tn);
+        if (ret != MP_OKAY) {
+            mp_clear(&tb);
+            mp_clear(&ta);
+            mp_clear(&tp);
+            continue;
+        }
+        ret = mp_read_radix(&tp, curves[i][0], MP_RADIX_HEX);
+        if (ret == MP_OKAY) ret = mp_read_radix(&ta, curves[i][1], MP_RADIX_HEX);
+        if (ret == MP_OKAY) ret = mp_read_radix(&tb, curves[i][2], MP_RADIX_HEX);
+        if (ret == MP_OKAY) ret = mp_read_radix(&tn, curves[i][3], MP_RADIX_HEX);
+        if (ret == MP_OKAY &&
+            mp_cmp(p, &tp) == MP_EQ &&
+            mp_cmp(a, &ta) == MP_EQ &&
+            mp_cmp(b, &tb) == MP_EQ &&
+            mp_cmp(n, &tn) == MP_EQ) {
+            ok = MM_TRUE;
+        }
+        mp_clear(&tn);
+        mp_clear(&tb);
+        mp_clear(&ta);
+        mp_clear(&tp);
+        if (ok) break;
+    }
+
+    return ok;
+}
+
 static mm_bool pka_write_mp(struct pka_state *pka, mm_u32 offset, mm_u32 size_bytes, const mp_int *in)
 {
     mm_u8 *buf;
@@ -297,20 +362,24 @@ static void pka_ecc_point_from_ram(ecc_point *pt, const struct pka_state *pka,
                                    mm_u32 x_off, mm_u32 y_off, mm_u32 z_off,
                                    mm_u32 size_bytes)
 {
-    mm_u8 *buf;
-    buf = (mm_u8 *)malloc(size_bytes);
-    if (buf == 0) return;
-    pka_read_bytes_be(pka, x_off, buf, size_bytes);
-    mp_read_unsigned_bin(pt->x, buf, (word32)size_bytes);
-    pka_read_bytes_be(pka, y_off, buf, size_bytes);
-    mp_read_unsigned_bin(pt->y, buf, (word32)size_bytes);
-    if (z_off != 0u) {
-        pka_read_bytes_be(pka, z_off, buf, size_bytes);
-        mp_read_unsigned_bin(pt->z, buf, (word32)size_bytes);
-    } else {
-        mp_set(pt->z, 1);
+    mp_int tmp;
+    if (mp_init(&tmp) != MP_OKAY) return;
+    if (pka_read_mp(pka, x_off, size_bytes, &tmp)) {
+        (void)mp_copy(&tmp, pt->x);
     }
-    free(buf);
+    if (z_off != 0u) {
+        if (pka_read_mp(pka, z_off, size_bytes, &tmp)) {
+            (void)mp_copy(&tmp, pt->z);
+        }
+    } else {
+        pt->z->dp[0] = 1u;
+        pt->z->used = 1;
+        pt->z->sign = MP_ZPOS;
+    }
+    if (pka_read_mp(pka, y_off, size_bytes, &tmp)) {
+        (void)mp_copy(&tmp, pt->y);
+    }
+    mp_clear(&tmp);
 }
 
 static void pka_ecc_point_to_ram(const ecc_point *pt, struct pka_state *pka,
@@ -393,10 +462,11 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
     mp_init(&tmp2);
     mp_init(&tmp3);
     mp_init(&tmp4);
+    (void)mode;
 
     switch (mode) {
     case 0x01u: /* Montgomery parameter */
-        bits64 = pka_read_u64(pka, PKA_RAM_MOD_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_MOD_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         pka_read_mp(pka, PKA_RAM_MOD_N, bytes, &n);
@@ -407,7 +477,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
     case 0x0Eu: /* Modular add */
     case 0x0Fu: /* Modular sub */
     case 0x10u: /* Montgomery mul */
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         pka_read_mp(pka, PKA_RAM_MOD_A, bytes, &a);
@@ -424,21 +494,21 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         break;
     case 0x00u: /* Modular exponentiation */
     case 0x02u: /* Fast mode */
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         pka_read_mp(pka, PKA_RAM_MOD_EXP_A, bytes, &a);
-        pka_read_mp(pka, PKA_RAM_MOD_EXP_E, (mm_u32)((pka_read_u64(pka, PKA_RAM_EXP_LEN) + 7u) / 8u), &b);
+        pka_read_mp(pka, PKA_RAM_MOD_EXP_E, (mm_u32)((pka_read_u32(pka, PKA_RAM_EXP_LEN) + 7u) / 8u), &b);
         pka_read_mp(pka, PKA_RAM_MOD_EXP_N, bytes, &n);
         mp_exptmod(&a, &b, &n, &tmp1);
         pka_write_mp(pka, PKA_RAM_MOD_EXP_RES, (bits + 31u) / 32u * 4u, &tmp1);
         break;
     case 0x03u: /* Modular exponentiation protected */
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         pka_read_mp(pka, PKA_RAM_PROT_A, bytes, &a);
-        pka_read_mp(pka, PKA_RAM_PROT_E, (mm_u32)((pka_read_u64(pka, PKA_RAM_EXP_LEN) + 7u) / 8u), &b);
+        pka_read_mp(pka, PKA_RAM_PROT_E, (mm_u32)((pka_read_u32(pka, PKA_RAM_EXP_LEN) + 7u) / 8u), &b);
         pka_read_mp(pka, PKA_RAM_PROT_N, bytes, &n);
         ret = mp_exptmod(&a, &b, &n, &tmp1);
         if (ret == MP_OKAY) {
@@ -449,7 +519,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         }
         break;
     case 0x08u: /* Modular inversion */
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         pka_read_mp(pka, PKA_RAM_MOD_A, bytes, &a);
@@ -458,11 +528,11 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         pka_write_mp(pka, PKA_RAM_MOD_RES, (bits + 31u) / 32u * 4u, &tmp1);
         break;
     case 0x0Du: /* Modular reduction */
-        bits64 = pka_read_u64(pka, PKA_RAM_MODRED_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_MODRED_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         pka_read_mp(pka, PKA_RAM_MOD_A, bytes, &a);
-        bits64 = pka_read_u64(pka, PKA_RAM_MOD_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_MOD_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         pka_read_mp(pka, PKA_RAM_MOD_B, bytes, &n);
@@ -470,7 +540,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         pka_write_mp(pka, PKA_RAM_MOD_RES, (bits + 31u) / 32u * 4u, &tmp1);
         break;
     case 0x09u: /* Arithmetic add */
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         words = (bits + 31u) / 32u;
@@ -481,7 +551,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         pka_write_mp(pka, PKA_RAM_MOD_RES, (words + extra) * 4u, &tmp1);
         break;
     case 0x0Au: /* Arithmetic sub */
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         words = (bits + 31u) / 32u;
@@ -499,7 +569,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         }
         break;
     case 0x0Bu: /* Arithmetic mul */
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         words = (bits + 31u) / 32u;
@@ -509,7 +579,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         pka_write_mp(pka, PKA_RAM_MOD_RES, (words * 2u) * 4u, &tmp1);
         break;
     case 0x0Cu: /* Comparison */
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         pka_read_mp(pka, PKA_RAM_MOD_A, bytes, &a);
@@ -523,7 +593,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         }
         break;
     case 0x07u: /* RSA CRT exponentiation */
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         words = bytes / 2u;
@@ -554,7 +624,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         mp_int rhs;
         mp_int tmp;
         mm_u32 a_sign;
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         a_sign = pka->ram[pka_ram_index(PKA_RAM_A_SIGN)];
@@ -607,26 +677,37 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         ecc_point *P;
         ecc_point *R;
         mp_int aa;
+        mp_int bb;
         mp_int pp;
         mp_int nn;
         mp_int kk;
         mm_u32 a_sign;
-        mp_digit mp;
-        bits64 = pka_read_u64(pka, PKA_RAM_ECC_P_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_ECC_P_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         a_sign = pka->ram[pka_ram_index(PKA_RAM_A_SIGN)];
         mp_init(&aa);
+        mp_init(&bb);
         mp_init(&pp);
         mp_init(&nn);
         mp_init(&kk);
         pka_read_mp(pka, PKA_RAM_A_COEFF, bytes, &aa);
+        pka_read_mp(pka, PKA_RAM_PC_B, bytes, &bb);
         pka_read_mp(pka, PKA_RAM_ECC_P, bytes, &pp);
-        pka_read_mp(pka, PKA_RAM_ECC_N, (mm_u32)((pka_read_u64(pka, PKA_RAM_ECC_N_LEN) + 7u) / 8u), &nn);
+        pka_read_mp(pka, PKA_RAM_ECC_N, (mm_u32)((pka_read_u32(pka, PKA_RAM_ECC_N_LEN) + 7u) / 8u), &nn);
         pka_read_mp(pka, PKA_RAM_ECC_K, bytes, &kk);
         if (a_sign != 0u) {
             mp_sub(&pp, &aa, &aa);
             mp_mod(&aa, &pp, &aa);
+        }
+        if (!pka_ecc_curve_supported(&pp, &aa, &bb, &nn)) {
+            pka_write_status_code(pka, PKA_RAM_ECC_ERR, PKA_STATUS_FAIL);
+            mp_clear(&kk);
+            mp_clear(&nn);
+            mp_clear(&pp);
+            mp_clear(&bb);
+            mp_clear(&aa);
+            break;
         }
         P = wc_ecc_new_point();
         R = wc_ecc_new_point();
@@ -635,8 +716,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
             break;
         }
         pka_ecc_point_from_ram(P, pka, PKA_RAM_ECC_X, PKA_RAM_ECC_Y, 0u, bytes);
-        mp_montgomery_setup(&pp, &mp);
-        ret = wc_ecc_mulmod_ex2(&kk, P, R, &aa, &pp, &nn, NULL, 1, NULL);
+        ret = wc_ecc_mulmod_ex(&kk, P, R, &aa, &pp, 1, NULL);
         if (ret == 0) {
             pka_ecc_point_to_ram(R, pka, PKA_RAM_ECC_RES_X, PKA_RAM_ECC_RES_Y, 0u, bytes);
             pka_write_status_code(pka, PKA_RAM_ECC_ERR, PKA_STATUS_OK);
@@ -646,6 +726,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         wc_ecc_del_point(P);
         wc_ecc_del_point(R);
         mp_clear(&aa);
+        mp_clear(&bb);
         mp_clear(&pp);
         mp_clear(&nn);
         mp_clear(&kk);
@@ -667,10 +748,10 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         mp_digit mp;
         mm_u32 a_sign;
         mm_u32 n_bits;
-        bits64 = pka_read_u64(pka, PKA_RAM_ECC_P_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_ECC_P_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
-        n_bits = (mm_u32)pka_read_u64(pka, PKA_RAM_ECC_N_LEN);
+        n_bits = pka_read_u32(pka, PKA_RAM_ECC_N_LEN);
         a_sign = pka->ram[pka_ram_index(PKA_RAM_A_SIGN)];
         mp_init(&aa);
         mp_init(&pp);
@@ -752,10 +833,10 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         mp_int v;
         mm_u32 a_sign;
         mm_u32 n_bits;
-        bits64 = pka_read_u64(pka, PKA_RAM_VERIF_P_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_VERIF_P_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
-        n_bits = (mm_u32)pka_read_u64(pka, PKA_RAM_VERIF_N_LEN);
+        n_bits = pka_read_u32(pka, PKA_RAM_VERIF_N_LEN);
         a_sign = pka->ram[pka_ram_index(PKA_RAM_VERIF_A_SIGN)];
         mp_init(&aa);
         mp_init(&pp);
@@ -824,7 +905,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         mp_int aa;
         mp_int pp;
         mm_u32 a_sign;
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         a_sign = pka->ram[pka_ram_index(PKA_RAM_A_SIGN)];
@@ -865,7 +946,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         mp_int kk;
         mp_int mm;
         mm_u32 a_sign;
-        bits64 = pka_read_u64(pka, PKA_RAM_ECC_N_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_ECC_N_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         a_sign = pka->ram[pka_ram_index(PKA_RAM_A_SIGN)];
@@ -914,7 +995,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         ecc_point *P;
         mp_int pp;
         mp_digit mp;
-        bits64 = pka_read_u64(pka, PKA_RAM_OP_LEN);
+        bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
         mp_init(&pp);
@@ -953,6 +1034,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
     (void)mode;
 #endif
 }
+#endif /* !M33MU_PKA_DISABLED */
 
 void mm_pka_reset(struct pka_state *pka)
 {
@@ -962,94 +1044,21 @@ void mm_pka_reset(struct pka_state *pka)
 
 mm_bool mm_pka_read(struct pka_state *pka, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
-    mm_u32 val;
-    if (pka == 0 || value_out == 0) return MM_FALSE;
+    (void)pka;
+    (void)offset;
+    if (value_out == 0) return MM_FALSE;
     if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (offset == PKA_CR_OFFSET) {
-        memcpy(value_out, &pka->cr, size_bytes);
-        return MM_TRUE;
-    }
-    if (offset == PKA_SR_OFFSET) {
-        val = pka->sr;
-        if ((pka->cr & PKA_CR_EN) != 0u) {
-            val |= PKA_SR_INITOK;
-        }
-        memcpy(value_out, &val, size_bytes);
-        return MM_TRUE;
-    }
-    if (offset == PKA_CLRFR_OFFSET) {
-        *value_out = 0u;
-        return MM_TRUE;
-    }
-    if (offset >= M33MU_PKA_RAM_OFFSET) {
-        if ((pka->sr & PKA_SR_BUSY) != 0u) {
-            pka_set_flag(pka, PKA_SR_RAMERRF);
-            *value_out = 0u;
-            return MM_TRUE;
-        }
-        if (!pka_ram_in_range(offset, size_bytes)) {
-            pka_set_flag(pka, PKA_SR_ADDRERRF);
-            *value_out = 0u;
-            return MM_TRUE;
-        }
-        val = pka->ram[pka_ram_index(offset)];
-        memcpy(value_out, &val, size_bytes);
-        return MM_TRUE;
-    }
+    /* PKA emulation disabled. */
     *value_out = 0u;
     return MM_TRUE;
 }
 
 mm_bool mm_pka_write(struct pka_state *pka, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
-    mm_u32 mode;
-    if (pka == 0) return MM_FALSE;
+    (void)pka;
+    (void)offset;
+    (void)value;
     if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (offset == PKA_CR_OFFSET) {
-        pka->cr = value & ~(PKA_CR_START);
-        mode = (value >> PKA_CR_MODE_SHIFT) & 0x3Fu;
-        if ((value & PKA_CR_START) != 0u) {
-            if ((pka->cr & PKA_CR_EN) == 0u) {
-                return MM_TRUE;
-            }
-            if (!pka_mode_supported(mode)) {
-                pka_set_flag(pka, PKA_SR_OPERRF);
-                return MM_TRUE;
-            }
-            pka_set_flag(pka, PKA_SR_BUSY);
-            pka_execute(pka, mode);
-            pka_clear_flag(pka, PKA_SR_BUSY);
-            pka_set_flag(pka, PKA_SR_PROCENDF);
-        }
-        return MM_TRUE;
-    }
-    if (offset == PKA_CLRFR_OFFSET) {
-        if ((value & PKA_CLRFR_PROCENDFC) != 0u) {
-            pka_clear_flag(pka, PKA_SR_PROCENDF);
-        }
-        if ((value & PKA_CLRFR_RAMERRFC) != 0u) {
-            pka_clear_flag(pka, PKA_SR_RAMERRF);
-        }
-        if ((value & PKA_CLRFR_ADDRERRFC) != 0u) {
-            pka_clear_flag(pka, PKA_SR_ADDRERRF);
-        }
-        if ((value & PKA_CLRFR_OPERRFC) != 0u) {
-            pka_clear_flag(pka, PKA_SR_OPERRF);
-        }
-        pka->clrfr = value;
-        return MM_TRUE;
-    }
-    if (offset >= M33MU_PKA_RAM_OFFSET) {
-        if ((pka->sr & PKA_SR_BUSY) != 0u) {
-            pka_set_flag(pka, PKA_SR_RAMERRF);
-            return MM_TRUE;
-        }
-        if (!pka_ram_in_range(offset, size_bytes)) {
-            pka_set_flag(pka, PKA_SR_ADDRERRF);
-            return MM_TRUE;
-        }
-        pka->ram[pka_ram_index(offset)] = value;
-        return MM_TRUE;
-    }
+    /* PKA emulation disabled. */
     return MM_TRUE;
 }
