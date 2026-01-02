@@ -50,8 +50,7 @@
 
 typedef uint32_t uintattr_t;
 
-#define TUI_MAX_LINES 1024
-#define TUI_MAX_COLS  512
+#define TUI_SERIAL_LABEL_NONE "NO UART"
 
 #define TUI_RGB(r, g, b) (((uintattr_t)(r) << 16) | ((uintattr_t)(g) << 8) | (uintattr_t)(b))
 #define TUI_COLOR_MASK 0x00ffffffu
@@ -286,21 +285,32 @@ static void tui_push_line(struct mm_tui *tui)
     tui->cur_len = 0;
 }
 
-static void tui_push_serial_line(struct mm_tui *tui)
+static struct mm_tui_uart *tui_serial_current(struct mm_tui *tui)
+{
+    if (tui == 0) return 0;
+    if (tui->serial_count <= 0) return 0;
+    if (tui->serial_selected < 0 || tui->serial_selected >= tui->serial_count) {
+        tui->serial_selected = 0;
+    }
+    return &tui->serials[tui->serial_selected];
+}
+
+static void tui_push_serial_line(struct mm_tui_uart *uart)
 {
     size_t slot;
-    if (tui->serial_cur_len >= TUI_MAX_COLS) {
-        tui->serial_cur_len = TUI_MAX_COLS - 1;
+    if (uart == 0) return;
+    if (uart->cur_len >= TUI_MAX_COLS) {
+        uart->cur_len = TUI_MAX_COLS - 1;
     }
-    tui->serial_cur_line[tui->serial_cur_len] = '\0';
-    if (tui->serial_line_count < TUI_MAX_LINES) {
-        slot = tui->serial_line_count++;
+    uart->cur_line[uart->cur_len] = '\0';
+    if (uart->line_count < TUI_MAX_LINES) {
+        slot = uart->line_count++;
     } else {
-        slot = tui->serial_line_head;
-        tui->serial_line_head = (tui->serial_line_head + 1u) % TUI_MAX_LINES;
+        slot = uart->line_head;
+        uart->line_head = (uart->line_head + 1u) % TUI_MAX_LINES;
     }
-    memcpy(tui->serial_lines[slot], tui->serial_cur_line, tui->serial_cur_len + 1u);
-    tui->serial_cur_len = 0;
+    memcpy(uart->lines[slot], uart->cur_line, uart->cur_len + 1u);
+    uart->cur_len = 0;
 }
 
 static void tui_append_text(struct mm_tui *tui, const char *buf, size_t len)
@@ -320,72 +330,75 @@ static void tui_append_text(struct mm_tui *tui, const char *buf, size_t len)
     }
 }
 
-static void tui_clear_serial(struct mm_tui *tui)
+static void tui_clear_serial(struct mm_tui_uart *uart)
 {
-    tui->serial_line_count = 0;
-    tui->serial_line_head = 0;
-    tui->serial_cur_len = 0;
-    tui->serial_cur_line[0] = '\0';
+    if (uart == 0) return;
+    uart->line_count = 0;
+    uart->line_head = 0;
+    uart->cur_len = 0;
+    uart->cur_line[0] = '\0';
 }
 
-static void tui_serial_flush_escape(struct mm_tui *tui)
+static void tui_serial_flush_escape(struct mm_tui_uart *uart)
 {
     mm_u8 i;
-    for (i = 0; i < tui->serial_esc_len; ++i) {
-        char c = tui->serial_esc_buf[i];
+    if (uart == 0) return;
+    for (i = 0; i < uart->esc_len; ++i) {
+        char c = uart->esc_buf[i];
         if (c == '\n') {
-            tui_push_serial_line(tui);
+            tui_push_serial_line(uart);
         } else if (c == '\r') {
             /* ignore */
         } else {
-            if (tui->serial_cur_len + 1u < TUI_MAX_COLS) {
-                tui->serial_cur_line[tui->serial_cur_len++] = c;
+            if (uart->cur_len + 1u < TUI_MAX_COLS) {
+                uart->cur_line[uart->cur_len++] = c;
             }
         }
     }
 }
 
-static void tui_append_serial_text(struct mm_tui *tui, const char *buf, size_t len)
+static void tui_append_serial_text(struct mm_tui_uart *uart, const char *buf, size_t len)
 {
     size_t i;
+    if (uart == 0) return;
     for (i = 0; i < len; ++i) {
         char c = buf[i];
-        if (tui->serial_esc_active) {
-            if (tui->serial_esc_len + 1u < (mm_u8)sizeof(tui->serial_esc_buf)) {
-                tui->serial_esc_buf[tui->serial_esc_len++] = c;
+        if (uart->esc_active) {
+            if (uart->esc_len + 1u < (mm_u8)sizeof(uart->esc_buf)) {
+                uart->esc_buf[uart->esc_len++] = c;
             } else {
-                tui_serial_flush_escape(tui);
-                tui->serial_esc_len = 0;
-                tui->serial_esc_active = MM_FALSE;
+                tui_serial_flush_escape(uart);
+                uart->esc_len = 0;
+                uart->esc_active = MM_FALSE;
             }
             if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
-                tui->serial_esc_buf[tui->serial_esc_len] = '\0';
-                if (strcmp(tui->serial_esc_buf, "\x1b[2J") == 0) {
-                    tui_clear_serial(tui);
-                } else if (strcmp(tui->serial_esc_buf, "\x1b[H") == 0 ||
-                           strcmp(tui->serial_esc_buf, "\x1b[1;1H") == 0) {
+                uart->esc_buf[uart->esc_len] = '\0';
+                if (strcmp(uart->esc_buf, "\x1b[2J") == 0) {
+                    tui_clear_serial(uart);
+                } else if (strcmp(uart->esc_buf, "\x1b[H") == 0 ||
+                           strcmp(uart->esc_buf, "\x1b[1;1H") == 0) {
                     /* ignore cursor home */
                 } else {
-                    tui_serial_flush_escape(tui);
+                    tui_serial_flush_escape(uart);
                 }
-                tui->serial_esc_len = 0;
-                tui->serial_esc_active = MM_FALSE;
+                uart->esc_len = 0;
+                uart->esc_active = MM_FALSE;
             }
             continue;
         }
         if (c == '\x1b') {
-            tui->serial_esc_active = MM_TRUE;
-            tui->serial_esc_len = 0;
-            tui->serial_esc_buf[tui->serial_esc_len++] = c;
+            uart->esc_active = MM_TRUE;
+            uart->esc_len = 0;
+            uart->esc_buf[uart->esc_len++] = c;
             continue;
         }
         if (c == '\n') {
-            tui_push_serial_line(tui);
+            tui_push_serial_line(uart);
         } else if (c == '\r') {
             /* ignore */
         } else {
-            if (tui->serial_cur_len + 1u < TUI_MAX_COLS) {
-                tui->serial_cur_line[tui->serial_cur_len++] = c;
+            if (uart->cur_len + 1u < TUI_MAX_COLS) {
+                uart->cur_line[uart->cur_len++] = c;
             }
         }
     }
@@ -415,12 +428,17 @@ static mm_bool tui_read_serial(struct mm_tui *tui)
     char buf[1024];
     ssize_t n;
     mm_bool changed = MM_FALSE;
-    if (tui->serial_fd < 0) return MM_FALSE;
-    n = read(tui->serial_fd, buf, (int)sizeof(buf));
-    while (n > 0) {
-        tui_append_serial_text(tui, buf, (size_t)n);
-        changed = MM_TRUE;
-        n = read(tui->serial_fd, buf, (int)sizeof(buf));
+    int i;
+    if (tui == 0) return MM_FALSE;
+    for (i = 0; i < tui->serial_count; ++i) {
+        struct mm_tui_uart *uart = &tui->serials[i];
+        if (uart->fd < 0) continue;
+        n = read(uart->fd, buf, (int)sizeof(buf));
+        while (n > 0) {
+            tui_append_serial_text(uart, buf, (size_t)n);
+            changed = MM_TRUE;
+            n = read(uart->fd, buf, (int)sizeof(buf));
+        }
     }
     return changed;
 }
@@ -533,10 +551,16 @@ static const char *tui_window2_title(const struct mm_tui *tui)
         case MM_TUI_WIN2_PERIPH: return "PERIPHERALS";
         case MM_TUI_WIN2_GPIO: return "GPIO";
         default:
-            if (tui->serial_label[0] != '\0') {
-                return tui->serial_label;
+            if (tui != 0 && tui->serial_count > 0) {
+                int sel = tui->serial_selected;
+                if (sel < 0 || sel >= tui->serial_count) {
+                    sel = 0;
+                }
+                if (tui->serials[sel].label[0] != '\0') {
+                    return tui->serials[sel].label;
+                }
             }
-            return "UART";
+            return TUI_SERIAL_LABEL_NONE;
     }
 }
 
@@ -550,7 +574,8 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
         tui->actions |= MM_TUI_ACTION_QUIT;
         return;
     }
-    if (tui->window2_mode == MM_TUI_WIN2_UART && tui->serial_fd >= 0) {
+    if (tui->window2_mode == MM_TUI_WIN2_UART) {
+        struct mm_tui_uart *uart = tui_serial_current(tui);
         mm_u8 b = 0;
         mm_bool send = MM_FALSE;
         if (key == KEY_ENTER || ch == '\n' || ch == '\r') {
@@ -563,8 +588,8 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
             b = (mm_u8)ch;
             send = MM_TRUE;
         }
-        if (send) {
-            (void)write(tui->serial_fd, &b, 1);
+        if (send && uart != 0 && uart->fd >= 0) {
+            (void)write(uart->fd, &b, 1);
         }
     }
     if (key == KEY_LEFT) {
@@ -584,7 +609,12 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
         return;
     }
     if (key == KEY_F(4)) {
-        tui->window2_mode = (mm_u8)((tui->window2_mode + 1u) % 3u);
+        if (tui->window2_mode == MM_TUI_WIN2_UART && tui->serial_count > 1) {
+            tui->serial_selected = (tui->serial_selected + 1) % tui->serial_count;
+            tui->input_dirty = MM_TRUE;
+        } else {
+            tui->window2_mode = (mm_u8)((tui->window2_mode + 1u) % 3u);
+        }
         return;
     }
     if (key == KEY_F(5)) {
@@ -711,7 +741,11 @@ static void tui_draw(struct mm_tui *tui)
     tui_draw_text(console_w + 2, 3, w - 1, menu_fg, menu_bg, "Stop/Continue (F2)");
     tui_draw_text(console_w + 2, 5, w - 1, menu_fg, menu_bg,
                   (tui->window1_mode == MM_TUI_WIN1_LOG) ? "CPU (F3)" : "LOG (F3)");
-    tui_draw_text(console_w + 2, 7, w - 1, menu_fg, menu_bg, "Next peripheral (F4)");
+    if (tui->window2_mode == MM_TUI_WIN2_UART && tui->serial_count > 1) {
+        tui_draw_text(console_w + 2, 7, w - 1, menu_fg, menu_bg, "Next UART (F4)");
+    } else {
+        tui_draw_text(console_w + 2, 7, w - 1, menu_fg, menu_bg, "Next peripheral (F4)");
+    }
     {
         uintattr_t reload_fg = tui->target_running ? TUI_FG_DIM : menu_fg;
         tui_draw_text(console_w + 2, 9, w - 1, reload_fg, menu_bg, "Reload images (F5)");
@@ -986,24 +1020,27 @@ static void tui_draw(struct mm_tui *tui)
         tui_draw_filled(split_x + 1, inner_y, inner_x + inner_w - 1, inner_y + title_h - 1, title_fg, title_bg);
         tui_draw_text(split_x + 2, inner_y, inner_x + inner_w - 1, title_fg, title_bg, tui_window2_title(tui));
         if (tui->window2_mode == MM_TUI_WIN2_UART) {
-            available = (size_t)log_h;
-            if (tui->serial_line_count > available) {
-                start = tui->serial_line_count - available;
-            } else {
-                start = 0;
-            }
-            for (i = 0; i < log_h; ++i) {
-                size_t idx = start + (size_t)i;
-                if (idx < tui->serial_line_count) {
-                    size_t slot = (tui->serial_line_head + idx) % TUI_MAX_LINES;
-                    tui_draw_text(split_x + 1, log_y + i, inner_x + inner_w - 1,
-                                  console_fg, console_bg, tui->serial_lines[slot]);
+            struct mm_tui_uart *uart = tui_serial_current(tui);
+            if (uart != 0) {
+                available = (size_t)log_h;
+                if (uart->line_count > available) {
+                    start = uart->line_count - available;
+                } else {
+                    start = 0;
                 }
-            }
-            if (tui->serial_cur_len > 0 && log_h > 0) {
-                tui->serial_cur_line[tui->serial_cur_len] = '\0';
-                tui_draw_text(split_x + 1, log_y + log_h - 1, inner_x + inner_w - 1,
-                              console_fg, console_bg, tui->serial_cur_line);
+                for (i = 0; i < log_h; ++i) {
+                    size_t idx = start + (size_t)i;
+                    if (idx < uart->line_count) {
+                        size_t slot = (uart->line_head + idx) % TUI_MAX_LINES;
+                        tui_draw_text(split_x + 1, log_y + i, inner_x + inner_w - 1,
+                                      console_fg, console_bg, uart->lines[slot]);
+                    }
+                }
+                if (uart->cur_len > 0 && log_h > 0) {
+                    uart->cur_line[uart->cur_len] = '\0';
+                    tui_draw_text(split_x + 1, log_y + log_h - 1, inner_x + inner_w - 1,
+                                  console_fg, console_bg, uart->cur_line);
+                }
             }
         } else if (tui->window2_mode == MM_TUI_WIN2_PERIPH) {
             int y = log_y;
@@ -1236,11 +1273,11 @@ static void tui_draw(struct mm_tui *tui)
 mm_bool mm_tui_init(struct mm_tui *tui)
 {
     int ttyfd;
+    int i;
     if (tui == 0) return MM_FALSE;
     memset(tui, 0, sizeof(*tui));
     tui->log_fd = -1;
     tui->log_read_fd = -1;
-    tui->serial_fd = -1;
     tui->input_fd = -1;
     tui->thread_running = MM_FALSE;
     tui->thread_stop = MM_FALSE;
@@ -1261,6 +1298,11 @@ mm_bool mm_tui_init(struct mm_tui *tui)
     tui->gdb_connected = MM_FALSE;
     tui->gdb_port = 0;
     tui->active = MM_FALSE;
+    tui->serial_count = 0;
+    tui->serial_selected = 0;
+    for (i = 0; i < TUI_MAX_UARTS; ++i) {
+        tui->serials[i].fd = -1;
+    }
     return MM_TRUE;
 }
 
@@ -1269,9 +1311,9 @@ void mm_tui_shutdown(struct mm_tui *tui)
     if (tui == 0) return;
     mm_tui_stop_thread(tui);
     tui->active = MM_FALSE;
+    mm_tui_close_devices(tui);
     if (tui->log_fd >= 0) close(tui->log_fd);
     if (tui->log_read_fd >= 0) close(tui->log_read_fd);
-    if (tui->serial_fd >= 0) close(tui->serial_fd);
     if (tui->input_fd >= 0) close(tui->input_fd);
     if (g_tui == tui) {
         g_tui = 0;
@@ -1477,15 +1519,21 @@ void mm_tui_set_memory_map(struct mm_tui *tui, const struct mm_memmap *map)
 
 void mm_tui_close_devices(struct mm_tui *tui)
 {
+    int i;
     if (tui == 0) return;
-    if (tui->serial_fd >= 0) {
-        close(tui->serial_fd);
-        tui->serial_fd = -1;
-        tui->serial_line_count = 0;
-        tui->serial_line_head = 0;
-        tui->serial_cur_len = 0;
-        tui->serial_cur_line[0] = '\0';
+    for (i = 0; i < tui->serial_count; ++i) {
+        struct mm_tui_uart *uart = &tui->serials[i];
+        if (uart->fd >= 0) {
+            close(uart->fd);
+            uart->fd = -1;
+        }
+        uart->line_count = 0;
+        uart->line_head = 0;
+        uart->cur_len = 0;
+        uart->cur_line[0] = '\0';
     }
+    tui->serial_count = 0;
+    tui->serial_selected = 0;
 }
 
 static void *tui_thread_main(void *arg)
@@ -1583,12 +1631,19 @@ void mm_tui_attach_uart(const char *label, const char *path)
     int fd;
     struct termios tio;
     const char *want = getenv("M33MU_TUI_UART");
+    int i;
+    struct mm_tui_uart *uart;
     if (g_tui == 0 || !g_tui->active) return;
     if (path == 0) return;
     if (want && label && strcmp(want, label) != 0) {
         return;
     }
-    if (g_tui->serial_fd >= 0) return;
+    for (i = 0; i < g_tui->serial_count; ++i) {
+        if (strcmp(g_tui->serials[i].path, path) == 0) {
+            return;
+        }
+    }
+    if (g_tui->serial_count >= TUI_MAX_UARTS) return;
     fd = open(path, O_RDWR | O_NONBLOCK);
     if (fd < 0) return;
     if (tcgetattr(fd, &tio) == 0) {
@@ -1597,10 +1652,18 @@ void mm_tui_attach_uart(const char *label, const char *path)
         tio.c_oflag &= ~(OPOST | ONLCR);
         (void)tcsetattr(fd, TCSANOW, &tio);
     }
-    g_tui->serial_fd = fd;
-    if (label != 0) {
-        snprintf(g_tui->serial_label, sizeof(g_tui->serial_label), "%s", label);
+    uart = &g_tui->serials[g_tui->serial_count];
+    memset(uart, 0, sizeof(*uart));
+    uart->fd = fd;
+    if (label != 0 && label[0] != '\0') {
+        snprintf(uart->label, sizeof(uart->label), "%s", label);
     } else {
-        snprintf(g_tui->serial_label, sizeof(g_tui->serial_label), "USART");
+        snprintf(uart->label, sizeof(uart->label), "%s", TUI_SERIAL_LABEL_NONE);
     }
+    snprintf(uart->path, sizeof(uart->path), "%s", path);
+    g_tui->serial_count++;
+    if (g_tui->serial_count == 1) {
+        g_tui->serial_selected = 0;
+    }
+    g_tui->input_dirty = MM_TRUE;
 }

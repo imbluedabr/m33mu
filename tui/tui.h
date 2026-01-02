@@ -27,6 +27,24 @@
 
 struct mm_memmap;
 
+#define TUI_MAX_LINES 1024
+#define TUI_MAX_COLS  512
+#define TUI_MAX_UARTS 8
+
+struct mm_tui_uart {
+    int fd;
+    char label[32];
+    char path[128];
+    char lines[TUI_MAX_LINES][TUI_MAX_COLS];
+    size_t line_count;
+    size_t line_head;
+    char cur_line[TUI_MAX_COLS];
+    size_t cur_len;
+    char esc_buf[16];
+    mm_u8 esc_len;
+    mm_bool esc_active;
+};
+
 struct mm_tui {
     volatile mm_bool active;
     volatile mm_bool want_quit;
@@ -95,16 +113,9 @@ struct mm_tui {
     mm_u32 ram_size_ns;
     mm_u32 flash_total_size;
     mm_u32 ram_total_size;
-    int serial_fd;
-    char serial_label[32];
-    char serial_lines[1024][512];
-    size_t serial_line_count;
-    size_t serial_line_head;
-    char serial_cur_line[512];
-    size_t serial_cur_len;
-    char serial_esc_buf[16];
-    mm_u8 serial_esc_len;
-    mm_bool serial_esc_active;
+    int serial_count;
+    int serial_selected;
+    struct mm_tui_uart serials[TUI_MAX_UARTS];
     int width;
     int height;
 };
