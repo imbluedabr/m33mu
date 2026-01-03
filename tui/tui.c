@@ -295,6 +295,13 @@ static struct mm_tui_uart *tui_serial_current(struct mm_tui *tui)
     return &tui->serials[tui->serial_selected];
 }
 
+static size_t tui_serial_max_scroll(const struct mm_tui_uart *uart, size_t visible)
+{
+    if (uart == 0 || visible == 0) return 0;
+    if (uart->line_count <= visible) return 0;
+    return uart->line_count - visible;
+}
+
 static void tui_push_serial_line(struct mm_tui_uart *uart)
 {
     size_t slot;
@@ -337,6 +344,7 @@ static void tui_clear_serial(struct mm_tui_uart *uart)
     uart->line_head = 0;
     uart->cur_len = 0;
     uart->cur_line[0] = '\0';
+    uart->scroll_offset = 0;
 }
 
 static void tui_serial_flush_escape(struct mm_tui_uart *uart)
@@ -600,6 +608,30 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
         tui->window2_mode = (mm_u8)((tui->window2_mode + 1u) % 3u);
         return;
     }
+    if (key == KEY_PPAGE || key == KEY_NPAGE) {
+        if (tui->window2_mode == MM_TUI_WIN2_UART) {
+            struct mm_tui_uart *uart = tui_serial_current(tui);
+            if (uart != 0 && tui->window2_page_lines > 0) {
+                size_t step = (size_t)tui->window2_page_lines;
+                size_t max_scroll = tui_serial_max_scroll(uart, (size_t)tui->window2_page_lines);
+                if (key == KEY_PPAGE) {
+                    if (uart->scroll_offset + step > max_scroll) {
+                        uart->scroll_offset = max_scroll;
+                    } else {
+                        uart->scroll_offset += step;
+                    }
+                } else {
+                    if (uart->scroll_offset > step) {
+                        uart->scroll_offset -= step;
+                    } else {
+                        uart->scroll_offset = 0;
+                    }
+                }
+                tui->input_dirty = MM_TRUE;
+            }
+        }
+        return;
+    }
     if (key == KEY_F(2)) {
         tui->actions |= tui->target_running ? MM_TUI_ACTION_PAUSE : MM_TUI_ACTION_CONTINUE;
         return;
@@ -609,12 +641,26 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
         return;
     }
     if (key == KEY_F(4)) {
-        if (tui->window2_mode == MM_TUI_WIN2_UART && tui->serial_count > 1) {
-            tui->serial_selected = (tui->serial_selected + 1) % tui->serial_count;
-            tui->input_dirty = MM_TRUE;
+        if (tui->serial_count > 0) {
+            if (tui->window2_mode == MM_TUI_WIN2_UART) {
+                if (tui->serial_count > 1) {
+                    tui->serial_selected = (tui->serial_selected + 1) % tui->serial_count;
+                } else {
+                    tui->window2_mode = MM_TUI_WIN2_PERIPH;
+                }
+            } else if (tui->window2_mode == MM_TUI_WIN2_PERIPH) {
+                tui->window2_mode = MM_TUI_WIN2_GPIO;
+            } else {
+                tui->window2_mode = MM_TUI_WIN2_UART;
+                tui->serial_selected = 0;
+            }
         } else {
-            tui->window2_mode = (mm_u8)((tui->window2_mode + 1u) % 3u);
+            tui->window2_mode = (mm_u8)((tui->window2_mode + 1u) % 2u);
+            if (tui->window2_mode == MM_TUI_WIN2_UART) {
+                tui->window2_mode = MM_TUI_WIN2_PERIPH;
+            }
         }
+        tui->input_dirty = MM_TRUE;
         return;
     }
     if (key == KEY_F(5)) {
@@ -741,11 +787,7 @@ static void tui_draw(struct mm_tui *tui)
     tui_draw_text(console_w + 2, 3, w - 1, menu_fg, menu_bg, "Stop/Continue (F2)");
     tui_draw_text(console_w + 2, 5, w - 1, menu_fg, menu_bg,
                   (tui->window1_mode == MM_TUI_WIN1_LOG) ? "CPU (F3)" : "LOG (F3)");
-    if (tui->window2_mode == MM_TUI_WIN2_UART && tui->serial_count > 1) {
-        tui_draw_text(console_w + 2, 7, w - 1, menu_fg, menu_bg, "Next UART (F4)");
-    } else {
-        tui_draw_text(console_w + 2, 7, w - 1, menu_fg, menu_bg, "Next peripheral (F4)");
-    }
+    tui_draw_text(console_w + 2, 7, w - 1, menu_fg, menu_bg, "Next window2 (F4)");
     {
         uintattr_t reload_fg = tui->target_running ? TUI_FG_DIM : menu_fg;
         tui_draw_text(console_w + 2, 9, w - 1, reload_fg, menu_bg, "Reload images (F5)");
@@ -1021,10 +1063,15 @@ static void tui_draw(struct mm_tui *tui)
         tui_draw_text(split_x + 2, inner_y, inner_x + inner_w - 1, title_fg, title_bg, tui_window2_title(tui));
         if (tui->window2_mode == MM_TUI_WIN2_UART) {
             struct mm_tui_uart *uart = tui_serial_current(tui);
+            tui->window2_page_lines = log_h;
             if (uart != 0) {
                 available = (size_t)log_h;
                 if (uart->line_count > available) {
-                    start = uart->line_count - available;
+                    size_t max_scroll = tui_serial_max_scroll(uart, available);
+                    if (uart->scroll_offset > max_scroll) {
+                        uart->scroll_offset = max_scroll;
+                    }
+                    start = uart->line_count - available - uart->scroll_offset;
                 } else {
                     start = 0;
                 }
@@ -1056,6 +1103,7 @@ static void tui_draw(struct mm_tui *tui)
             mm_u8 eth_mac[6];
             mm_bool eth_mac_ok;
             mm_bool eth_link;
+            tui->window2_page_lines = 0;
 
             count = mm_spiflash_count();
             if (count == 0u) {
@@ -1193,6 +1241,7 @@ static void tui_draw(struct mm_tui *tui)
             }
         } else if (tui->window2_mode == MM_TUI_WIN2_GPIO) {
             int row;
+            tui->window2_page_lines = 0;
             if (!mm_gpio_bank_reader_present()) {
                 tui_draw_text(split_x + 2, log_y, inner_x + inner_w - 1,
                               console_fg, console_bg, "GPIO unavailable");
@@ -1262,6 +1311,7 @@ static void tui_draw(struct mm_tui *tui)
             }
         } else {
             const char *placeholder = "Not implemented";
+            tui->window2_page_lines = 0;
             tui_draw_text(split_x + 2, log_y, inner_x + inner_w - 1,
                           console_fg, console_bg, placeholder);
         }
@@ -1300,6 +1350,7 @@ mm_bool mm_tui_init(struct mm_tui *tui)
     tui->active = MM_FALSE;
     tui->serial_count = 0;
     tui->serial_selected = 0;
+    tui->window2_page_lines = 0;
     for (i = 0; i < TUI_MAX_UARTS; ++i) {
         tui->serials[i].fd = -1;
     }
@@ -1534,6 +1585,9 @@ void mm_tui_close_devices(struct mm_tui *tui)
     }
     tui->serial_count = 0;
     tui->serial_selected = 0;
+    if (tui->window2_mode == MM_TUI_WIN2_UART) {
+        tui->window2_mode = MM_TUI_WIN2_GPIO;
+    }
 }
 
 static void *tui_thread_main(void *arg)

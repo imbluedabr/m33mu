@@ -43,6 +43,7 @@ struct mm_tui_uart {
     char esc_buf[16];
     mm_u8 esc_len;
     mm_bool esc_active;
+    size_t scroll_offset;
 };
 
 struct mm_tui {
@@ -116,6 +117,7 @@ struct mm_tui {
     int serial_count;
     int serial_selected;
     struct mm_tui_uart serials[TUI_MAX_UARTS];
+    int window2_page_lines;
     int width;
     int height;
 };
