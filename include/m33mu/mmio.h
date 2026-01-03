@@ -74,6 +74,8 @@ struct mmio_bus {
 
 void mmio_bus_init(struct mmio_bus *bus, struct mmio_region *region_storage, size_t capacity);
 void mmio_bus_enable_step_hooks(struct mmio_bus *bus);
+void mmio_set_peek_mode(mm_bool enabled);
+mm_bool mmio_peek_mode(void);
 
 /* Returns MM_TRUE on success; MM_FALSE if storage is full or overlaps occur. */
 mm_bool mmio_bus_register_region(struct mmio_bus *bus, const struct mmio_region *region);

@@ -56,9 +56,15 @@ static mm_bool uart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     if (offset == LPUART_DATA && size_bytes == 4) {
         mm_u32 v = 0;
         if (mm_uart_io_has_rx(&u->io)) {
-            v = (mm_u32)mm_uart_io_read(&u->io);
+            if (mmio_peek_mode()) {
+                v = (mm_u32)mm_uart_io_peek(&u->io);
+            } else {
+                v = (mm_u32)mm_uart_io_read(&u->io);
+            }
         }
-        u->regs[LPUART_STAT / 4] &= ~STAT_RDRF;
+        if (!mmio_peek_mode()) {
+            u->regs[LPUART_STAT / 4] &= ~STAT_RDRF;
+        }
         *value_out = v;
         return MM_TRUE;
     }

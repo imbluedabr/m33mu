@@ -58,8 +58,10 @@ static mm_bool spi_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
     if ((offset + size_bytes) > sizeof(s->regs)) return MM_FALSE;
     if (offset == LPSPI_RDR && size_bytes == 4) {
         mm_u32 v = s->rx_valid ? (mm_u32)s->last_rx : 0u;
-        s->rx_valid = MM_FALSE;
-        s->regs[LPSPI_SR / 4] &= ~SR_RDF;
+        if (!mmio_peek_mode()) {
+            s->rx_valid = MM_FALSE;
+            s->regs[LPSPI_SR / 4] &= ~SR_RDF;
+        }
         *value_out = v;
         return MM_TRUE;
     }

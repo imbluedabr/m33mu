@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include "stm32u585/stm32u585_spi.h"
 #include "stm32u585/stm32u585_mmio.h"
+#include "m33mu/mmio.h"
 #include "m33mu/spi_bus.h"
 
 #define SPI_CR1   0x00u
@@ -197,23 +198,40 @@ static mm_bool spi_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
         if (frame_bytes > size_bytes) {
             frame_bytes = size_bytes;
         }
-        for (i = 0; i < frame_bytes; ++i) {
-            if (!fifo_pop(s, &b)) {
-                b = 0u;
+        if (mmio_peek_mode()) {
+            mm_u8 count = fifo_count(s);
+            mm_u8 head = s->rx_head;
+            for (i = 0; i < frame_bytes; ++i) {
+                if (i < count) {
+                    b = s->rx_fifo[(mm_u8)((head + (mm_u8)i) & 0x1Fu)];
+                } else {
+                    b = 0u;
+                }
+                v |= ((mm_u32)b << (i * 8u));
             }
-            v |= ((mm_u32)b << (i * 8u));
-            if (spi_trace_enabled()) {
-                printf("[SPI] SPI%d RXDR=0x%02x\n", s->bus_index, b);
+        } else {
+            for (i = 0; i < frame_bytes; ++i) {
+                if (!fifo_pop(s, &b)) {
+                    b = 0u;
+                }
+                v |= ((mm_u32)b << (i * 8u));
+                if (spi_trace_enabled()) {
+                    printf("[SPI] SPI%d RXDR=0x%02x\n", s->bus_index, b);
+                }
             }
         }
         for (; i < size_bytes; ++i) {
             v |= 0u;
         }
         *value_out = v;
-        update_sr(s);
+        if (!mmio_peek_mode()) {
+            update_sr(s);
+        }
         return MM_TRUE;
     }
-    update_sr(s);
+    if (!mmio_peek_mode()) {
+        update_sr(s);
+    }
     memcpy(value_out, (mm_u8 *)s->regs + offset, size_bytes);
     return MM_TRUE;
 }

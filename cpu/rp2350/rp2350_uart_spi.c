@@ -7,6 +7,7 @@
 #include "rp2350/rp2350_uart_spi.h"
 #include "rp2350/rp2350_mmio.h"
 #include "rp2350/rp2350_usb.h"
+#include "m33mu/mmio.h"
 #include "m33mu/target_hal.h"
 #include "m33mu/spi_bus.h"
 
@@ -136,7 +137,11 @@ static mm_bool uart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     if (offset == UARTDR && (size_bytes == 1u || size_bytes == 2u || size_bytes == 4u)) {
         mm_u32 v = 0u;
         if (u->enabled && mm_uart_io_has_rx(&u->io)) {
-            v = (mm_u32)mm_uart_io_read(&u->io);
+            if (mmio_peek_mode()) {
+                v = (mm_u32)mm_uart_io_peek(&u->io);
+            } else {
+                v = (mm_u32)mm_uart_io_read(&u->io);
+            }
         }
         if (size_bytes == 1u) {
             v &= 0xffu;
@@ -144,11 +149,15 @@ static mm_bool uart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
             v &= 0xffffu;
         }
         *value_out = v;
-        uart_update_flags(u);
+        if (!mmio_peek_mode()) {
+            uart_update_flags(u);
+        }
         return MM_TRUE;
     }
     if (offset == UARTFR && (size_bytes == 1u || size_bytes == 2u || size_bytes == 4u)) {
-        uart_update_flags(u);
+        if (!mmio_peek_mode()) {
+            uart_update_flags(u);
+        }
         {
             mm_u32 v = u->regs[UARTFR / 4u];
             if (size_bytes == 1u) {
@@ -221,14 +230,20 @@ static mm_bool spi_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
         mm_u32 v = 0u;
         if (s->rx_valid) {
             v = (mm_u32)s->rx_data;
-            s->rx_valid = MM_FALSE;
+            if (!mmio_peek_mode()) {
+                s->rx_valid = MM_FALSE;
+            }
         }
         *value_out = v;
-        spi_update_status(s);
+        if (!mmio_peek_mode()) {
+            spi_update_status(s);
+        }
         return MM_TRUE;
     }
     if (offset == SSPSR && size_bytes == 4u) {
-        spi_update_status(s);
+        if (!mmio_peek_mode()) {
+            spi_update_status(s);
+        }
         *value_out = s->regs[SSPSR / 4u];
         return MM_TRUE;
     }

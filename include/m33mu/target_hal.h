@@ -44,6 +44,7 @@ mm_bool mm_uart_io_flush(struct mm_uart_io *io);
 mm_bool mm_uart_io_poll(struct mm_uart_io *io);
 mm_bool mm_uart_io_tx_empty(const struct mm_uart_io *io);
 mm_bool mm_uart_io_has_rx(const struct mm_uart_io *io);
+mm_u8 mm_uart_io_peek(const struct mm_uart_io *io);
 mm_u8 mm_uart_io_read(struct mm_uart_io *io);
 void mm_uart_io_set_stdout(mm_bool enable);
 void mm_uart_break_on_macro_set(void);

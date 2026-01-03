@@ -30,6 +30,7 @@
 #include <stdio.h>
 
 static enum mm_sec_state g_mmio_active_sec = MM_SECURE;
+static mm_bool g_mmio_peek_mode = MM_FALSE;
 
 void mmio_set_active_sec(enum mm_sec_state sec)
 {
@@ -39,6 +40,16 @@ void mmio_set_active_sec(enum mm_sec_state sec)
 enum mm_sec_state mmio_active_sec(void)
 {
     return g_mmio_active_sec;
+}
+
+void mmio_set_peek_mode(mm_bool enabled)
+{
+    g_mmio_peek_mode = enabled ? MM_TRUE : MM_FALSE;
+}
+
+mm_bool mmio_peek_mode(void)
+{
+    return g_mmio_peek_mode;
 }
 
 void mmio_bus_init(struct mmio_bus *bus, struct mmio_region *region_storage, size_t capacity)
@@ -154,12 +165,38 @@ mmio_peek_result_t mmio_bus_peek(const struct mmio_bus *bus, mm_u32 addr, mm_u32
         return MMIO_PEEK_UNSUPPORTED;
     }
     region = mmio_bus_find(bus, addr);
-    if (region == 0 || region->magic != MMIO_REGION_MAGIC ||
-        (region->flags & MMIO_REGION_F_EXT) == 0u || region->peek == 0) {
+    if (region == 0) {
         return MMIO_PEEK_UNSUPPORTED;
     }
     offset = addr - region->base;
-    return region->peek(region->opaque, offset, size_bytes, dst);
+    if (region->magic == MMIO_REGION_MAGIC &&
+        (region->flags & MMIO_REGION_F_EXT) != 0u &&
+        region->peek != 0) {
+        return region->peek(region->opaque, offset, size_bytes, dst);
+    }
+    if (region->read != 0 && dst != 0 && (size_bytes == 1u || size_bytes == 2u || size_bytes == 4u)) {
+        mm_u32 val = 0;
+        mm_bool prev = g_mmio_peek_mode;
+        mmio_set_peek_mode(MM_TRUE);
+        if (!region->read(region->opaque, offset, size_bytes, &val)) {
+            mmio_set_peek_mode(prev);
+            return MMIO_PEEK_UNSUPPORTED;
+        }
+        mmio_set_peek_mode(prev);
+        if (size_bytes == 1u) {
+            ((mm_u8 *)dst)[0] = (mm_u8)(val & 0xffu);
+        } else if (size_bytes == 2u) {
+            ((mm_u8 *)dst)[0] = (mm_u8)(val & 0xffu);
+            ((mm_u8 *)dst)[1] = (mm_u8)((val >> 8) & 0xffu);
+        } else {
+            ((mm_u8 *)dst)[0] = (mm_u8)(val & 0xffu);
+            ((mm_u8 *)dst)[1] = (mm_u8)((val >> 8) & 0xffu);
+            ((mm_u8 *)dst)[2] = (mm_u8)((val >> 16) & 0xffu);
+            ((mm_u8 *)dst)[3] = (mm_u8)((val >> 24) & 0xffu);
+        }
+        return MMIO_PEEK_OK;
+    }
+    return MMIO_PEEK_UNSUPPORTED;
 }
 
 mm_bool mmio_bus_save(const struct mmio_bus *bus, struct mm_snapshot_writer *w)

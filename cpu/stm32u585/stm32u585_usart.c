@@ -23,6 +23,7 @@
 #include <string.h>
 #include "stm32u585/stm32u585_usart.h"
 #include "stm32u585/stm32u585_mmio.h"
+#include "m33mu/mmio.h"
 #include "m33mu/target_hal.h"
 
 /* Minimal register offsets */
@@ -150,9 +151,14 @@ static mm_bool usart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
     if (offset >= sizeof(u->regs)) return MM_FALSE;
     ensure_enabled(u);
     if (offset == USART_RDR) {
-        mm_u32 v = mm_uart_io_has_rx(&u->io) ? mm_uart_io_read(&u->io) : 0u;
+        mm_u32 v = 0u;
+        if (mm_uart_io_has_rx(&u->io)) {
+            v = mmio_peek_mode() ? mm_uart_io_peek(&u->io) : mm_uart_io_read(&u->io);
+        }
         *value_out = v;
-        u->regs[USART_ISR / 4] &= ~ISR_RXNE;
+        if (!mmio_peek_mode()) {
+            u->regs[USART_ISR / 4] &= ~ISR_RXNE;
+        }
         return MM_TRUE;
     }
     if (offset == USART_ISR) {

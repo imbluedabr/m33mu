@@ -25,6 +25,7 @@
 #include "stm32h563/stm32h563_usart.h"
 #include "stm32h563/stm32h563_mmio.h"
 #include "stm32h563/stm32h563_usb.h"
+#include "m33mu/mmio.h"
 #include "m33mu/target_hal.h"
 
 /* Minimal register offsets */
@@ -305,10 +306,15 @@ static mm_bool usart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
     if (offset >= sizeof(u->regs)) return MM_FALSE;
     ensure_enabled(u);
     if (offset == USART_RDR) {
-        mm_u32 v = mm_uart_io_has_rx(&u->io) ? mm_uart_io_read(&u->io) : 0u;
+        mm_u32 v = 0u;
+        if (mm_uart_io_has_rx(&u->io)) {
+            v = mmio_peek_mode() ? mm_uart_io_peek(&u->io) : mm_uart_io_read(&u->io);
+        }
         *value_out = v;
-        u->regs[USART_ISR / 4] &= ~ISR_RXNE;
-        if (u->rx_trace) {
+        if (!mmio_peek_mode()) {
+            u->regs[USART_ISR / 4] &= ~ISR_RXNE;
+        }
+        if (u->rx_trace && !mmio_peek_mode()) {
             printf("[USART_RX_RDR] base=0x%08lx byte=0x%02lx\n",
                    (unsigned long)u->base,
                    (unsigned long)(v & 0xffu));

@@ -180,6 +180,14 @@ mm_bool mm_uart_io_has_rx(const struct mm_uart_io *io)
     return io->rx_pending;
 }
 
+mm_u8 mm_uart_io_peek(const struct mm_uart_io *io)
+{
+    if (io == 0) return 0;
+    if (io->stdout_only) return 0;
+    if (!io->rx_pending) return 0;
+    return io->rx_byte;
+}
+
 mm_u8 mm_uart_io_read(struct mm_uart_io *io)
 {
     mm_u8 v = 0;
