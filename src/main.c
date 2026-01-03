@@ -38,6 +38,7 @@
 #include "m33mu/exec_helpers.h"
 #include "m33mu/execute.h"
 #include "m33mu/core_sys.h"
+#include "m33mu/trace.h"
 #include "rp2350/rp2350_mmio.h"
 #include "m33mu/mem_prot.h"
 #include "m33mu/vector.h"
@@ -1358,6 +1359,8 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
                                 mm_u8 *it_cond,
                                 mm_bool *done)
 {
+    mm_bool trace_started = MM_FALSE;
+    mm_bool result = MM_TRUE;
     if (cpu == 0 || scs == 0 || nvic == 0 || map == 0 || cfg == 0) {
         return MM_FALSE;
     }
@@ -1380,27 +1383,36 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         cpu->event_reg = MM_FALSE;
     }
 
+    if (mm_trace_enabled()) {
+        mm_trace_begin_step(cpu, cpu->r[15] & ~1u);
+        trace_started = MM_TRUE;
+    }
+
     if (scs->pend_st) {
         if (primask_blocks_current(cpu)) {
-            return MM_TRUE;
+            result = MM_TRUE;
+            goto out;
         }
         if (!enter_exception(cpu, map, scs, MM_VECT_SYSTICK, cpu->r[15] & ~1u, cpu->xpsr)) {
             if (done) *done = MM_TRUE;
         } else {
             itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
         }
-        return MM_TRUE;
+        result = MM_TRUE;
+        goto out;
     }
     if (scs->pend_sv) {
         if (primask_blocks_current(cpu)) {
-            return MM_TRUE;
+            result = MM_TRUE;
+            goto out;
         }
         if (!enter_exception(cpu, map, scs, MM_VECT_PENDSV, cpu->r[15] & ~1u, cpu->xpsr)) {
             if (done) *done = MM_TRUE;
         } else {
             itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
         }
-        return MM_TRUE;
+        result = MM_TRUE;
+        goto out;
     }
     {
         enum mm_sec_state irq_sec = MM_SECURE;
@@ -1415,7 +1427,8 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             } else {
                 itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
             }
-            return MM_TRUE;
+            result = MM_TRUE;
+            goto out;
         }
     }
 
@@ -1434,7 +1447,8 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         cpu->r[13] = mm_cpu_get_active_sp(cpu);
 
         if (mm_rp2350_bootrom_handle(cpu, map)) {
-            return MM_TRUE;
+            result = MM_TRUE;
+            goto out;
         }
 
         f = mm_fetch_t32_memmap(cpu, map, cpu->sec_state);
@@ -1442,7 +1456,8 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             if (!raise_mem_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr, f.fault_addr, MM_TRUE)) {
                 if (done) *done = MM_TRUE;
             }
-            return MM_TRUE;
+            result = MM_TRUE;
+            goto out;
         }
         d = decode_t32_fast(&f, cpu, scs);
         mm_memmap_set_last_pc(f.pc_fetch);
@@ -1450,7 +1465,8 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             if (!raise_usage_fault(cpu, map, scs, f.pc_fetch, cpu->xpsr, (1u << 16))) {
                 if (done) *done = MM_TRUE;
             }
-            return MM_TRUE;
+            result = MM_TRUE;
+            goto out;
         }
 
         if (*it_remaining > 0u && itstate_get(cpu->xpsr) == 0u) {
@@ -1497,7 +1513,8 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
                 raw = itstate_advance(raw);
                 cpu->xpsr = itstate_set(cpu->xpsr, raw);
             }
-            return MM_TRUE;
+            result = MM_TRUE;
+            goto out;
         }
 
         {
@@ -1530,7 +1547,13 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             cpu->xpsr = itstate_set(cpu->xpsr, raw);
         }
     }
-    return MM_TRUE;
+    result = MM_TRUE;
+out:
+    if (trace_started) {
+        mmio_bus_end_step(&map->mmio, mm_trace_get_undo_sink());
+        mm_trace_end_step(cpu);
+    }
+    return result;
 }
 
 /* Handle writes to PC; detect EXC_RETURN magic values and perform unstack. */
@@ -2279,6 +2302,7 @@ int main(int argc, char **argv)
     mm_bool opt_capstone_verbose = MM_FALSE;
     mm_bool opt_uart_stdout = MM_FALSE;
     mm_bool opt_meminfo = MM_FALSE;
+    mm_bool opt_record = MM_FALSE;
     const char *gdb_symbols = 0;
     int gdb_port = 1234;
     const char *cpu_name = 0;
@@ -2413,6 +2437,8 @@ int main(int argc, char **argv)
             opt_quit_on_faults = MM_TRUE;
         } else if (strcmp(argv[i], "--meminfo") == 0) {
             opt_meminfo = MM_TRUE;
+        } else if (strcmp(argv[i], "--record") == 0) {
+            opt_record = MM_TRUE;
         } else if (strcmp(argv[i], "--no-tz") == 0) {
             opt_no_tz = MM_TRUE;
         } else if (strncmp(argv[i], "--boot-offset=", 14) == 0) {
@@ -2505,7 +2531,7 @@ int main(int argc, char **argv)
     }
 
     if (image_count == 0) {
-        fprintf(stderr, "usage: %s [--cpu cpu] [--gdb] [--port <n>] [--dump] "
+        fprintf(stderr, "usage: %s [--cpu cpu] [--gdb] [--port <n>] [--dump] [--record] "
 #ifdef M33MU_HAS_NCURSES
                         "[--tui] "
 #endif
@@ -2689,6 +2715,9 @@ int main(int argc, char **argv)
 
     {
         mm_bool first_start = MM_TRUE;
+        if (opt_record) {
+            mm_trace_init();
+        }
         for (;;) {
             mm_u64 cycle_total = 0;
             mm_bool done = MM_FALSE;
@@ -3329,6 +3358,23 @@ handle_pending:
                     }
                 }
 
+                if (opt_gdb && mm_gdb_stub_is_reverse(&gdb) && mm_gdb_stub_should_run(&gdb)) {
+                    if (!mm_trace_undo_step(&cpu, &map)) {
+                        mm_gdb_stub_notify_stop(&gdb, 5);
+                        continue;
+                    }
+                    if (cycle_total > 0u) {
+                        cycle_total--;
+                    }
+                    if (vcycles > 0u) {
+                        vcycles--;
+                    }
+                    if (mm_gdb_stub_should_step(&gdb) || mm_gdb_stub_breakpoint_hit(&gdb, cpu.r[15])) {
+                        mm_gdb_stub_notify_stop(&gdb, 5);
+                    }
+                    continue;
+                }
+
                 /* Fetch/decode */
                 {
                     struct mm_fetch_result f;
@@ -3336,6 +3382,7 @@ handle_pending:
                     mm_bool execute_it;
                     mm_u32 pc_before_exec = 0;
                     const mm_u32 insn_cycles = 1u;
+                    mm_bool trace_started = MM_FALSE;
                     (void)pc_before_exec;
                     cycles_since_poll += insn_cycles;
                     cycle_total += insn_cycles;
@@ -3349,7 +3396,16 @@ handle_pending:
                      */
                     cpu.r[13] = mm_cpu_get_active_sp(&cpu);
 
+                    if (mm_trace_enabled()) {
+                        mm_trace_begin_step(&cpu, cpu.r[15] & ~1u);
+                        trace_started = MM_TRUE;
+                    }
+
                     if (mm_rp2350_bootrom_handle(&cpu, &map)) {
+                        if (trace_started) {
+                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                            mm_trace_end_step(&cpu);
+                        }
                         continue;
                     }
 
@@ -3365,7 +3421,15 @@ handle_pending:
                             if (opt_gdb) {
                                 mm_gdb_stub_notify_stop(&gdb, 11);
                             }
+                            if (trace_started) {
+                                mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                                mm_trace_end_step(&cpu);
+                            }
                             break;
+                        }
+                        if (trace_started) {
+                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                            mm_trace_end_step(&cpu);
                         }
                         continue;
                     }
@@ -3437,7 +3501,15 @@ handle_pending:
                             if (opt_gdb) {
                                 mm_gdb_stub_notify_stop(&gdb, 4);
                             }
+                            if (trace_started) {
+                                mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                                mm_trace_end_step(&cpu);
+                            }
                             break;
+                        }
+                        if (trace_started) {
+                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                            mm_trace_end_step(&cpu);
                         }
                         continue;
                     }
@@ -3499,6 +3571,10 @@ handle_pending:
                             raw = itstate_advance(raw);
                             cpu.xpsr = itstate_set(cpu.xpsr, raw);
                         }
+                        if (trace_started) {
+                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                            mm_trace_end_step(&cpu);
+                        }
                         continue;
                     }
 
@@ -3522,6 +3598,10 @@ handle_pending:
                         exec_ctx.exc_return_unstack = exc_return_unstack;
                         exec_ctx.enter_exception = enter_exception;
                         if (mm_execute_decoded(&exec_ctx) == MM_EXEC_CONTINUE) {
+                            if (trace_started) {
+                                mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                                mm_trace_end_step(&cpu);
+                            }
                             continue;
                         }
                         if (opt_tui && !opt_gdb && done && d.kind == MM_OP_BKPT) {
@@ -3529,6 +3609,10 @@ handle_pending:
                             tui_paused = MM_TRUE;
                             tui_step = MM_FALSE;
                         }
+                    }
+                    if (trace_started) {
+                        mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                        mm_trace_end_step(&cpu);
                     }
 
                     if (opt_capstone) {

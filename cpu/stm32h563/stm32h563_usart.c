@@ -50,6 +50,22 @@
 #define ISR_TEACK (1u << 21)
 #define ISR_REACK (1u << 22)
 
+struct usart_snapshot {
+    mm_u32 regs[0x30 / 4];
+    mm_u8 tx_buf[1024];
+    mm_u32 tx_head;
+    mm_u32 tx_tail;
+    mm_u32 rx_pending;
+    mm_u32 rx_byte;
+    mm_u32 stdout_only;
+    mm_u32 enabled;
+    mm_u32 macro_match;
+    mm_u32 watch_macro;
+    mm_u32 rx_trace;
+    mm_u32 secure_only;
+    mm_u32 current_sec;
+};
+
 struct usart_inst {
     mm_u32 base;
     mm_u32 regs[0x30 / 4];
@@ -76,6 +92,118 @@ static mm_bool uart_rx_trace_enabled(void)
 {
     const char *v = getenv("M33MU_UART_RX_TRACE");
     return (v && v[0] != '\0') ? MM_TRUE : MM_FALSE;
+}
+
+static mmio_peek_result_t usart_peek(void *opaque, mm_u32 offset, mm_u32 size_bytes, void *dst)
+{
+    struct usart_inst *u = (struct usart_inst *)opaque;
+    mm_u32 val = 0;
+    mm_u32 cr1;
+    mm_u32 isr;
+    mm_u8 *out = (mm_u8 *)dst;
+    enum mm_sec_state access_sec;
+    mm_bool secure_only;
+
+    if (u == 0 || dst == 0 || size_bytes == 0u || size_bytes > 4u) {
+        return MMIO_PEEK_UNSUPPORTED;
+    }
+    access_sec = mmio_active_sec();
+    secure_only = (u->sec_reg != 0 && ((*(u->sec_reg)) & u->sec_bitmask) != 0u);
+    if (secure_only && access_sec == MM_NONSECURE) {
+        memset(out, 0, size_bytes);
+        return MMIO_PEEK_OK;
+    }
+    if (offset >= sizeof(u->regs)) {
+        return MMIO_PEEK_UNSUPPORTED;
+    }
+
+    if (offset == USART_RDR) {
+        val = u->io.rx_pending ? u->io.rx_byte : 0u;
+    } else if (offset == USART_ISR) {
+        cr1 = u->regs[USART_CR1 / 4];
+        isr = u->regs[USART_ISR / 4];
+        isr |= ISR_TXE;
+        isr |= ISR_TC;
+        if ((cr1 & (CR1_UE | CR1_TE)) == (CR1_UE | CR1_TE)) {
+            isr |= ISR_TEACK;
+        } else {
+            isr &= ~ISR_TEACK;
+        }
+        if ((cr1 & (CR1_UE | CR1_RE)) == (CR1_UE | CR1_RE)) {
+            isr |= ISR_REACK;
+        } else {
+            isr &= ~ISR_REACK;
+        }
+        val = isr;
+    } else {
+        memcpy(&val, (mm_u8 *)u->regs + offset, size_bytes);
+    }
+
+    if (size_bytes == 1u) {
+        out[0] = (mm_u8)(val & 0xffu);
+    } else if (size_bytes == 2u) {
+        out[0] = (mm_u8)(val & 0xffu);
+        out[1] = (mm_u8)((val >> 8) & 0xffu);
+    } else {
+        out[0] = (mm_u8)(val & 0xffu);
+        out[1] = (mm_u8)((val >> 8) & 0xffu);
+        out[2] = (mm_u8)((val >> 16) & 0xffu);
+        out[3] = (mm_u8)((val >> 24) & 0xffu);
+    }
+    return MMIO_PEEK_OK;
+}
+
+static mm_bool usart_save(void *opaque, struct mm_snapshot_writer *w)
+{
+    struct usart_inst *u = (struct usart_inst *)opaque;
+    struct usart_snapshot snap;
+    if (u == 0 || w == 0) {
+        return MM_FALSE;
+    }
+    memset(&snap, 0, sizeof(snap));
+    memcpy(snap.regs, u->regs, sizeof(snap.regs));
+    memcpy(snap.tx_buf, u->io.tx_buf, sizeof(snap.tx_buf));
+    snap.tx_head = (mm_u32)u->io.tx_head;
+    snap.tx_tail = (mm_u32)u->io.tx_tail;
+    snap.rx_pending = u->io.rx_pending ? 1u : 0u;
+    snap.rx_byte = (mm_u32)u->io.rx_byte;
+    snap.stdout_only = u->io.stdout_only ? 1u : 0u;
+    snap.enabled = u->enabled ? 1u : 0u;
+    snap.macro_match = u->macro_match;
+    snap.watch_macro = u->watch_macro ? 1u : 0u;
+    snap.rx_trace = u->rx_trace ? 1u : 0u;
+    snap.secure_only = u->secure_only ? 1u : 0u;
+    snap.current_sec = (mm_u32)u->current_sec;
+    return mm_snapshot_write(w, &snap, (mm_u32)sizeof(snap));
+}
+
+static mm_bool usart_load(void *opaque, struct mm_snapshot_reader *r)
+{
+    struct usart_inst *u = (struct usart_inst *)opaque;
+    struct usart_snapshot snap;
+    if (u == 0 || r == 0) {
+        return MM_FALSE;
+    }
+    if ((r->size - r->offset) < (mm_u32)sizeof(snap)) {
+        return MM_FALSE;
+    }
+    if (!mm_snapshot_read(r, &snap, (mm_u32)sizeof(snap))) {
+        return MM_FALSE;
+    }
+    memcpy(u->regs, snap.regs, sizeof(snap.regs));
+    memcpy(u->io.tx_buf, snap.tx_buf, sizeof(snap.tx_buf));
+    u->io.tx_head = (size_t)(snap.tx_head % (mm_u32)sizeof(u->io.tx_buf));
+    u->io.tx_tail = (size_t)(snap.tx_tail % (mm_u32)sizeof(u->io.tx_buf));
+    u->io.rx_pending = snap.rx_pending ? MM_TRUE : MM_FALSE;
+    u->io.rx_byte = (mm_u8)(snap.rx_byte & 0xffu);
+    u->io.stdout_only = snap.stdout_only ? MM_TRUE : MM_FALSE;
+    u->enabled = snap.enabled ? MM_TRUE : MM_FALSE;
+    u->macro_match = (mm_u8)(snap.macro_match & 0xffu);
+    u->watch_macro = snap.watch_macro ? MM_TRUE : MM_FALSE;
+    u->rx_trace = snap.rx_trace ? MM_TRUE : MM_FALSE;
+    u->secure_only = snap.secure_only ? MM_TRUE : MM_FALSE;
+    u->current_sec = (enum mm_sec_state)snap.current_sec;
+    return MM_TRUE;
 }
 
 static mm_bool clock_apb2_usart1(struct usart_inst *u)
@@ -319,6 +447,7 @@ void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
     for (i = 0; i < usart_count && i < (sizeof(usarts) / sizeof(usarts[0])); ++i) {
         struct usart_inst *u = &usarts[i];
         struct mmio_region reg;
+        memset(&reg, 0, sizeof(reg));
         memset(u, 0, sizeof(*u));
         u->base = bases[i];
         u->regs[USART_ISR / 4] = ISR_TXE; /* idle empty */
@@ -374,8 +503,18 @@ void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
         reg.opaque = u;
         reg.read = usart_read;
         reg.write = usart_write;
+        reg.magic = MMIO_REGION_MAGIC;
+        reg.flags = MMIO_REGION_F_EXT;
+        reg.peek = usart_peek;
+        reg.name = u->label;
+        reg.version = 1u;
+        reg.save = usart_save;
+        reg.load = usart_load;
         mmio_bus_register_region(bus, &reg);
         reg.base = bases[i] + 0x10000000u;
+        reg.name = 0;
+        reg.save = 0;
+        reg.load = 0;
         mmio_bus_register_region(bus, &reg);
     }
 }

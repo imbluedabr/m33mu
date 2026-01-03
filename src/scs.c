@@ -24,6 +24,7 @@
 #include "m33mu/memmap.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 extern void mm_system_request_reset(void);
 
@@ -210,7 +211,8 @@ void mm_scs_set_fpu_present(struct mm_scs *scs, mm_bool present)
     }
 }
 
-static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+static mm_bool scs_read_internal(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out,
+                                 mm_bool clear_countflag, mm_bool noisy)
 {
     struct mm_scs_mmio *ctx = (struct mm_scs_mmio *)opaque;
     struct mm_scs *scs = 0;
@@ -246,20 +248,22 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
         case 0x10: /* SysTick CTRL */
             val = scs->systick_ctrl & 0x7u;
             if (scs->systick_countflag) val |= (1u << 16);
-            scs->systick_countflag = MM_FALSE; /* COUNTFLAG clears on read */
-            if (scs->trace_enabled) {
+            if (clear_countflag) {
+                scs->systick_countflag = MM_FALSE; /* COUNTFLAG clears on read */
+            }
+            if (noisy && scs->trace_enabled) {
                 printf("[SYSTICK_CTRL_READ] ctrl=0x%08lx\n", (unsigned long)val);
             }
             goto done_subword;
         case 0x14:
             val = scs->systick_load;
-            if (scs->trace_enabled) {
+            if (noisy && scs->trace_enabled) {
                 printf("[SYSTICK_LOAD_READ] load=0x%06lx\n", (unsigned long)val);
             }
             goto done_subword;
         case 0x18:
             val = scs->systick_val;
-            if (scs->trace_enabled) {
+            if (noisy && scs->trace_enabled) {
                 printf("[SYSTICK_VAL_READ] val=0x%06lx\n", (unsigned long)val);
             }
             goto done_subword;
@@ -312,10 +316,12 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
             if (nvic != 0 && offset >= 0x400u && offset < 0x500u) {
                 mm_u32 idx = offset - 0x400u;
                 if (size_bytes == 1u) {
-                    printf("[NVIC_IPR_READ] off=0x%03lx idx=%lu -> 0x%02lx\n",
-                           (unsigned long)offset,
-                           (unsigned long)idx,
-                           (unsigned long)((idx < MM_MAX_IRQ) ? nvic->priority[idx] : 0xffu));
+                    if (noisy) {
+                        printf("[NVIC_IPR_READ] off=0x%03lx idx=%lu -> 0x%02lx\n",
+                               (unsigned long)offset,
+                               (unsigned long)idx,
+                               (unsigned long)((idx < MM_MAX_IRQ) ? nvic->priority[idx] : 0xffu));
+                    }
                     *value_out = (idx < MM_MAX_IRQ) ? nvic->priority[idx] : 0xffu;
                     return MM_TRUE;
                 }
@@ -465,6 +471,90 @@ done_subword:
         return MM_TRUE;
     }
     return MM_FALSE;
+}
+
+static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    return scs_read_internal(opaque, offset, size_bytes, value_out, MM_TRUE, MM_TRUE);
+}
+
+static mmio_peek_result_t scs_peek(void *opaque, mm_u32 offset, mm_u32 size_bytes, void *dst)
+{
+    mm_u32 val = 0;
+    mm_u8 *out = (mm_u8 *)dst;
+    if (dst == 0 || size_bytes == 0u || size_bytes > 4u) {
+        return MMIO_PEEK_UNSUPPORTED;
+    }
+    if (!scs_read_internal(opaque, offset, size_bytes, &val, MM_FALSE, MM_FALSE)) {
+        return MMIO_PEEK_UNSUPPORTED;
+    }
+    if (size_bytes == 1u) {
+        out[0] = (mm_u8)(val & 0xffu);
+    } else if (size_bytes == 2u) {
+        out[0] = (mm_u8)(val & 0xffu);
+        out[1] = (mm_u8)((val >> 8) & 0xffu);
+    } else {
+        out[0] = (mm_u8)(val & 0xffu);
+        out[1] = (mm_u8)((val >> 8) & 0xffu);
+        out[2] = (mm_u8)((val >> 16) & 0xffu);
+        out[3] = (mm_u8)((val >> 24) & 0xffu);
+    }
+    return MMIO_PEEK_OK;
+}
+
+static mm_bool scs_save(void *opaque, struct mm_snapshot_writer *w)
+{
+    struct mm_scs_mmio *ctx = (struct mm_scs_mmio *)opaque;
+    struct mm_scs *scs = 0;
+    struct mm_nvic *nvic = 0;
+    if (w == 0) {
+        return MM_FALSE;
+    }
+    scs_select_ctx(ctx, &scs, &nvic);
+    if (scs == 0) {
+        return MM_FALSE;
+    }
+    if (!mm_snapshot_write(w, scs, (mm_u32)sizeof(*scs))) {
+        return MM_FALSE;
+    }
+    if (nvic != 0) {
+        if (!mm_snapshot_write(w, nvic, (mm_u32)sizeof(*nvic))) {
+            return MM_FALSE;
+        }
+    }
+    return MM_TRUE;
+}
+
+static mm_bool scs_load(void *opaque, struct mm_snapshot_reader *r)
+{
+    struct mm_scs_mmio *ctx = (struct mm_scs_mmio *)opaque;
+    struct mm_scs *scs = 0;
+    struct mm_nvic *nvic = 0;
+    mm_u32 remaining;
+    if (r == 0) {
+        return MM_FALSE;
+    }
+    scs_select_ctx(ctx, &scs, &nvic);
+    if (scs == 0) {
+        return MM_FALSE;
+    }
+    remaining = r->size - r->offset;
+    if (remaining < (mm_u32)sizeof(*scs)) {
+        return MM_FALSE;
+    }
+    if (!mm_snapshot_read(r, scs, (mm_u32)sizeof(*scs))) {
+        return MM_FALSE;
+    }
+    remaining = r->size - r->offset;
+    if (nvic != 0) {
+        if (remaining < (mm_u32)sizeof(*nvic)) {
+            return MM_FALSE;
+        }
+        if (!mm_snapshot_read(r, nvic, (mm_u32)sizeof(*nvic))) {
+            return MM_FALSE;
+        }
+    }
+    return MM_TRUE;
 }
 
 static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
@@ -1126,11 +1216,19 @@ mm_bool mm_scs_register_regions(struct mm_scs *scs, struct mmio_bus *bus, mm_u32
 
     /* Convert the SCB base passed by the caller (0xE000ED00) to the SCS page base. */
     page_base_secure = base_secure - SCS_SCB_OFFSET;
+    memset(&reg_s, 0, sizeof(reg_s));
     reg_s.base = page_base_secure;
     reg_s.size = SCS_PAGE_SIZE;
     reg_s.opaque = &ctx_secure;
     reg_s.read = scs_read;
     reg_s.write = scs_write;
+    reg_s.magic = MMIO_REGION_MAGIC;
+    reg_s.flags = MMIO_REGION_F_EXT;
+    reg_s.name = "SCS";
+    reg_s.version = 1u;
+    reg_s.peek = scs_peek;
+    reg_s.save = scs_save;
+    reg_s.load = scs_load;
 
     if (!mmio_bus_register_region(bus, &reg_s)) return MM_FALSE;
 
@@ -1140,11 +1238,15 @@ mm_bool mm_scs_register_regions(struct mm_scs *scs, struct mmio_bus *bus, mm_u32
         ctx_nonsecure.mux = 0;
         ctx_nonsecure.sec = MM_NONSECURE;
         page_base_ns = base_nonsecure - SCS_SCB_OFFSET;
+        memset(&reg_ns, 0, sizeof(reg_ns));
         reg_ns.base = page_base_ns;
         reg_ns.size = SCS_PAGE_SIZE;
         reg_ns.opaque = &ctx_nonsecure;
         reg_ns.read = scs_read;
         reg_ns.write = scs_write;
+        reg_ns.magic = MMIO_REGION_MAGIC;
+        reg_ns.flags = MMIO_REGION_F_EXT;
+        reg_ns.peek = scs_peek;
         if (!mmio_bus_register_region(bus, &reg_ns)) return MM_FALSE;
     }
 
@@ -1170,11 +1272,19 @@ mm_bool mm_scs_register_regions_multi(const struct mm_scs_mux *mux, struct mmio_
     ctx_secure.sec = MM_SECURE;
 
     page_base_secure = base_secure - SCS_SCB_OFFSET;
+    memset(&reg_s, 0, sizeof(reg_s));
     reg_s.base = page_base_secure;
     reg_s.size = SCS_PAGE_SIZE;
     reg_s.opaque = &ctx_secure;
     reg_s.read = scs_read;
     reg_s.write = scs_write;
+    reg_s.magic = MMIO_REGION_MAGIC;
+    reg_s.flags = MMIO_REGION_F_EXT;
+    reg_s.name = "SCS";
+    reg_s.version = 1u;
+    reg_s.peek = scs_peek;
+    reg_s.save = scs_save;
+    reg_s.load = scs_load;
     if (!mmio_bus_register_region(bus, &reg_s)) return MM_FALSE;
 
     if (base_nonsecure != base_secure) {
@@ -1183,11 +1293,15 @@ mm_bool mm_scs_register_regions_multi(const struct mm_scs_mux *mux, struct mmio_
         ctx_nonsecure.mux = mux;
         ctx_nonsecure.sec = MM_NONSECURE;
         page_base_ns = base_nonsecure - SCS_SCB_OFFSET;
+        memset(&reg_ns, 0, sizeof(reg_ns));
         reg_ns.base = page_base_ns;
         reg_ns.size = SCS_PAGE_SIZE;
         reg_ns.opaque = &ctx_nonsecure;
         reg_ns.read = scs_read;
         reg_ns.write = scs_write;
+        reg_ns.magic = MMIO_REGION_MAGIC;
+        reg_ns.flags = MMIO_REGION_F_EXT;
+        reg_ns.peek = scs_peek;
         if (!mmio_bus_register_region(bus, &reg_ns)) return MM_FALSE;
     }
 

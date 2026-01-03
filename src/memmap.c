@@ -20,8 +20,10 @@
  */
 
 #include "m33mu/memmap.h"
+#include "m33mu/trace.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static mm_bool g_memwatch_enabled = MM_FALSE;
 static mm_u32 g_memwatch_addr = 0;
@@ -60,6 +62,85 @@ static mm_bool read_buf_le(const mm_u8 *buf, mm_u32 offset, mm_u32 size, mm_u32 
             v |= ((mm_u32)buf[offset + i]) << (i * 8u);
         }
         *value_out = v;
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static mm_bool ram_offset_for_addr(const struct mm_memmap *map, mm_u32 addr, mm_u32 size, mm_u32 *offset_out);
+
+static mm_bool read_buf_bytes(const mm_u8 *buf, mm_u32 offset, mm_u32 size, mm_u8 *out)
+{
+    if (buf == 0 || out == 0 || size == 0u) {
+        return MM_FALSE;
+    }
+    memcpy(out, buf + offset, size);
+    return MM_TRUE;
+}
+
+static mm_bool memmap_read_old_bytes(const struct mm_memmap *map, enum mm_sec_state sec,
+                                     mm_u32 addr, mm_u32 size, mm_u8 *out, mm_u16 *flags_out)
+{
+    mm_u32 base;
+    mm_u32 size_limit;
+    mm_u32 offset;
+    mm_u32 val;
+
+    if (map == 0 || out == 0 || size == 0u) {
+        return MM_FALSE;
+    }
+    if (flags_out != 0) {
+        *flags_out = 0;
+    }
+    if (map->flash.buffer != 0) {
+        base = map->flash_base_s;
+        size_limit = map->flash_size_s;
+        if (size_limit == 0u && map->flash.length > 0u) {
+            base = map->flash.base;
+            size_limit = (mm_u32)map->flash.length;
+        }
+        if (addr >= base && (addr - base) + size <= size_limit) {
+            offset = addr - base;
+            return read_buf_bytes(map->flash.buffer, offset, size, out);
+        }
+        base = map->flash_base_ns;
+        size_limit = map->flash_size_ns;
+        if (size_limit == 0u && map->flash.length > 0u) {
+            base = map->flash.base;
+            size_limit = (mm_u32)map->flash.length;
+        }
+        if (addr >= base && (addr - base) + size <= size_limit) {
+            offset = addr - base;
+            return read_buf_bytes(map->flash.buffer, offset, size, out);
+        }
+    }
+    if (map->ram.buffer != 0) {
+        if (ram_offset_for_addr(map, addr, size, &offset)) {
+            return read_buf_bytes(map->ram.buffer, offset, size, out);
+        }
+    }
+    mmio_set_active_sec(sec);
+    if (mmio_bus_peek(&map->mmio, addr, size, out) == MMIO_PEEK_OK) {
+        if (flags_out != 0) {
+            *flags_out = MM_TRACE_MEM_MMIO;
+        }
+        return MM_TRUE;
+    }
+    if (mmio_bus_read(&map->mmio, addr, size, &val)) {
+        if (size == 1u) {
+            out[0] = (mm_u8)(val & 0xffu);
+        } else if (size == 2u) {
+            out[0] = (mm_u8)(val & 0xffu);
+            out[1] = (mm_u8)((val >> 8) & 0xffu);
+        } else if (size == 4u) {
+            out[0] = (mm_u8)(val & 0xffu);
+            out[1] = (mm_u8)((val >> 8) & 0xffu);
+            out[2] = (mm_u8)((val >> 16) & 0xffu);
+            out[3] = (mm_u8)((val >> 24) & 0xffu);
+        }
+        if (flags_out != 0) {
+            *flags_out = MM_TRACE_MEM_MMIO;
+        }
         return MM_TRUE;
     }
     return MM_FALSE;
@@ -294,6 +375,8 @@ mm_bool mm_memmap_write(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 add
     mm_u32 size_limit;
     mm_u32 offset;
     mm_u8 *buf;
+    mm_u8 old_bytes[4];
+    mm_u16 trace_flags = 0;
 
     if (map == 0) {
         return MM_FALSE;
@@ -313,6 +396,10 @@ mm_bool mm_memmap_write(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 add
         }
     }
     if (map->flash.buffer != 0 && map->flash_write != 0) {
+        if (mm_trace_step_active() && size <= 4u &&
+            memmap_read_old_bytes(map, sec, addr, size, old_bytes, &trace_flags)) {
+            mm_trace_log_mem_write(addr, size, old_bytes, trace_flags);
+        }
         base = map->flash_base_s;
         size_limit = map->flash_size_s;
         if (size_limit == 0u && map->flash.length > 0u) {
@@ -335,6 +422,10 @@ mm_bool mm_memmap_write(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 add
     /* RAM only writable region for now */
     if (map->ram.buffer != 0) {
         if (ram_offset_for_addr(map, addr, size, &offset)) {
+            if (mm_trace_step_active() && size <= 4u &&
+                memmap_read_old_bytes(map, sec, addr, size, old_bytes, &trace_flags)) {
+                mm_trace_log_mem_write(addr, size, old_bytes, trace_flags);
+            }
             buf = (mm_u8 *)map->ram.buffer;
             if (size == 4u) {
                 buf[offset] = (mm_u8)(value & 0xffu);
@@ -353,6 +444,10 @@ mm_bool mm_memmap_write(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 add
         }
     }
     mmio_set_active_sec(sec);
+    if (mm_trace_step_active() && size <= 4u &&
+        memmap_read_old_bytes(map, sec, addr, size, old_bytes, &trace_flags)) {
+        mm_trace_log_mem_write(addr, size, old_bytes, trace_flags);
+    }
     if (mmio_bus_write(&map->mmio, addr, size, value)) {
         return MM_TRUE;
     }
@@ -465,6 +560,8 @@ mm_bool mm_memmap_read8(const struct mm_memmap *map, enum mm_sec_state sec, mm_u
 mm_bool mm_memmap_write8(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr, mm_u8 value)
 {
     mm_u8 *buf;
+    mm_u8 old_bytes[1];
+    mm_u16 trace_flags = 0;
 
     if (map == 0) {
         return MM_FALSE;
@@ -475,10 +572,18 @@ mm_bool mm_memmap_write8(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 ad
     if (map->ram.buffer != 0) {
         mm_u32 offset = 0;
         if (ram_offset_for_addr(map, addr, 1u, &offset)) {
+            if (mm_trace_step_active() &&
+                memmap_read_old_bytes(map, sec, addr, 1u, old_bytes, &trace_flags)) {
+                mm_trace_log_mem_write(addr, 1u, old_bytes, trace_flags);
+            }
             buf = (mm_u8 *)map->ram.buffer;
             buf[offset] = value;
             return MM_TRUE;
         }
+    }
+    if (mm_trace_step_active() &&
+        memmap_read_old_bytes(map, sec, addr, 1u, old_bytes, &trace_flags)) {
+        mm_trace_log_mem_write(addr, 1u, old_bytes, trace_flags);
     }
     if (mmio_bus_write(&map->mmio, addr, 1u, (mm_u32)value)) {
         return MM_TRUE;

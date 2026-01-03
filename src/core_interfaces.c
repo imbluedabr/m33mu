@@ -25,6 +25,9 @@
 #include "m33mu/chario.h"
 #include "m33mu/gpio.h"
 #include "m33mu/dma.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 static enum mm_sec_state g_mmio_active_sec = MM_SECURE;
 
@@ -43,6 +46,18 @@ void mmio_bus_init(struct mmio_bus *bus, struct mmio_region *region_storage, siz
     bus->regions = region_storage;
     bus->region_count = 0;
     bus->region_capacity = capacity;
+    bus->has_step_hooks = MM_FALSE;
+    if (region_storage != 0 && capacity > 0u) {
+        memset(region_storage, 0, capacity * sizeof(*region_storage));
+    }
+}
+
+void mmio_bus_enable_step_hooks(struct mmio_bus *bus)
+{
+    if (bus == 0) {
+        return;
+    }
+    bus->has_step_hooks = MM_TRUE;
 }
 
 static mm_bool mmio_regions_overlap(mm_u32 abase, mm_u32 asize, mm_u32 bbase, mm_u32 bsize)
@@ -57,6 +72,7 @@ static mm_bool mmio_regions_overlap(mm_u32 abase, mm_u32 asize, mm_u32 bbase, mm
 mm_bool mmio_bus_register_region(struct mmio_bus *bus, const struct mmio_region *region)
 {
     size_t i;
+    struct mmio_region clean;
 
     if (bus->region_count >= bus->region_capacity) {
         return MM_FALSE;
@@ -69,7 +85,20 @@ mm_bool mmio_bus_register_region(struct mmio_bus *bus, const struct mmio_region 
         }
     }
 
-    bus->regions[bus->region_count] = *region;
+    clean = *region;
+    clean = *region;
+    if ((clean.flags & MMIO_REGION_F_EXT) == 0u || clean.magic != MMIO_REGION_MAGIC) {
+        clean.magic = MMIO_REGION_MAGIC;
+        clean.flags = 0;
+        clean.name = 0;
+        clean.version = 0;
+        clean.peek = 0;
+        clean.save = 0;
+        clean.load = 0;
+        clean.begin_step = 0;
+        clean.end_step = 0;
+    }
+    bus->regions[bus->region_count] = clean;
     bus->region_count += 1;
     return MM_TRUE;
 }
@@ -113,6 +142,203 @@ mm_bool mmio_bus_write(const struct mmio_bus *bus, mm_u32 addr, mm_u32 size_byte
 
     offset = addr - region->base;
     return region->write(region->opaque, offset, size_bytes, value);
+}
+
+mmio_peek_result_t mmio_bus_peek(const struct mmio_bus *bus, mm_u32 addr, mm_u32 size_bytes, void *dst)
+{
+    const struct mmio_region *region;
+    mm_u32 offset;
+
+    if (bus == 0 || bus->regions == 0 || bus->region_capacity == 0 ||
+        bus->region_count > bus->region_capacity || !bus->has_step_hooks) {
+        return MMIO_PEEK_UNSUPPORTED;
+    }
+    region = mmio_bus_find(bus, addr);
+    if (region == 0 || region->magic != MMIO_REGION_MAGIC ||
+        (region->flags & MMIO_REGION_F_EXT) == 0u || region->peek == 0) {
+        return MMIO_PEEK_UNSUPPORTED;
+    }
+    offset = addr - region->base;
+    return region->peek(region->opaque, offset, size_bytes, dst);
+}
+
+mm_bool mmio_bus_save(const struct mmio_bus *bus, struct mm_snapshot_writer *w)
+{
+    size_t i;
+    mm_u32 count = 0;
+    if (bus == 0 || w == 0) {
+        return MM_FALSE;
+    }
+    for (i = 0; i < bus->region_count; ++i) {
+        const struct mmio_region *region = &bus->regions[i];
+        if (region->magic == MMIO_REGION_MAGIC &&
+            (region->flags & MMIO_REGION_F_EXT) != 0u &&
+            region->save != 0 && region->name != 0) {
+            count++;
+        }
+    }
+    if (!mm_snapshot_write_u32(w, count)) {
+        return MM_FALSE;
+    }
+    for (i = 0; i < bus->region_count; ++i) {
+        const struct mmio_region *region = &bus->regions[i];
+        mm_u32 name_len;
+        mm_u32 size_offset;
+        if (region->magic != MMIO_REGION_MAGIC ||
+            (region->flags & MMIO_REGION_F_EXT) == 0u ||
+            region->save == 0 || region->name == 0) {
+            continue;
+        }
+        name_len = (mm_u32)strlen(region->name);
+        if (!mm_snapshot_write_u32(w, name_len)) {
+            return MM_FALSE;
+        }
+        if (name_len > 0u && !mm_snapshot_write(w, region->name, name_len)) {
+            return MM_FALSE;
+        }
+        if (!mm_snapshot_write_u32(w, region->version)) {
+            return MM_FALSE;
+        }
+        if (!mm_snapshot_writer_begin_section(w, &size_offset)) {
+            return MM_FALSE;
+        }
+        if (!region->save(region->opaque, w)) {
+            return MM_FALSE;
+        }
+        if (!mm_snapshot_writer_end_section(w, size_offset)) {
+            return MM_FALSE;
+        }
+    }
+    return MM_TRUE;
+}
+
+mm_bool mmio_bus_load(const struct mmio_bus *bus, struct mm_snapshot_reader *r)
+{
+    mm_u32 count = 0;
+    mm_u32 i;
+    if (bus == 0 || r == 0) {
+        return MM_FALSE;
+    }
+    if (!mm_snapshot_read_u32(r, &count)) {
+        return MM_FALSE;
+    }
+    for (i = 0; i < count; ++i) {
+        mm_u32 name_len = 0;
+        mm_u32 version = 0;
+        char *name = 0;
+        struct mm_snapshot_reader section;
+        if (!mm_snapshot_read_u32(r, &name_len)) {
+            return MM_FALSE;
+        }
+        if (name_len > 0u) {
+            name = (char *)malloc(name_len + 1u);
+            if (name == 0) {
+                return MM_FALSE;
+            }
+            if (!mm_snapshot_read(r, name, name_len)) {
+                free(name);
+                return MM_FALSE;
+            }
+            name[name_len] = '\0';
+        }
+        if (!mm_snapshot_read_u32(r, &version)) {
+            free(name);
+            return MM_FALSE;
+        }
+        if (!mm_snapshot_reader_begin_section(r, &section)) {
+            free(name);
+            return MM_FALSE;
+        }
+        {
+            size_t j;
+            mm_bool loaded = MM_FALSE;
+            for (j = 0; j < bus->region_count; ++j) {
+                const struct mmio_region *region = &bus->regions[j];
+                if (region->magic != MMIO_REGION_MAGIC ||
+                    (region->flags & MMIO_REGION_F_EXT) == 0u ||
+                    region->load == 0 || region->name == 0) {
+                    continue;
+                }
+                if (strcmp(region->name, name ? name : "") == 0 && region->version == version) {
+                    if (!region->load(region->opaque, &section)) {
+                        free(name);
+                        return MM_FALSE;
+                    }
+                    loaded = MM_TRUE;
+                    break;
+                }
+            }
+            (void)loaded;
+        }
+        free(name);
+    }
+    return MM_TRUE;
+}
+
+void mmio_bus_begin_step(const struct mmio_bus *bus)
+{
+    size_t i;
+    static mm_bool warned = MM_FALSE;
+    const size_t max_regions = 4096u;
+    if (bus == 0 || bus->regions == 0 || !bus->has_step_hooks) {
+        if (!warned) {
+            fprintf(stderr, "[MMIO] begin_step skipped (bus or regions null)\n");
+            warned = MM_TRUE;
+        }
+        return;
+    }
+    if (bus->region_capacity == 0 || bus->region_capacity > max_regions ||
+        bus->region_count > bus->region_capacity) {
+        if (!warned) {
+            fprintf(stderr, "[MMIO] begin_step skipped (count=%lu cap=%lu regions=%p)\n",
+                    (unsigned long)bus->region_count,
+                    (unsigned long)bus->region_capacity,
+                    (void *)bus->regions);
+            warned = MM_TRUE;
+        }
+        return;
+    }
+    for (i = 0; i < bus->region_count; ++i) {
+        const struct mmio_region *region = &bus->regions[i];
+        if (region->magic == MMIO_REGION_MAGIC &&
+            (region->flags & MMIO_REGION_F_EXT) != 0u &&
+            region->begin_step != 0) {
+            region->begin_step(region->opaque);
+        }
+    }
+}
+
+void mmio_bus_end_step(const struct mmio_bus *bus, const struct mm_undo_sink *sink)
+{
+    size_t i;
+    static mm_bool warned = MM_FALSE;
+    const size_t max_regions = 4096u;
+    if (bus == 0 || sink == 0 || bus->regions == 0 || !bus->has_step_hooks) {
+        if (!warned) {
+            fprintf(stderr, "[MMIO] end_step skipped (bus/sink/regions null)\n");
+            warned = MM_TRUE;
+        }
+        return;
+    }
+    if (bus->region_capacity == 0 || bus->region_capacity > max_regions ||
+        bus->region_count > bus->region_capacity) {
+        if (!warned) {
+            fprintf(stderr, "[MMIO] end_step skipped (count=%lu cap=%lu regions=%p)\n",
+                    (unsigned long)bus->region_count,
+                    (unsigned long)bus->region_capacity,
+                    (void *)bus->regions);
+            warned = MM_TRUE;
+        }
+        return;
+    }
+    for (i = 0; i < bus->region_count; ++i) {
+        const struct mmio_region *region = &bus->regions[i];
+        if (region->magic == MMIO_REGION_MAGIC &&
+            (region->flags & MMIO_REGION_F_EXT) != 0u &&
+            region->end_step != 0) {
+            region->end_step(region->opaque, sink);
+        }
+    }
 }
 
 void mm_irq_line_init(struct mm_irq_line *line, mm_irq_sink_fn sink, void *opaque)

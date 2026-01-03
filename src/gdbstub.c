@@ -166,6 +166,7 @@ void mm_gdb_stub_init(struct mm_gdb_stub *stub)
     stub->alive = MM_TRUE;
     stub->request_reset = MM_FALSE;
     stub->request_quit = MM_FALSE;
+    stub->reverse_exec = MM_FALSE;
     {
         size_t i;
         for (i = 0; i < sizeof(stub->breakpoints) / sizeof(stub->breakpoints[0]); ++i) {
@@ -628,6 +629,11 @@ mm_bool mm_gdb_stub_should_step(const struct mm_gdb_stub *stub)
     return stub->step_pending;
 }
 
+mm_bool mm_gdb_stub_is_reverse(const struct mm_gdb_stub *stub)
+{
+    return stub->reverse_exec;
+}
+
 void mm_gdb_stub_maybe_rearm(struct mm_gdb_stub *stub, struct mm_memmap *map, enum mm_sec_state sec, mm_u32 pc)
 {
     if (stub == 0 || !stub->rearm_valid) {
@@ -771,7 +777,7 @@ void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_
     switch (buf[0]) {
     case 'q':
         if (strncmp(buf, "qSupported", 10) == 0) {
-            gdb_send_packet(stub->client_fd, "PacketSize=3ff;qXfer:features:read+;qXfer:exec-file:read+;swbreak+;hwbreak+");
+            gdb_send_packet(stub->client_fd, "PacketSize=3ff;qXfer:features:read+;qXfer:exec-file:read+;swbreak+;hwbreak+;vContSupported+;ReverseStep+;ReverseContinue+");
         } else if (strncmp(buf, "qRcmd,", 6) == 0) {
             char cmd[256];
             if (hex_decode_bytes(buf + 6, cmd, sizeof(cmd)) == 0) {
@@ -885,6 +891,36 @@ void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_
             gdb_send_packet(stub->client_fd, "");
         }
         break;
+    case 'v':
+        if (strncmp(buf, "vCont?", 6) == 0) {
+            gdb_send_packet(stub->client_fd, "vCont;c;s;bc;bs");
+        } else if (strncmp(buf, "vCont;", 6) == 0) {
+            const char *p = buf + 6;
+            if (strncmp(p, "bc", 2) == 0 || strncmp(p, "r", 1) == 0) {
+                stub->running = MM_TRUE;
+                stub->step_pending = MM_FALSE;
+                stub->reverse_exec = MM_TRUE;
+                printf("[GDB] Reverse continue\n");
+            } else if (strncmp(p, "bs", 2) == 0) {
+                stub->running = MM_TRUE;
+                stub->step_pending = MM_TRUE;
+                stub->reverse_exec = MM_TRUE;
+                printf("[GDB] Reverse step\n");
+            } else if (strncmp(p, "c", 1) == 0) {
+                stub->running = MM_TRUE;
+                stub->step_pending = MM_FALSE;
+                stub->reverse_exec = MM_FALSE;
+                printf("[GDB] Continue\n");
+            } else if (strncmp(p, "s", 1) == 0) {
+                stub->running = MM_TRUE;
+                stub->step_pending = MM_TRUE;
+                stub->reverse_exec = MM_FALSE;
+                printf("[GDB] Step\n");
+            }
+        } else {
+            gdb_send_packet(stub->client_fd, "");
+        }
+        break;
     case '?':
         mm_gdb_stub_notify_stop(stub, 5);
         break;
@@ -969,6 +1005,7 @@ void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_
         }
         stub->running = MM_TRUE;
         stub->step_pending = MM_FALSE;
+        stub->reverse_exec = MM_FALSE;
         printf("[GDB] Continue\n");
     } break;
     case 's': {
@@ -984,8 +1021,39 @@ void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_
         }
         stub->running = MM_TRUE;
         stub->step_pending = MM_TRUE;
+        stub->reverse_exec = MM_FALSE;
         printf("[GDB] Step\n");
     } break;
+    case 'b':
+        if (buf[1] == 'c') {
+            stub->running = MM_TRUE;
+            stub->step_pending = MM_FALSE;
+            stub->reverse_exec = MM_TRUE;
+            printf("[GDB] Reverse continue\n");
+        } else if (buf[1] == 's') {
+            stub->running = MM_TRUE;
+            stub->step_pending = MM_TRUE;
+            stub->reverse_exec = MM_TRUE;
+            printf("[GDB] Reverse step\n");
+        } else {
+            gdb_send_packet(stub->client_fd, "");
+        }
+        break;
+    case 'r':
+        if (buf[1] == 'c') {
+            stub->running = MM_TRUE;
+            stub->step_pending = MM_FALSE;
+            stub->reverse_exec = MM_TRUE;
+            printf("[GDB] Reverse continue\n");
+        } else if (buf[1] == 's') {
+            stub->running = MM_TRUE;
+            stub->step_pending = MM_TRUE;
+            stub->reverse_exec = MM_TRUE;
+            printf("[GDB] Reverse step\n");
+        } else {
+            gdb_send_packet(stub->client_fd, "");
+        }
+        break;
     case 'Z':
         if (buf[1] == '0' || buf[1] == '1') {
             mm_u32 addr = 0;

@@ -36,6 +36,7 @@ struct mm_gdb_stub {
     mm_bool alive;
     mm_bool request_reset;
     mm_bool request_quit;
+    mm_bool reverse_exec;
     struct {
         mm_u32 addr;
         mm_u8 len;
@@ -56,6 +57,7 @@ void mm_gdb_stub_close(struct mm_gdb_stub *stub);
 void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_memmap *map);
 mm_bool mm_gdb_stub_should_run(const struct mm_gdb_stub *stub);
 mm_bool mm_gdb_stub_should_step(const struct mm_gdb_stub *stub);
+mm_bool mm_gdb_stub_is_reverse(const struct mm_gdb_stub *stub);
 mm_bool mm_gdb_stub_breakpoint_hit(const struct mm_gdb_stub *stub, mm_u32 pc);
 void mm_gdb_stub_set_exec_path(struct mm_gdb_stub *stub, const char *path);
 void mm_gdb_stub_maybe_rearm(struct mm_gdb_stub *stub, struct mm_memmap *map, enum mm_sec_state sec, mm_u32 pc);

@@ -24,6 +24,7 @@
 #include "m33mu/exec_helpers.h"
 #include "m33mu/mem.h"
 #include "m33mu/cpu.h"
+#include "m33mu/trace.h"
 #include <stdio.h>
 
 /* Minimal run loop: fetch + decode, execute only NOP/branch-like placeholders. */
@@ -55,12 +56,20 @@ enum mm_step_status mm_step(struct mm_cpu *cpu, const struct mm_mem *mem, struct
 {
     struct mm_fetch_result fetch;
     struct mm_decoded dec;
+    mm_bool trace_started = MM_FALSE;
 
+    if (mm_trace_enabled()) {
+        mm_trace_begin_step(cpu, cpu->r[15] & ~1u);
+        trace_started = MM_TRUE;
+    }
     fetch = mm_fetch_t32(cpu, mem);
     if (out_fetch != 0) {
         *out_fetch = fetch;
     }
     if (fetch.fault) {
+        if (trace_started) {
+            mm_trace_end_step(cpu);
+        }
         return MM_STEP_FAULT;
     }
 
@@ -69,8 +78,17 @@ enum mm_step_status mm_step(struct mm_cpu *cpu, const struct mm_mem *mem, struct
         *out_dec = dec;
     }
     if (dec.undefined) {
+        if (trace_started) {
+            mm_trace_end_step(cpu);
+        }
         return MM_STEP_HALT;
     }
 
-    return execute_decoded(cpu, &dec, &fetch);
+    {
+        enum mm_step_status st = execute_decoded(cpu, &dec, &fetch);
+        if (trace_started) {
+            mm_trace_end_step(cpu);
+        }
+        return st;
+    }
 }

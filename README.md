@@ -109,7 +109,7 @@ Run the included sample firmwares:
   - Build: `make -C tests/firmware/test-tz-bxns-cmse-sau-mpu clean all`
   - Run: `timeout 3s build/m33mu tests/firmware/test-tz-bxns-cmse-sau-mpu/build/secure.bin tests/firmware/test-tz-bxns-cmse-sau-mpu/build/nonsecure.bin:0x2000`
 
-Both tests execute entirely from the in-repo binaries; no downloads required. Use `--gdb` to start the integrated GDB RSP server on port 1234.
+Both tests execute entirely from the in-repo binaries; no downloads required. Use `--gdb` to start the integrated GDB RSP server on port 1234, and `--record` to enable the in-memory execution trace (reverse stepping).
 
 ## Loading multiple images
 `m33mu` can load more than one raw binary image into the emulated flash window. Each image argument can optionally include a `:offset` suffix, interpreted as a byte offset into flash (accepts `0x...`).
@@ -123,7 +123,7 @@ build/m33mu tests/firmware/test-tz-bxns-cmse-sau-mpu/build/secure.bin tests/firm
 ## Command line usage
 
 ```
-build/m33mu [--cpu <cpu>] [--gdb] [--port <n>] [--gdb-symbols <elf>] [--dump] [--tui] [--persist] [--capstone] [--uart-stdout] [--quit-on-faults] [--meminfo] [--no-tz] <image.bin[:offset]> [more images...]
+build/m33mu [--cpu <cpu>] [--gdb] [--port <n>] [--gdb-symbols <elf>] [--dump] [--tui] [--record] [--persist] [--capstone] [--uart-stdout] [--quit-on-faults] [--meminfo] [--no-tz] <image.bin[:offset]> [more images...]
 ```
 
 Options:
@@ -133,6 +133,7 @@ Options:
 - `--gdb-symbols <elf>`: load symbols from the specified ELF (defaults to the first image).
 - `--dump`: print per-instruction decode (`[DUMP] ...`) and selected TrustZone transitions.
 - `--tui`: start the interactive terminal UI.
+- `--record`: enable in-memory execution trace for reverse stepping.
 - `--persist`: write modified flash contents back to the input image files.
 - `--capstone`: enable Capstone-based cross-check logging for decode/execute.
 - `--capstone-verbose`: include operand cross-check details in Capstone logs.
