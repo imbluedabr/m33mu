@@ -28,6 +28,6 @@
 #define NRF5340_TIMER_RESET    mm_nrf5340_timers_reset
 #define NRF5340_TIMER_TICK     mm_nrf5340_timers_tick
 
-#define NRF5340_FLAGS 0u
+#define NRF5340_FLAGS MM_TARGET_FLAG_FPU
 
 #endif /* M33MU_CPU_NRF5340_CONFIG_H */

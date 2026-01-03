@@ -33,6 +33,6 @@
 #define RP2350_TIMER_RESET    mm_rp2350_timers_reset
 #define RP2350_TIMER_TICK     mm_rp2350_timers_tick
 
-#define RP2350_FLAGS 0u
+#define RP2350_FLAGS MM_TARGET_FLAG_FPU
 
 #endif /* M33MU_CPU_RP2350_CONFIG_H */

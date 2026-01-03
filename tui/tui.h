@@ -81,7 +81,10 @@ struct mm_tui {
     char cur_line[512];
     size_t cur_len;
     mm_u32 regs[16];
+    mm_u32 fpu_regs[32];
     mm_u32 xpsr;
+    mm_u32 fpscr;
+    mm_bool fpu_enabled;
     mm_u32 msp_s;
     mm_u32 psp_s;
     mm_u32 msp_ns;
@@ -163,7 +166,7 @@ void mm_tui_set_core_state(struct mm_tui *tui,
                            mm_u8 sec_state,
                            mm_u8 mode,
                            mm_u64 steps);
-void mm_tui_set_registers(struct mm_tui *tui, const struct mm_cpu *cpu);
+void mm_tui_set_registers(struct mm_tui *tui, const struct mm_cpu *cpu, mm_bool fpu_enabled);
 void mm_tui_set_memory_map(struct mm_tui *tui, const struct mm_memmap *map);
 void mm_tui_close_devices(struct mm_tui *tui);
 mm_bool mm_tui_start_thread(struct mm_tui *tui);

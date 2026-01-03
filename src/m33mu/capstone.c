@@ -95,6 +95,14 @@ static int arm_reg_from_mm(mm_u8 reg)
     return ARM_REG_INVALID;
 }
 
+static int arm_vfp_reg_from_mm(mm_u8 reg)
+{
+    if (reg < 32u) {
+        return (int)(ARM_REG_S0 + reg);
+    }
+    return ARM_REG_INVALID;
+}
+
 static mm_u32 thumb_expand_imm12(mm_u32 imm12)
 {
     mm_u32 imm8 = imm12 & 0xffu;
@@ -178,6 +186,14 @@ static void log_reg_mismatch(int idx, int cap_reg, mm_u8 mm_reg)
            idx, mm_name ? mm_name : "?", cap_name ? cap_name : "?");
 }
 
+static void log_vfp_reg_mismatch(int idx, int cap_reg, mm_u8 mm_reg)
+{
+    const char *cap_name = cs_reg_name(g_capstone.handle, cap_reg);
+    const char *mm_name = cs_reg_name(g_capstone.handle, arm_vfp_reg_from_mm(mm_reg));
+    printf("[CAPSTONE] operand %d vfp reg mismatch expected=%s actual=%s\n",
+           idx, mm_name ? mm_name : "?", cap_name ? cap_name : "?");
+}
+
 static void log_imm_mismatch(int idx, long expected, long actual)
 {
     printf("[CAPSTONE] operand %d imm mismatch expected=%ld actual=%ld\n", idx, expected, actual);
@@ -197,6 +213,20 @@ static mm_bool check_reg_operand(const cs_arm_op *op, int idx, mm_u8 mm_reg)
     }
     if (op->reg != expected) {
         log_reg_mismatch(idx, op->reg, mm_reg);
+        return MM_FALSE;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool check_vfp_reg_operand(const cs_arm_op *op, int idx, mm_u8 mm_reg)
+{
+    int expected = arm_vfp_reg_from_mm(mm_reg);
+    if (op->type != ARM_OP_REG) {
+        log_mem_mismatch("type is not REG");
+        return MM_FALSE;
+    }
+    if (op->reg != expected) {
+        log_vfp_reg_mismatch(idx, op->reg, mm_reg);
         return MM_FALSE;
     }
     return MM_TRUE;
@@ -454,6 +484,34 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_BXNS: return dec->kind == MM_OP_BXNS;
         case ARM_INS_BLXNS: return dec->kind == MM_OP_BLXNS;
         case ARM_INS_SG: return dec->kind == MM_OP_SG;
+        case ARM_INS_VADD: return dec->kind == MM_OP_VADD;
+        case ARM_INS_VSUB: return dec->kind == MM_OP_VSUB;
+        case ARM_INS_VMUL: return dec->kind == MM_OP_VMUL;
+        case ARM_INS_VDIV: return dec->kind == MM_OP_VDIV;
+        case ARM_INS_VNEG: return dec->kind == MM_OP_VNEG;
+        case ARM_INS_VABS: return dec->kind == MM_OP_VABS;
+        case ARM_INS_VMLA: return dec->kind == MM_OP_VMLA;
+        case ARM_INS_VMLS: return dec->kind == MM_OP_VMLS;
+        case ARM_INS_VSQRT: return dec->kind == MM_OP_VSQRT;
+        case ARM_INS_VCMP: return dec->kind == MM_OP_VCMP;
+        case ARM_INS_VCMPE: return dec->kind == MM_OP_VCMPE;
+        case ARM_INS_VCVT:
+            return (dec->kind == MM_OP_VCVT_S32_F32 || dec->kind == MM_OP_VCVT_U32_F32 ||
+                    dec->kind == MM_OP_VCVT_F32_S32 || dec->kind == MM_OP_VCVT_F32_U32);
+        case ARM_INS_VCVTR:
+            return (dec->kind == MM_OP_VCVTR_S32_F32 || dec->kind == MM_OP_VCVTR_U32_F32);
+        case ARM_INS_VMOV:
+            return (dec->kind == MM_OP_VMOV_SR || dec->kind == MM_OP_VMOV_RS || dec->kind == MM_OP_VMOV_IMM);
+        case ARM_INS_VMRS: return dec->kind == MM_OP_VMRS;
+        case ARM_INS_VMSR: return dec->kind == MM_OP_VMSR;
+        case ARM_INS_VLDR: return dec->kind == MM_OP_VLDR;
+        case ARM_INS_VSTR: return dec->kind == MM_OP_VSTR;
+        case ARM_INS_VLDMIA:
+        case ARM_INS_VLDMDB:
+            return dec->kind == MM_OP_VLDM;
+        case ARM_INS_VSTMIA:
+        case ARM_INS_VSTMDB:
+            return dec->kind == MM_OP_VSTM;
         default:
             return MM_TRUE;
     }
@@ -474,6 +532,92 @@ static mm_bool cross_check_operands(const struct mm_fetch_result *fetch, const c
     arm = &insn->detail->arm;
 
     switch (insn->id) {
+        case ARM_INS_VADD:
+        case ARM_INS_VSUB:
+        case ARM_INS_VMUL:
+        case ARM_INS_VDIV:
+        case ARM_INS_VMLA:
+        case ARM_INS_VMLS:
+            if (arm->op_count < 3u) {
+                return MM_FALSE;
+            }
+            if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                return MM_FALSE;
+            }
+            if (!check_vfp_reg_operand(&arm->operands[1], 1, dec->rn)) {
+                return MM_FALSE;
+            }
+            return check_vfp_reg_operand(&arm->operands[2], 2, dec->rm);
+        case ARM_INS_VNEG:
+        case ARM_INS_VABS:
+        case ARM_INS_VSQRT:
+            if (arm->op_count < 2u) {
+                return MM_FALSE;
+            }
+            if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                return MM_FALSE;
+            }
+            return check_vfp_reg_operand(&arm->operands[1], 1, dec->rm);
+        case ARM_INS_VCMP:
+        case ARM_INS_VCMPE:
+            if (arm->op_count < 2u) {
+                return MM_FALSE;
+            }
+            if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                return MM_FALSE;
+            }
+            return check_vfp_reg_operand(&arm->operands[1], 1, dec->rm);
+        case ARM_INS_VCVT:
+        case ARM_INS_VCVTR:
+            if (arm->op_count < 2u) {
+                return MM_FALSE;
+            }
+            if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                return MM_FALSE;
+            }
+            return check_vfp_reg_operand(&arm->operands[1], 1, dec->rm);
+        case ARM_INS_VMOV:
+            if (arm->op_count < 2u) {
+                return MM_FALSE;
+            }
+            if (dec->kind == MM_OP_VMOV_IMM) {
+                if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                    return MM_FALSE;
+                }
+                return arm->operands[1].type == ARM_OP_IMM;
+            }
+            if (dec->kind == MM_OP_VMOV_SR) {
+                if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                    return MM_FALSE;
+                }
+                return check_reg_operand(&arm->operands[1], 1, dec->rn);
+            }
+            if (dec->kind == MM_OP_VMOV_RS) {
+                if (!check_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                    return MM_FALSE;
+                }
+                return check_vfp_reg_operand(&arm->operands[1], 1, dec->rn);
+            }
+            return MM_TRUE;
+        case ARM_INS_VLDR:
+        case ARM_INS_VSTR: {
+            long disp;
+            mm_u32 imm = dec->imm & 0x1FFFFFFFu;
+            mm_bool u = (dec->imm & 0x80000000u) != 0u;
+            if (arm->op_count < 2u) {
+                return MM_FALSE;
+            }
+            if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                return MM_FALSE;
+            }
+            disp = u ? (long)imm : -(long)imm;
+            return check_mem_operand(&arm->operands[1], dec->rn, 0xffu, disp);
+        }
+        case ARM_INS_VLDMIA:
+        case ARM_INS_VLDMDB:
+        case ARM_INS_VSTMIA:
+        case ARM_INS_VSTMDB:
+            return MM_TRUE;
         case ARM_INS_MOV:
         case ARM_INS_MOVW:
         case ARM_INS_MOVT:

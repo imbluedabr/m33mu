@@ -31,6 +31,6 @@
 #define MCXW71C_TIMER_RESET    mm_mcxw71c_timers_reset
 #define MCXW71C_TIMER_TICK     mm_mcxw71c_timers_tick
 
-#define MCXW71C_FLAGS 0u
+#define MCXW71C_FLAGS MM_TARGET_FLAG_FPU
 
 #endif /* M33MU_CPU_MCXW71C_CONFIG_H */

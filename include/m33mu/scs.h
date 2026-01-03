@@ -52,6 +52,13 @@ struct mm_scs {
     mm_u32 mmfar;
     mm_u32 bfar;
     mm_u32 afsr;
+    mm_u32 cpacr;
+    mm_u32 fpccr;
+    mm_u32 fpcar;
+    mm_u32 fpdscr;
+    mm_u32 mvfr0;
+    mm_u32 mvfr1;
+    mm_u32 mvfr2;
     /* Minimal MPU model (ARMv8-M Mainline; banked secure/non-secure). */
     mm_u32 mpu_type;
     mm_u32 mpu_ctrl_s;
@@ -90,6 +97,7 @@ struct mm_scs {
     mm_bool pend_sv;
     mm_bool pend_st;
     mm_bool trace_enabled;
+    mm_bool fpu_present;
 };
 
 struct mm_scs_mux {
@@ -100,6 +108,7 @@ struct mm_scs_mux {
 };
 
 void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const);
+void mm_scs_set_fpu_present(struct mm_scs *scs, mm_bool present);
 
 /* Registers MMIO regions for secure and non-secure SCS views. */
 mm_bool mm_scs_register_regions(struct mm_scs *scs, struct mmio_bus *bus, mm_u32 base_secure, mm_u32 base_nonsecure, struct mm_nvic *nvic);

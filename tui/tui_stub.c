@@ -109,10 +109,11 @@ void mm_tui_set_core_state(struct mm_tui *tui,
     (void)steps;
 }
 
-void mm_tui_set_registers(struct mm_tui *tui, const struct mm_cpu *cpu)
+void mm_tui_set_registers(struct mm_tui *tui, const struct mm_cpu *cpu, mm_bool fpu_enabled)
 {
     (void)tui;
     (void)cpu;
+    (void)fpu_enabled;
 }
 
 void mm_tui_set_memory_map(struct mm_tui *tui, const struct mm_memmap *map)

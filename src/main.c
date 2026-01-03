@@ -100,6 +100,11 @@ static int load_file_at(const char *path, mm_u8 *dst, size_t max_len, mm_u32 off
 void mm_system_request_reset(void);
 static void record_bus_fault(struct mm_scs *scs, mm_u32 addr, mm_u32 bfsr_bits);
 static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struct mm_scs *scs, mm_u32 fault_pc, mm_u32 fault_xpsr);
+static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs *scs);
+static mm_bool is_vfp_insn_fast(mm_u32 insn);
+static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
+                                         const struct mm_cpu *cpu,
+                                         const struct mm_scs *scs);
 
 static mm_bool parse_hex_u32(const char *s, mm_u32 *out)
 {
@@ -456,6 +461,7 @@ static mm_bool handle_tui(struct mm_tui *tui,
                           const char *cpu_name,
                           const char *gdb_symbols,
                           struct mm_cpu *cpu,
+                          struct mm_scs *scs,
                           struct mm_memmap *map,
                           mm_u64 cycle_total,
                           mm_u64 *steps_offset,
@@ -490,13 +496,17 @@ static mm_bool handle_tui(struct mm_tui *tui,
     mm_tui_set_capstone(tui, MM_FALSE, MM_FALSE);
 #endif
     if (cpu != 0 && steps_latched != 0) {
+        mm_bool fpu_enabled = MM_FALSE;
+        if (scs != 0) {
+            fpu_enabled = fpu_access_allowed(cpu, scs);
+        }
         mm_tui_set_core_state(tui,
                               cpu->r[15],
                               mm_cpu_get_active_sp(cpu),
                               (mm_u8)cpu->sec_state,
                               (mm_u8)cpu->mode,
                               *steps_latched);
-        mm_tui_set_registers(tui, cpu);
+        mm_tui_set_registers(tui, cpu, fpu_enabled);
     }
     if (cpu_name != 0) {
         mm_tui_set_cpu_name(tui, cpu_name);
@@ -595,6 +605,10 @@ static mm_bool handle_tui(struct mm_tui *tui,
 
 static mm_bool parse_u32(const char *s, mm_u32 *out);
 static mm_bool parse_usb_spec(const char *spec, int *port_out);
+static mm_bool is_vfp_insn_fast(mm_u32 insn);
+static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
+                                         const struct mm_cpu *cpu,
+                                         const struct mm_scs *scs);
 static void host_sync_if_needed(mm_u64 vcycles,
                                 mm_u64 *vcycles_last_sync,
                                 mm_u64 host0_ns,
@@ -701,6 +715,82 @@ static mm_bool parse_usb_spec(const char *spec, int *port_out)
     }
     *port_out = (int)port;
     return MM_TRUE;
+}
+
+static mm_bool is_vfp_insn_fast(mm_u32 insn)
+{
+    if ((insn & 0xff000f00u) == 0xed000a00u) {
+        return MM_TRUE; /* VLDR/VSTR */
+    }
+    if ((insn & 0xffdc9ff9u) == 0xec900a00u || (insn & 0xffdc9ff9u) == 0xec800a00u) {
+        return MM_TRUE; /* VLDM/VSTM */
+    }
+    if ((insn & 0xffe00f7fu) == 0xee000a10u) {
+        return MM_TRUE; /* VMOV core<->S */
+    }
+    if ((insn & 0xffffefffu) == 0xeef10a10u || (insn & 0xffffefffu) == 0xeee10a10u) {
+        return MM_TRUE; /* VMRS/VMSR */
+    }
+    if ((insn & 0xffb8efffu) == 0xeeb00a00u) {
+        return MM_TRUE; /* VMOV (imm) */
+    }
+    if ((insn & 0xffb00f50u) == 0xee300a00u ||
+        (insn & 0xffb00f50u) == 0xee300a40u ||
+        (insn & 0xffb00f50u) == 0xee200a00u ||
+        (insn & 0xffb00f50u) == 0xee800a00u ||
+        (insn & 0xffb00f50u) == 0xee000a00u ||
+        (insn & 0xffb00f50u) == 0xee000a40u) {
+        return MM_TRUE; /* VADD/VSUB/VMUL/VDIV/VMLA/VMLS */
+    }
+    if ((insn & 0xffbf0fd0u) == 0xeeb10a40u || /* VNEG */
+        (insn & 0xffbf0fd0u) == 0xeeb00ac0u || /* VABS */
+        (insn & 0xffbf0fd0u) == 0xeeb40a40u || /* VCMP */
+        (insn & 0xffbf0fd0u) == 0xeeb40ac0u || /* VCMPE */
+        (insn & 0xffbf0fd0u) == 0xeebd0ac0u || /* VCVT S32,F32 */
+        (insn & 0xffbf0fd0u) == 0xeebd0a40u || /* VCVTR S32,F32 */
+        (insn & 0xffbf0fd0u) == 0xeebc0ac0u || /* VCVT U32,F32 */
+        (insn & 0xffbf0fd0u) == 0xeebc0a40u || /* VCVTR U32,F32 */
+        (insn & 0xffbf0fd0u) == 0xeeb80ac0u || /* VCVT F32,S32 */
+        (insn & 0xffbf0fd0u) == 0xeeb80a40u || /* VCVT F32,U32 */
+        (insn & 0xffbf0fd0u) == 0xeeb10ac0u) { /* VSQRT */
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
+                                         const struct mm_cpu *cpu,
+                                         const struct mm_scs *scs)
+{
+    struct mm_decoded d;
+    if (fetch == 0) {
+        d.kind = MM_OP_UNDEFINED;
+        d.cond = MM_COND_AL;
+        d.rd = 0;
+        d.rn = 0;
+        d.rm = 0;
+        d.ra = 0;
+        d.imm = 0;
+        d.len = 0;
+        d.raw = 0;
+        d.undefined = MM_TRUE;
+        return d;
+    }
+    if (fetch->len == 4u && cpu != 0 && scs != 0 &&
+        !fpu_access_allowed(cpu, scs) && is_vfp_insn_fast(fetch->insn)) {
+        d.kind = MM_OP_UNDEFINED;
+        d.cond = MM_COND_AL;
+        d.rd = 0;
+        d.rn = 0;
+        d.rm = 0;
+        d.ra = 0;
+        d.imm = 0;
+        d.len = fetch->len;
+        d.raw = fetch->insn;
+        d.undefined = MM_TRUE;
+        return d;
+    }
+    return mm_decode_t32(fetch);
 }
 
 static volatile mm_bool g_system_reset_pending = MM_FALSE;
@@ -832,7 +922,38 @@ static mm_bool allow_system_reset(const struct mm_target_cfg *cfg, const char *c
     return MM_TRUE;
 }
 
-static mm_u32 exc_return_encode(enum mm_sec_state sec, mm_bool use_psp, mm_bool to_thread)
+#define FP_STACK_WORDS 18u
+#define FP_STACK_BYTES (FP_STACK_WORDS * 4u)
+#define CPACR_CP10_SHIFT 20u
+#define CPACR_CP11_SHIFT 22u
+
+static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs *scs)
+{
+    mm_u32 cp10;
+    mm_u32 cp11;
+    if (cpu == 0 || scs == 0 || !scs->fpu_present) {
+        return MM_FALSE;
+    }
+    cp10 = (scs->cpacr >> CPACR_CP10_SHIFT) & 0x3u;
+    cp11 = (scs->cpacr >> CPACR_CP11_SHIFT) & 0x3u;
+    if (cp10 == 0u || cp11 == 0u) {
+        return MM_FALSE;
+    }
+    if (!mm_cpu_get_privileged(cpu) && (cp10 != 3u || cp11 != 3u)) {
+        return MM_FALSE;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool fpu_stack_active(const struct mm_cpu *cpu, const struct mm_scs *scs)
+{
+    if (!fpu_access_allowed(cpu, scs)) {
+        return MM_FALSE;
+    }
+    return cpu->fp_active ? MM_TRUE : MM_FALSE;
+}
+
+static mm_u32 exc_return_encode(enum mm_sec_state sec, mm_bool use_psp, mm_bool to_thread, mm_bool basic_frame)
 {
     /* EXC_RETURN encodings (Armv8-M, DDI0553):
      *  bits[31:24] = 0xFF, bits[23:7] = RES1
@@ -850,7 +971,9 @@ static mm_u32 exc_return_encode(enum mm_sec_state sec, mm_bool use_psp, mm_bool 
         base |= 1u;        /* ES=Secure */
     }
     base |= (1u << 5);     /* DCRS */
-    base |= (1u << 4);     /* FType */
+    if (basic_frame) {
+        base |= (1u << 4); /* FType */
+    }
     if (to_thread) {
         base |= (1u << 3);
         if (use_psp) {
@@ -874,8 +997,9 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     mm_u32 psp_ns_val;
     mm_u32 control_s_val;
     mm_u32 control_ns_val;
+    mm_u32 fp_base_sp;
+    mm_u32 fp_reserved;
     int i;
-    (void)scs;
 
     info = mm_exc_return_decode(exc_ret);
     if (!info.valid) {
@@ -979,6 +1103,32 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     (void)msp_s_val; (void)msp_ns_val; (void)psp_s_val; (void)psp_ns_val;
     (void)control_s_val; (void)control_ns_val;
 
+    fp_base_sp = sp;
+    if (!info.basic_frame) {
+        for (i = 0; i < 16; ++i) {
+            if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4u), 4u, &cpu->s[i])) {
+                record_bus_fault(scs, sp + (mm_u32)(i * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
+            }
+        }
+        if (!mm_memmap_read(map, info.target_sec, sp + (16u * 4u), 4u, &cpu->fpscr)) {
+            record_bus_fault(scs, sp + (16u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+            return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
+        }
+        if (!mm_memmap_read(map, info.target_sec, sp + (17u * 4u), 4u, &fp_reserved)) {
+            record_bus_fault(scs, sp + (17u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+            return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
+        }
+        (void)fp_reserved;
+        scs->fpcar = fp_base_sp;
+        sp += FP_STACK_BYTES;
+        cpu->fp_active = MM_TRUE;
+        if (info.target_sec == MM_NONSECURE) {
+            cpu->control_ns |= (1u << 2);
+        } else {
+            cpu->control_s |= (1u << 2);
+        }
+    }
     for (i = 0; i < 8; ++i) {
         if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4), 4u, &frame[i])) {
             record_bus_fault(scs, sp + (mm_u32)(i * 4), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
@@ -1275,7 +1425,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             }
             return MM_TRUE;
         }
-        d = mm_decode_t32(&f);
+        d = decode_t32_fast(&f, cpu, scs);
         mm_memmap_set_last_pc(f.pc_fetch);
         if (d.undefined) {
             if (!raise_usage_fault(cpu, map, scs, f.pc_fetch, cpu->xpsr, (1u << 16))) {
@@ -1427,6 +1577,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     mm_u32 sp;
     mm_u32 exc_ret_val;
     mm_bool use_psp_entry;
+    mm_bool fp_stack;
     enum mm_mode pre_mode;
     mm_u32 frame[8];
     enum mm_sec_state sec;
@@ -1484,7 +1635,8 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
 
     pre_mode = cpu->mode;
     use_psp_entry = (pre_mode == MM_THREAD) && (((sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s) & 0x2u);
-    exc_ret_val = exc_return_encode(sec, use_psp_entry, pre_mode == MM_THREAD);
+    fp_stack = fpu_stack_active(cpu, scs);
+    exc_ret_val = exc_return_encode(sec, use_psp_entry, pre_mode == MM_THREAD, fp_stack ? MM_FALSE : MM_TRUE);
 
     sp = use_psp_entry ? ((sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s)
                        : ((sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s);
@@ -1496,6 +1648,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     }
     {
         mm_u32 sp_frame = sp - 32u;
+        mm_u32 sp_fp = sp_frame;
         for (i = 0; i < 8; ++i) {
             if (!mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
                 printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
@@ -1503,7 +1656,29 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
                 return MM_FALSE;
             }
         }
-        sp = sp_frame;
+        if (fp_stack) {
+            sp_fp = sp_frame - FP_STACK_BYTES;
+            for (i = 0; i < 16; ++i) {
+                if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
+                    printf("HardFault: FP stacking failed at 0x%08lx\n",
+                           (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
+                    record_bus_fault(scs, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    return MM_FALSE;
+                }
+            }
+            if (!mm_memmap_write(map, sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
+                record_bus_fault(scs, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                return MM_FALSE;
+            }
+            if (!mm_memmap_write(map, sec, sp_fp + (17u * 4u), 4u, 0u)) {
+                record_bus_fault(scs, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                return MM_FALSE;
+            }
+            scs->fpcar = sp_fp;
+            sp = sp_fp;
+        } else {
+            sp = sp_frame;
+        }
     }
     if (use_psp_entry) {
         if (sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
@@ -1657,6 +1832,7 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     mm_u32 frame[8];
     mm_bool use_psp_entry;
     mm_u32 exc_ret_val;
+    mm_bool fp_stack;
     int i;
     enum mm_sec_state sec;
 
@@ -1712,7 +1888,8 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     (void)psp_ns_val;
     (void)control_s_val;
     (void)control_ns_val;
-    exc_ret_val = exc_return_encode(sec, use_psp_entry, cpu->mode == MM_THREAD);
+    fp_stack = fpu_stack_active(cpu, scs);
+    exc_ret_val = exc_return_encode(sec, use_psp_entry, cpu->mode == MM_THREAD, fp_stack ? MM_FALSE : MM_TRUE);
     printf("[USGFLT] enter sec=%d mode=%d use_psp=%d active_sp=0x%08lx MSP_S=0x%08lx MSP_NS=0x%08lx PSP_S=0x%08lx PSP_NS=0x%08lx CONTROL_S=0x%08lx CONTROL_NS=0x%08lx fault_pc=0x%08lx xpsr=0x%08lx handler=0x%08lx exc_ret=0x%08lx\n",
            (int)sec,
            (int)cpu->mode,
@@ -1765,6 +1942,7 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     }
     {
         mm_u32 sp_frame = sp - 32u;
+        mm_u32 sp_fp = sp_frame;
         for (i = 0; i < 8; ++i) {
             mm_bool ok = mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i]);
             if (!ok) {
@@ -1774,7 +1952,26 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
                 return MM_FALSE;
             }
         }
-        sp = sp_frame;
+        if (fp_stack) {
+            sp_fp = sp_frame - FP_STACK_BYTES;
+            for (i = 0; i < 16; ++i) {
+                if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
+                    printf("HardFault: FP stacking failed at 0x%08lx\n",
+                           (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
+                    return MM_FALSE;
+                }
+            }
+            if (!mm_memmap_write(map, sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
+                return MM_FALSE;
+            }
+            if (!mm_memmap_write(map, sec, sp_fp + (17u * 4u), 4u, 0u)) {
+                return MM_FALSE;
+            }
+            scs->fpcar = sp_fp;
+            sp = sp_fp;
+        } else {
+            sp = sp_frame;
+        }
     }
     if (use_psp_entry) {
         if (sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
@@ -1824,6 +2021,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     mm_u32 frame[8];
     enum mm_sec_state sec;
     mm_bool use_psp_entry;
+    mm_bool fp_stack;
     enum mm_mode pre_mode;
     mm_u32 exc_ret_val;
     mm_bool tail_chain = MM_FALSE;
@@ -1888,12 +2086,13 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     frame[6] = return_pc | 1u;
     frame[7] = xpsr_in | 0x01000000u; /* preserve full xPSR/IT/flags/IPSR; ensure T */
 
+    fp_stack = (!tail_chain) && fpu_stack_active(cpu, scs);
     if (pre_mode == MM_HANDLER) {
         use_psp_entry = MM_FALSE;
-        exc_ret_val = exc_return_encode(sec, MM_FALSE, MM_FALSE);
+        exc_ret_val = exc_return_encode(sec, MM_FALSE, MM_FALSE, fp_stack ? MM_FALSE : MM_TRUE);
     } else {
         use_psp_entry = (((sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s) & 0x2u) != 0u;
-        exc_ret_val = tail_chain ? cpu->r[14] : exc_return_encode(sec, use_psp_entry, MM_TRUE);
+        exc_ret_val = tail_chain ? cpu->r[14] : exc_return_encode(sec, use_psp_entry, MM_TRUE, fp_stack ? MM_FALSE : MM_TRUE);
     }
 
     sp = use_psp_entry ? ((sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s)
@@ -1959,6 +2158,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     if (!tail_chain) {
         {
             mm_u32 sp_frame = sp - 32u;
+            mm_u32 sp_fp = sp_frame;
             for (i = 0; i < 8; ++i) {
                 if (!mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
                     printf("HardFault: stacking failed at 0x%08lx\n",
@@ -1967,7 +2167,29 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
                     return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
                 }
             }
-            sp = sp_frame;
+            if (fp_stack) {
+                sp_fp = sp_frame - FP_STACK_BYTES;
+                for (i = 0; i < 16; ++i) {
+                    if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
+                        printf("HardFault: FP stacking failed at 0x%08lx\n",
+                               (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
+                        record_bus_fault(scs, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                        return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
+                    }
+                }
+                if (!mm_memmap_write(map, sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
+                    record_bus_fault(scs, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
+                }
+                if (!mm_memmap_write(map, sec, sp_fp + (17u * 4u), 4u, 0u)) {
+                    record_bus_fault(scs, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
+                }
+                scs->fpcar = sp_fp;
+                sp = sp_fp;
+            } else {
+                sp = sp_frame;
+            }
         }
         if (use_psp_entry) {
             if (sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
@@ -2519,8 +2741,11 @@ int main(int argc, char **argv)
             mm_timer_init(&cfg, &map.mmio, &nvic);
 
             mm_scs_init(&scs, 0x410fc241u);
+            mm_scs_set_fpu_present(&scs, (cfg.flags & MM_TARGET_FLAG_FPU) != 0u);
+            fprintf(stderr, "[FPU] %s\n", scs.fpu_present ? "Enabled" : "Disabled");
             if (cfg.core_count > 1u) {
                 mm_scs_init(&scs1, 0x410fc241u);
+                mm_scs_set_fpu_present(&scs1, (cfg.flags & MM_TARGET_FLAG_FPU) != 0u);
                 scs_mux.scs[0] = &scs;
                 scs_mux.scs[1] = &scs1;
                 scs_mux.nvic[0] = &nvic;
@@ -2611,7 +2836,10 @@ int main(int argc, char **argv)
                 mm_u32 boot_offset_local = opt_boot_offset ? boot_offset
                     : default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
                 for (i = 0; i < 16; ++i) cpu.r[i] = 0;
+                for (i = 0; i < 32; ++i) cpu.s[i] = 0;
                 cpu.xpsr = 0;
+                cpu.fpscr = 0;
+                cpu.fp_active = MM_FALSE;
                 cpu.sec_state = MM_SECURE;
                 cpu.mode = MM_THREAD;
                 cpu.priv_s = MM_FALSE;
@@ -2636,7 +2864,10 @@ int main(int argc, char **argv)
                 cpu.event_reg = MM_FALSE;
                 if (cfg.core_count > 1u) {
                     for (i = 0; i < 16; ++i) cpu1.r[i] = 0;
+                    for (i = 0; i < 32; ++i) cpu1.s[i] = 0;
                     cpu1.xpsr = 0;
+                    cpu1.fpscr = 0;
+                    cpu1.fp_active = MM_FALSE;
                     cpu1.sec_state = MM_SECURE;
                     cpu1.mode = MM_THREAD;
                     cpu1.priv_s = MM_FALSE;
@@ -2819,7 +3050,7 @@ int main(int argc, char **argv)
                 if (opt_tui) {
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                              &tui_steps_offset, &tui_steps_latched);
-                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                         done = MM_TRUE;
                         continue;
                     }
@@ -2884,7 +3115,7 @@ int main(int argc, char **argv)
                     mm_usbdev_poll();
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                              &tui_steps_offset, &tui_steps_latched);
-                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                         done = MM_TRUE;
                         continue;
                     }
@@ -2985,7 +3216,7 @@ int main(int argc, char **argv)
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                                      &tui_steps_offset, &tui_steps_latched);
-                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                                 done = MM_TRUE;
                                 continue;
                             }
@@ -3019,7 +3250,7 @@ int main(int argc, char **argv)
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                                      &tui_steps_offset, &tui_steps_latched);
-                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                                 done = MM_TRUE;
                                 continue;
                             }
@@ -3119,7 +3350,7 @@ handle_pending:
                         }
                         continue;
                     }
-                    d = mm_decode_t32(&f);
+                    d = decode_t32_fast(&f, &cpu, &scs);
                     mm_memmap_set_last_pc(f.pc_fetch);
                     if (opt_strcmp_trace) {
                         mm_u32 pc = f.pc_fetch | 1u;
@@ -3304,7 +3535,7 @@ handle_pending:
                     mm_usbdev_poll();
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                              &tui_steps_offset, &tui_steps_latched);
-                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                         done = MM_TRUE;
                         continue;
                     }

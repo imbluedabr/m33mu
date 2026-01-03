@@ -963,6 +963,32 @@ static void tui_draw(struct mm_tui *tui)
             tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
             line++;
         }
+        if (tui->fpu_enabled) {
+            if (line < log_h) {
+                line++;
+            }
+            if (line < log_h) {
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "FPU Registers:");
+                line++;
+            }
+            if (line < log_h) {
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "==============");
+                line++;
+            }
+            if (line < log_h) {
+                snprintf(buf, sizeof(buf), "fpscr 0x%08lx", (unsigned long)tui->fpscr);
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+                line++;
+            }
+            for (i = 0; i < 16 && line < log_h; ++i, ++line) {
+                snprintf(buf, sizeof(buf), "s%-2d 0x%08lx", i, (unsigned long)tui->fpu_regs[i]);
+                tui_draw_text(inner_x, log_y + line, inner_x + col - 1, console_fg, console_bg, buf);
+                if (col < log_w) {
+                    snprintf(buf, sizeof(buf), "s%-2d 0x%08lx", i + 16, (unsigned long)tui->fpu_regs[i + 16]);
+                    tui_draw_text(inner_x + col, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+                }
+            }
+        }
         if (line < log_h) {
             snprintf(buf, sizeof(buf), "msp_s 0x%08lx  psp_s 0x%08lx",
                      (unsigned long)tui->msp_s, (unsigned long)tui->psp_s);
@@ -1520,14 +1546,19 @@ void mm_tui_set_core_state(struct mm_tui *tui,
     tui->core_steps = steps;
 }
 
-void mm_tui_set_registers(struct mm_tui *tui, const struct mm_cpu *cpu)
+void mm_tui_set_registers(struct mm_tui *tui, const struct mm_cpu *cpu, mm_bool fpu_enabled)
 {
     int i;
     if (tui == 0 || cpu == 0) return;
     for (i = 0; i < 16; ++i) {
         tui->regs[i] = cpu->r[i];
     }
+    for (i = 0; i < 32; ++i) {
+        tui->fpu_regs[i] = cpu->s[i];
+    }
     tui->xpsr = cpu->xpsr;
+    tui->fpscr = cpu->fpscr;
+    tui->fpu_enabled = fpu_enabled ? MM_TRUE : MM_FALSE;
     tui->msp_s = cpu->msp_s;
     tui->psp_s = cpu->psp_s;
     tui->msp_ns = cpu->msp_ns;

@@ -36,6 +36,8 @@ struct mm_scs_mmio {
 
 #define SCS_PAGE_SIZE 0x1000u
 #define SCS_SCB_OFFSET 0x0D00u /* SCB window starts at 0xE000ED00 inside SCS page */
+#define MVFR0_FPV5_SP_D16 0x10110021u
+#define MVFR1_FPV5_SP_D16 0x11000011u
 
 static mm_bool g_meminfo_enabled = MM_FALSE;
 static int g_sau_layout = 0; /* 0=unknown, 1=new(CTRL@0xD0/RNR@0xD4), 2=legacy(RNR@0xD8) */
@@ -136,6 +138,14 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
     scs->mmfar = 0;
     scs->bfar = 0;
     scs->afsr = 0;
+    scs->cpacr = 0;
+    scs->fpccr = 0;
+    scs->fpcar = 0;
+    scs->fpdscr = 0;
+    scs->mvfr0 = 0;
+    scs->mvfr1 = 0;
+    scs->mvfr2 = 0;
+    scs->fpu_present = MM_FALSE;
     scs->mpu_type = 0x00000800u; /* 8 regions, ARMv8‑M MPU */
     scs->mpu_ctrl_s = 0;
     scs->mpu_ctrl_ns = 0;
@@ -173,6 +183,27 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
     {
         const char *env = getenv("M33MU_SYSTICK_TRACE");
         scs->trace_enabled = (env != 0 && env[0] != '\0') ? MM_TRUE : MM_FALSE;
+    }
+}
+
+void mm_scs_set_fpu_present(struct mm_scs *scs, mm_bool present)
+{
+    if (scs == 0) {
+        return;
+    }
+    scs->fpu_present = present ? MM_TRUE : MM_FALSE;
+    if (scs->fpu_present) {
+        scs->mvfr0 = MVFR0_FPV5_SP_D16;
+        scs->mvfr1 = MVFR1_FPV5_SP_D16;
+        scs->mvfr2 = 0;
+    } else {
+        scs->cpacr = 0;
+        scs->fpccr = 0;
+        scs->fpcar = 0;
+        scs->fpdscr = 0;
+        scs->mvfr0 = 0;
+        scs->mvfr1 = 0;
+        scs->mvfr2 = 0;
     }
 }
 
@@ -326,6 +357,13 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
     case 0x34: val = scs->mmfar; break; /* MMFAR */
     case 0x38: val = scs->bfar; break; /* BFAR */
     case 0x3C: val = scs->afsr; break; /* AFSR */
+    case 0x88: val = scs->fpu_present ? scs->cpacr : 0u; break; /* CPACR */
+    case 0x234: val = scs->fpu_present ? scs->fpccr : 0u; break; /* FPCCR */
+    case 0x238: val = scs->fpu_present ? scs->fpcar : 0u; break; /* FPCAR */
+    case 0x23C: val = scs->fpu_present ? scs->fpdscr : 0u; break; /* FPDSCR */
+    case 0x240: val = scs->fpu_present ? scs->mvfr0 : 0u; break; /* MVFR0 */
+    case 0x244: val = scs->fpu_present ? scs->mvfr1 : 0u; break; /* MVFR1 */
+    case 0x248: val = scs->fpu_present ? scs->mvfr2 : 0u; break; /* MVFR2 */
     /* MPU (ARMv8‑M Mainline) */
     case 0x90: val = scs->mpu_type; break; /* MPU_TYPE */
     case 0x94: val = (eff_sec == MM_NONSECURE) ? scs->mpu_ctrl_ns : scs->mpu_ctrl_s; break; /* MPU_CTRL */
@@ -695,6 +733,20 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     case 0x34: scs->mmfar = value; return MM_TRUE;
     case 0x38: scs->bfar = value; return MM_TRUE;
     case 0x3C: scs->afsr = value; return MM_TRUE;
+    case 0x88:
+        if (scs->fpu_present) {
+            scs->cpacr = value & 0x00F00000u;
+        }
+        return MM_TRUE;
+    case 0x234:
+        if (scs->fpu_present) scs->fpccr = value;
+        return MM_TRUE;
+    case 0x238:
+        if (scs->fpu_present) scs->fpcar = value;
+        return MM_TRUE;
+    case 0x23C:
+        if (scs->fpu_present) scs->fpdscr = value;
+        return MM_TRUE;
     /* MPU (banked) */
     case 0x94:
         if (eff_sec == MM_NONSECURE) scs->mpu_ctrl_ns = value;

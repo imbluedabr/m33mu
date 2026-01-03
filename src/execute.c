@@ -30,6 +30,7 @@
 #include "rp2350/rp2350_coproc.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 static int g_stack_trace = -1;
 static int g_splim_trace = -1;
@@ -105,7 +106,110 @@ static mm_bool svc_stack_trace_enabled(void)
 
 #define CCR_DIV_0_TRP (1u << 4)
 #define UFSR_DIVBYZERO (1u << 25)
+#define UFSR_NOCP (1u << 19)
 #define UFSR_STKOF (1u << 20)
+
+#define CPACR_CP10_SHIFT 20u
+#define CPACR_CP11_SHIFT 22u
+
+static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs *scs)
+{
+    mm_u32 cp10;
+    mm_u32 cp11;
+    if (cpu == 0 || scs == 0 || !scs->fpu_present) {
+        return MM_FALSE;
+    }
+    cp10 = (scs->cpacr >> CPACR_CP10_SHIFT) & 0x3u;
+    cp11 = (scs->cpacr >> CPACR_CP11_SHIFT) & 0x3u;
+    if (cp10 == 0u || cp11 == 0u) {
+        return MM_FALSE;
+    }
+    if (!mm_cpu_get_privileged(cpu) && (cp10 != 3u || cp11 != 3u)) {
+        return MM_FALSE;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool fpu_check_or_fault(struct mm_execute_ctx *ctx)
+{
+    if (ctx == 0 || ctx->cpu == 0 || ctx->scs == 0) {
+        return MM_FALSE;
+    }
+    if (fpu_access_allowed(ctx->cpu, ctx->scs)) {
+        return MM_TRUE;
+    }
+    if (ctx->raise_usage_fault != 0 && ctx->fetch != 0) {
+        if (!ctx->raise_usage_fault(ctx->cpu, ctx->map, ctx->scs,
+                                    ctx->fetch->pc_fetch, ctx->cpu->xpsr, UFSR_NOCP)) {
+            if (ctx->done) {
+                *ctx->done = MM_TRUE;
+            }
+        }
+    }
+    if (ctx->done) {
+        *ctx->done = MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static void fpu_mark_active(struct mm_cpu *cpu)
+{
+    if (cpu == 0) {
+        return;
+    }
+    cpu->fp_active = MM_TRUE;
+    if (cpu->sec_state == MM_NONSECURE) {
+        cpu->control_ns |= (1u << 2);
+    } else {
+        cpu->control_s |= (1u << 2);
+    }
+}
+
+static float fpu_u32_to_f32(mm_u32 v)
+{
+    union { mm_u32 u; float f; } u;
+    u.u = v;
+    return u.f;
+}
+
+static mm_u32 fpu_f32_to_u32(float f)
+{
+    union { mm_u32 u; float f; } u;
+    u.f = f;
+    return u.u;
+}
+
+static mm_u32 fpu_vmov_imm_to_u32(mm_u8 imm8)
+{
+    mm_u32 sign = (mm_u32)((imm8 >> 7) & 0x1u);
+    mm_u32 exp = (mm_u32)(((imm8 >> 4) & 0x7u) ^ 0x4u);
+    mm_u32 mant = (mm_u32)(imm8 & 0x0fu) << 19;
+    exp = exp + 124u;
+    return (sign << 31) | (exp << 23) | mant;
+}
+
+static void fpu_set_fpscr_nzcv(struct mm_cpu *cpu, mm_u32 nzcv)
+{
+    if (cpu == 0) {
+        return;
+    }
+    cpu->fpscr = (cpu->fpscr & ~0xF0000000u) | (nzcv & 0xF0000000u);
+}
+
+static void fpu_cmp_update_flags(struct mm_cpu *cpu, float a, float b)
+{
+    mm_u32 nzcv = 0;
+    if (a != a || b != b) {
+        nzcv = 0x30000000u; /* V=1, C=1 for unordered */
+    } else if (a == b) {
+        nzcv = 0x40000000u | 0x20000000u; /* Z=1, C=1 */
+    } else if (a < b) {
+        nzcv = 0x80000000u; /* N=1 */
+    } else {
+        nzcv = 0x20000000u; /* C=1 */
+    }
+    fpu_set_fpscr_nzcv(cpu, nzcv);
+}
 
 static mm_bool exec_set_active_sp(struct mm_cpu *cpu,
                                   struct mm_memmap *map,
@@ -410,6 +514,407 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             }
                                             (void)peek;
                                          } break;
+                        case MM_OP_VADD: {
+                                             float a;
+                                             float b;
+                                             if (!fpu_check_or_fault(ctx)) {
+                                                 return MM_EXEC_CONTINUE;
+                                             }
+                                             if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                 EXEC_RAISE_UNDEF();
+                                             }
+                                             a = fpu_u32_to_f32(cpu.s[d.rn]);
+                                             b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             cpu.s[d.rd] = fpu_f32_to_u32(a + b);
+                                             fpu_mark_active(&cpu);
+                                             break;
+                                         }
+                        case MM_OP_VSUB: {
+                                             float a;
+                                             float b;
+                                             if (!fpu_check_or_fault(ctx)) {
+                                                 return MM_EXEC_CONTINUE;
+                                             }
+                                             if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                 EXEC_RAISE_UNDEF();
+                                             }
+                                             a = fpu_u32_to_f32(cpu.s[d.rn]);
+                                             b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             cpu.s[d.rd] = fpu_f32_to_u32(a - b);
+                                             fpu_mark_active(&cpu);
+                                             break;
+                                         }
+                        case MM_OP_VMUL: {
+                                             float a;
+                                             float b;
+                                             if (!fpu_check_or_fault(ctx)) {
+                                                 return MM_EXEC_CONTINUE;
+                                             }
+                                             if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                 EXEC_RAISE_UNDEF();
+                                             }
+                                             a = fpu_u32_to_f32(cpu.s[d.rn]);
+                                             b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             cpu.s[d.rd] = fpu_f32_to_u32(a * b);
+                                             fpu_mark_active(&cpu);
+                                             break;
+                                         }
+                        case MM_OP_VDIV: {
+                                             float a;
+                                             float b;
+                                             if (!fpu_check_or_fault(ctx)) {
+                                                 return MM_EXEC_CONTINUE;
+                                             }
+                                             if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                 EXEC_RAISE_UNDEF();
+                                             }
+                                             a = fpu_u32_to_f32(cpu.s[d.rn]);
+                                             b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             cpu.s[d.rd] = fpu_f32_to_u32(a / b);
+                                             fpu_mark_active(&cpu);
+                                             break;
+                                         }
+                        case MM_OP_VNEG: {
+                                             float a;
+                                             if (!fpu_check_or_fault(ctx)) {
+                                                 return MM_EXEC_CONTINUE;
+                                             }
+                                             if (d.rd >= 32u || d.rm >= 32u) {
+                                                 EXEC_RAISE_UNDEF();
+                                             }
+                                             a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             cpu.s[d.rd] = fpu_f32_to_u32(-a);
+                                             fpu_mark_active(&cpu);
+                                             break;
+                                         }
+                        case MM_OP_VABS: {
+                                             float a;
+                                             if (!fpu_check_or_fault(ctx)) {
+                                                 return MM_EXEC_CONTINUE;
+                                             }
+                                             if (d.rd >= 32u || d.rm >= 32u) {
+                                                 EXEC_RAISE_UNDEF();
+                                             }
+                                             a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             if (a < 0.0f) a = -a;
+                                             cpu.s[d.rd] = fpu_f32_to_u32(a);
+                                             fpu_mark_active(&cpu);
+                                             break;
+                                         }
+                        case MM_OP_VMLA: {
+                                             float acc;
+                                             float a;
+                                             float b;
+                                             if (!fpu_check_or_fault(ctx)) {
+                                                 return MM_EXEC_CONTINUE;
+                                             }
+                                             if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                 EXEC_RAISE_UNDEF();
+                                             }
+                                             acc = fpu_u32_to_f32(cpu.s[d.rd]);
+                                             a = fpu_u32_to_f32(cpu.s[d.rn]);
+                                             b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             cpu.s[d.rd] = fpu_f32_to_u32(acc + (a * b));
+                                             fpu_mark_active(&cpu);
+                                             break;
+                                         }
+                        case MM_OP_VMLS: {
+                                             float acc;
+                                             float a;
+                                             float b;
+                                             if (!fpu_check_or_fault(ctx)) {
+                                                 return MM_EXEC_CONTINUE;
+                                             }
+                                             if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                 EXEC_RAISE_UNDEF();
+                                             }
+                                             acc = fpu_u32_to_f32(cpu.s[d.rd]);
+                                             a = fpu_u32_to_f32(cpu.s[d.rn]);
+                                             b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             cpu.s[d.rd] = fpu_f32_to_u32(acc - (a * b));
+                                             fpu_mark_active(&cpu);
+                                             break;
+                                         }
+                        case MM_OP_VCMP:
+                        case MM_OP_VCMPE: {
+                                             float a;
+                                             float b;
+                                             if (!fpu_check_or_fault(ctx)) {
+                                                 return MM_EXEC_CONTINUE;
+                                             }
+                                             if (d.rd >= 32u || d.rm >= 32u) {
+                                                 EXEC_RAISE_UNDEF();
+                                             }
+                                             a = fpu_u32_to_f32(cpu.s[d.rd]);
+                                             b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             fpu_cmp_update_flags(&cpu, a, b);
+                                             fpu_mark_active(&cpu);
+                                             break;
+                                         }
+                        case MM_OP_VCVT_S32_F32: {
+                                                     float a;
+                                                     if (!fpu_check_or_fault(ctx)) {
+                                                         return MM_EXEC_CONTINUE;
+                                                     }
+                                                     if (d.rd >= 32u || d.rm >= 32u) {
+                                                         EXEC_RAISE_UNDEF();
+                                                     }
+                                                     a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                                     cpu.s[d.rd] = (mm_u32)((mm_i32)a);
+                                                     fpu_mark_active(&cpu);
+                                                     break;
+                                                 }
+                        case MM_OP_VCVTR_S32_F32: {
+                                                      float a;
+                                                      float rounded;
+                                                      if (!fpu_check_or_fault(ctx)) {
+                                                          return MM_EXEC_CONTINUE;
+                                                      }
+                                                      if (d.rd >= 32u || d.rm >= 32u) {
+                                                          EXEC_RAISE_UNDEF();
+                                                      }
+                                                      a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                                      rounded = (a >= 0.0f) ? (a + 0.5f) : (a - 0.5f);
+                                                      cpu.s[d.rd] = (mm_u32)((mm_i32)rounded);
+                                                      fpu_mark_active(&cpu);
+                                                      break;
+                                                  }
+                        case MM_OP_VCVT_U32_F32: {
+                                                     float a;
+                                                     if (!fpu_check_or_fault(ctx)) {
+                                                         return MM_EXEC_CONTINUE;
+                                                     }
+                                                     if (d.rd >= 32u || d.rm >= 32u) {
+                                                         EXEC_RAISE_UNDEF();
+                                                     }
+                                                     a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                                     cpu.s[d.rd] = (mm_u32)a;
+                                                     fpu_mark_active(&cpu);
+                                                     break;
+                                                 }
+                        case MM_OP_VCVTR_U32_F32: {
+                                                      float a;
+                                                      float rounded;
+                                                      if (!fpu_check_or_fault(ctx)) {
+                                                          return MM_EXEC_CONTINUE;
+                                                      }
+                                                      if (d.rd >= 32u || d.rm >= 32u) {
+                                                          EXEC_RAISE_UNDEF();
+                                                      }
+                                                      a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                                      rounded = (a >= 0.0f) ? (a + 0.5f) : (a - 0.5f);
+                                                      cpu.s[d.rd] = (mm_u32)rounded;
+                                                      fpu_mark_active(&cpu);
+                                                      break;
+                                                  }
+                        case MM_OP_VCVT_F32_S32: {
+                                                     mm_i32 a;
+                                                     if (!fpu_check_or_fault(ctx)) {
+                                                         return MM_EXEC_CONTINUE;
+                                                     }
+                                                     if (d.rd >= 32u || d.rm >= 32u) {
+                                                         EXEC_RAISE_UNDEF();
+                                                     }
+                                                     a = (mm_i32)cpu.s[d.rm];
+                                                     cpu.s[d.rd] = fpu_f32_to_u32((float)a);
+                                                     fpu_mark_active(&cpu);
+                                                     break;
+                                                 }
+                        case MM_OP_VCVT_F32_U32: {
+                                                     mm_u32 a;
+                                                     if (!fpu_check_or_fault(ctx)) {
+                                                         return MM_EXEC_CONTINUE;
+                                                     }
+                                                     if (d.rd >= 32u || d.rm >= 32u) {
+                                                         EXEC_RAISE_UNDEF();
+                                                     }
+                                                     a = cpu.s[d.rm];
+                                                     cpu.s[d.rd] = fpu_f32_to_u32((float)a);
+                                                     fpu_mark_active(&cpu);
+                                                     break;
+                                                 }
+                        case MM_OP_VSQRT: {
+                                              float a;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u || d.rm >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                              cpu.s[d.rd] = fpu_f32_to_u32(sqrtf(a));
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VMOV_SR: {
+                                                 if (!fpu_check_or_fault(ctx)) {
+                                                     return MM_EXEC_CONTINUE;
+                                                 }
+                                                 if (d.rd >= 32u || d.rn >= 15u) {
+                                                     EXEC_RAISE_UNDEF();
+                                                 }
+                                                 cpu.s[d.rd] = cpu.r[d.rn];
+                                                 fpu_mark_active(&cpu);
+                                                 break;
+                                             }
+                        case MM_OP_VMOV_RS: {
+                                                 if (!fpu_check_or_fault(ctx)) {
+                                                     return MM_EXEC_CONTINUE;
+                                                 }
+                                                 if (d.rn >= 32u || d.rd >= 15u) {
+                                                     EXEC_RAISE_UNDEF();
+                                                 }
+                                                 cpu.r[d.rd] = cpu.s[d.rn];
+                                                 fpu_mark_active(&cpu);
+                                                 break;
+                                             }
+                        case MM_OP_VMOV_IMM: {
+                                                  if (!fpu_check_or_fault(ctx)) {
+                                                      return MM_EXEC_CONTINUE;
+                                                  }
+                                                  if (d.rd >= 32u) {
+                                                      EXEC_RAISE_UNDEF();
+                                                  }
+                                                  cpu.s[d.rd] = fpu_vmov_imm_to_u32((mm_u8)(d.imm & 0xffu));
+                                                  fpu_mark_active(&cpu);
+                                                  break;
+                                              }
+                        case MM_OP_VMRS: {
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd == 15u) {
+                                                  cpu.xpsr = mm_xpsr_write_nzcvq(cpu.xpsr, cpu.fpscr);
+                                              } else {
+                                                  cpu.r[d.rd] = cpu.fpscr;
+                                              }
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VMSR: {
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd == 15u) {
+                                                  cpu.fpscr = (cpu.fpscr & ~0xF0000000u) | (cpu.xpsr & 0xF0000000u);
+                                              } else {
+                                                  cpu.fpscr = cpu.r[d.rd];
+                                              }
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VLDR: {
+                                              mm_u32 base = (d.rn == 15u) ? ((f.pc_fetch + 4u) & ~3u) : cpu.r[d.rn];
+                                              mm_u32 offset = d.imm & 0x1FFFFFFFu;
+                                              mm_bool u = (d.imm & 0x80000000u) != 0u;
+                                              mm_bool w = (d.imm & 0x40000000u) != 0u;
+                                              mm_bool p = (d.imm & 0x20000000u) != 0u;
+                                              mm_u32 addr = base;
+                                              mm_u32 val = 0u;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              if (p) {
+                                                  addr = u ? (base + offset) : (base - offset);
+                                              }
+                                              if (!mm_memmap_read(&map, cpu.sec_state, addr, 4u, &val)) {
+                                                  if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              cpu.s[d.rd] = val;
+                                              if ((w || !p) && d.rn != 15u) {
+                                                  base = u ? (base + offset) : (base - offset);
+                                                  if (d.rn == 13u) {
+                                                      EXEC_SET_SP(base);
+                                                  } else {
+                                                      cpu.r[d.rn] = base;
+                                                  }
+                                              }
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VSTR: {
+                                              mm_u32 base = (d.rn == 15u) ? ((f.pc_fetch + 4u) & ~3u) : cpu.r[d.rn];
+                                              mm_u32 offset = d.imm & 0x1FFFFFFFu;
+                                              mm_bool u = (d.imm & 0x80000000u) != 0u;
+                                              mm_bool w = (d.imm & 0x40000000u) != 0u;
+                                              mm_bool p = (d.imm & 0x20000000u) != 0u;
+                                              mm_u32 addr = base;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              if (p) {
+                                                  addr = u ? (base + offset) : (base - offset);
+                                              }
+                                              if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.s[d.rd])) {
+                                                  if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if ((w || !p) && d.rn != 15u) {
+                                                  base = u ? (base + offset) : (base - offset);
+                                                  if (d.rn == 13u) {
+                                                      EXEC_SET_SP(base);
+                                                  } else {
+                                                      cpu.r[d.rn] = base;
+                                                  }
+                                              }
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VLDM:
+                        case MM_OP_VSTM: {
+                                              mm_u32 base = cpu.r[d.rn];
+                                              mm_u32 count = d.imm & 0xffu;
+                                              mm_bool u = (d.imm & 0x80000000u) != 0u;
+                                              mm_bool w = (d.imm & 0x40000000u) != 0u;
+                                              mm_bool p = (d.imm & 0x20000000u) != 0u;
+                                              mm_bool load = (d.kind == MM_OP_VLDM);
+                                              mm_u32 addr;
+                                              mm_u32 ireg;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (count == 0u || d.rd >= 32u || (d.rd + count) > 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              if (u) {
+                                                  addr = p ? (base + 4u) : base;
+                                              } else {
+                                                  addr = p ? (base - (count * 4u)) : (base - ((count - 1u) * 4u));
+                                              }
+                                              for (ireg = 0; ireg < count; ++ireg) {
+                                                  mm_u32 cur_addr = addr + (ireg * 4u);
+                                                  if (load) {
+                                                      mm_u32 val = 0u;
+                                                      if (!mm_memmap_read(&map, cpu.sec_state, cur_addr, 4u, &val)) {
+                                                          if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr, MM_FALSE)) done = MM_TRUE;
+                                                          return MM_EXEC_CONTINUE;
+                                                      }
+                                                      cpu.s[d.rd + ireg] = val;
+                                                  } else {
+                                                      if (!mm_memmap_write(&map, cpu.sec_state, cur_addr, 4u, cpu.s[d.rd + ireg])) {
+                                                          if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr, MM_FALSE)) done = MM_TRUE;
+                                                          return MM_EXEC_CONTINUE;
+                                                      }
+                                                  }
+                                              }
+                                              if (w) {
+                                                  mm_u32 new_base = u ? (base + (count * 4u)) : (base - (count * 4u));
+                                                  if (d.rn == 13u) {
+                                                      EXEC_SET_SP(new_base);
+                                                  } else {
+                                                      cpu.r[d.rn] = new_base;
+                                                  }
+                                              }
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
                         case MM_OP_B_UNCOND:
                         case MM_OP_B_UNCOND_WIDE:
                             {

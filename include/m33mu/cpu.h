@@ -46,6 +46,10 @@ struct mm_cpu {
     mm_u32 r[16];  /* r0-r15 */
     mm_u32 xpsr;
 
+    mm_u32 s[32];  /* s0-s31 */
+    mm_u32 fpscr;
+    mm_bool fp_active;
+
     enum mm_sec_state sec_state;
     enum mm_mode mode;
     mm_bool priv_s;   /* 0 = privileged, 1 = unprivileged (CONTROL.nPRIV) */
