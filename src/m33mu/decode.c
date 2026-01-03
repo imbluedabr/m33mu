@@ -80,6 +80,11 @@ MM_INLINE mm_u8 vfp_sd(mm_u32 insn)
     return (mm_u8)((((insn >> 12) & 0x0fu) << 1) | ((insn >> 22) & 0x1u));
 }
 
+MM_INLINE mm_u8 vfp_dd(mm_u32 insn)
+{
+    return (mm_u8)(((insn >> 12) & 0x0fu) | (((insn >> 22) & 0x1u) << 4));
+}
+
 MM_INLINE mm_u8 vfp_sn(mm_u32 insn)
 {
     return (mm_u8)((((insn >> 16) & 0x0fu) << 1) | ((insn >> 7) & 0x1u));
@@ -1951,6 +1956,22 @@ static struct mm_decoded decode_32(mm_u32 insn)
         d.rd = (mm_u8)((insn >> 12) & 0x0fu);
         d.rm = (mm_u8)(insn & 0x0fu);
         d.imm = imm2; /* LSL #imm2 */
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* VFP double load/store (VLDR/VSTR). */
+    if ((insn & 0xff000f00u) == 0xed000b00u) {
+        mm_bool load = ((insn >> 20) & 1u) != 0u;
+        mm_bool u = ((insn >> 23) & 1u) != 0u;
+        mm_bool p = ((insn >> 24) & 1u) != 0u;
+        mm_bool w = ((insn >> 21) & 1u) != 0u;
+        mm_u32 imm = (insn & 0xffu) << 2;
+        d.kind = load ? MM_OP_VLDR : MM_OP_VSTR;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rd = vfp_dd(insn);
+        d.imm = imm | (u ? 0x80000000u : 0u) | (w ? 0x40000000u : 0u) |
+            (p ? 0x20000000u : 0u) | MM_VFP_LS_DOUBLE;
         d.undefined = MM_FALSE;
         return d;
     }

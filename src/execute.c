@@ -112,6 +112,14 @@ static mm_bool svc_stack_trace_enabled(void)
 #define CPACR_CP10_SHIFT 20u
 #define CPACR_CP11_SHIFT 22u
 
+static mm_u32 cpacr_for_sec(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    if (scs == 0) {
+        return 0u;
+    }
+    return (sec == MM_NONSECURE) ? scs->cpacr_ns : scs->cpacr_s;
+}
+
 static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs *scs)
 {
     mm_u32 cp10;
@@ -119,12 +127,49 @@ static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs 
     if (cpu == 0 || scs == 0 || !scs->fpu_present) {
         return MM_FALSE;
     }
-    cp10 = (scs->cpacr >> CPACR_CP10_SHIFT) & 0x3u;
-    cp11 = (scs->cpacr >> CPACR_CP11_SHIFT) & 0x3u;
+    if (cpu->sec_state == MM_NONSECURE) {
+        if (((scs->nsacr >> 10) & 0x1u) == 0u || ((scs->nsacr >> 11) & 0x1u) == 0u) {
+            return MM_FALSE;
+        }
+    }
+    cp10 = (cpacr_for_sec(scs, cpu->sec_state) >> CPACR_CP10_SHIFT) & 0x3u;
+    cp11 = (cpacr_for_sec(scs, cpu->sec_state) >> CPACR_CP11_SHIFT) & 0x3u;
     if (cp10 == 0u || cp11 == 0u) {
         return MM_FALSE;
     }
     if (!mm_cpu_get_privileged(cpu) && (cp10 != 3u || cp11 != 3u)) {
+        return MM_FALSE;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool dcp_access_allowed(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u8 coproc)
+{
+    mm_u32 field;
+    mm_u32 cpacr;
+    if (cpu == 0) {
+        return MM_FALSE;
+    }
+    if (!mm_rp2350_active()) {
+        return MM_FALSE;
+    }
+    if (coproc == 5u && cpu->sec_state != MM_SECURE) {
+        return MM_FALSE;
+    }
+    if (scs == 0) {
+        return MM_FALSE;
+    }
+    if (cpu->sec_state == MM_NONSECURE) {
+        if (((scs->nsacr >> coproc) & 0x1u) == 0u) {
+            return MM_FALSE;
+        }
+    }
+    cpacr = cpacr_for_sec(scs, cpu->sec_state);
+    field = (cpacr >> ((mm_u32)coproc * 2u)) & 0x3u;
+    if (field == 0u) {
+        return MM_FALSE;
+    }
+    if (!mm_cpu_get_privileged(cpu) && field != 3u) {
         return MM_FALSE;
     }
     return MM_TRUE;
@@ -444,9 +489,16 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                        }
                                                    }
                                                } else if (coproc == 4u || coproc == 5u) {
+                                                   if (!dcp_access_allowed(&cpu, &scs, coproc)) {
+                                                       if (!raise_usage_fault(&cpu, &map, &scs,
+                                                                               f.pc_fetch, cpu.xpsr, UFSR_NOCP)) {
+                                                           done = MM_TRUE;
+                                                       }
+                                                       return MM_EXEC_CONTINUE;
+                                                   }
                                                    if (opcode != 0u) {
                                                        mm_u32 val = 0u;
-                                                       if (!mm_rp2350_dcp_mrc(op1, d.rn, d.rm, op2, peek != 0u, &val)) {
+                                                       if (!mm_rp2350_dcp_mrc(cpu.sec_state, coproc, op1, d.rn, d.rm, op2, peek != 0u, &val)) {
                                                            val = 0u;
                                                        }
                                                        if (d.rd == 15u) {
@@ -471,8 +523,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_u8 op1 = (mm_u8)(d.imm & 0x0fu);
                                                 mm_u8 opcode = (mm_u8)((d.imm >> 8) & 0x1u); /* 0=MCRR, 1=MRRC */
                                                 mm_u8 peek = (mm_u8)((d.imm >> 9) & 0x1u);
-                                                mm_u8 coproc = d.ra;
-                                                if (coproc == 0u) {
+                                               mm_u8 coproc = d.ra;
+                                               if (coproc == 0u) {
                                                     if (opcode == 0u) {
                                                         (void)mm_rp2350_cp0_mcrr(cpu.sec_state, op1, d.rm, cpu.r[d.rd], cpu.r[d.rn]);
                                                     } else {
@@ -485,13 +537,20 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                         cpu.r[d.rd] = lo;
                                                         cpu.r[d.rn] = hi;
                                                     }
-                                                } else if (coproc == 4u || coproc == 5u) {
+                                               } else if (coproc == 4u || coproc == 5u) {
+                                                    if (!dcp_access_allowed(&cpu, &scs, coproc)) {
+                                                        if (!raise_usage_fault(&cpu, &map, &scs,
+                                                                               f.pc_fetch, cpu.xpsr, UFSR_NOCP)) {
+                                                            done = MM_TRUE;
+                                                        }
+                                                        return MM_EXEC_CONTINUE;
+                                                    }
                                                     if (opcode == 0u) {
-                                                        (void)mm_rp2350_dcp_mcrr(op1, d.rm, cpu.r[d.rd], cpu.r[d.rn]);
+                                                        (void)mm_rp2350_dcp_mcrr(cpu.sec_state, coproc, op1, d.rm, cpu.r[d.rd], cpu.r[d.rn]);
                                                     } else {
                                                         mm_u32 lo = 0u;
                                                         mm_u32 hi = 0u;
-                                                        if (!mm_rp2350_dcp_mrrc(op1, d.rm, &lo, &hi)) {
+                                                        if (!mm_rp2350_dcp_mrrc(cpu.sec_state, coproc, op1, d.rm, peek != 0u, &lo, &hi)) {
                                                             lo = 0u;
                                                             hi = 0u;
                                                         }
@@ -510,7 +569,14 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_u8 peek = (mm_u8)((d.imm >> 7) & 0x1u);
                                             mm_u8 coproc = d.ra;
                                             if (coproc == 4u || coproc == 5u) {
-                                                (void)mm_rp2350_dcp_cdp(op1, op2, d.rd, d.rn, d.rm);
+                                                if (!dcp_access_allowed(&cpu, &scs, coproc)) {
+                                                    if (!raise_usage_fault(&cpu, &map, &scs,
+                                                                           f.pc_fetch, cpu.xpsr, UFSR_NOCP)) {
+                                                        done = MM_TRUE;
+                                                    }
+                                                    return MM_EXEC_CONTINUE;
+                                                }
+                                                (void)mm_rp2350_dcp_cdp(cpu.sec_state, coproc, op1, op2, d.rd, d.rn, d.rm);
                                             }
                                             (void)peek;
                                          } break;
@@ -805,26 +871,39 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                           }
                         case MM_OP_VLDR: {
                                               mm_u32 base = (d.rn == 15u) ? ((f.pc_fetch + 4u) & ~3u) : cpu.r[d.rn];
-                                              mm_u32 offset = d.imm & 0x1FFFFFFFu;
+                                              mm_u32 offset = d.imm & 0x0FFFFFFFu;
                                               mm_bool u = (d.imm & 0x80000000u) != 0u;
                                               mm_bool w = (d.imm & 0x40000000u) != 0u;
                                               mm_bool p = (d.imm & 0x20000000u) != 0u;
+                                              mm_bool is_double = (d.imm & MM_VFP_LS_DOUBLE) != 0u;
                                               mm_u32 addr = base;
                                               mm_u32 val = 0u;
                                               if (!fpu_check_or_fault(ctx)) {
                                                   return MM_EXEC_CONTINUE;
                                               }
-                                              if (d.rd >= 32u) {
+                                              if ((!is_double && d.rd >= 32u) || (is_double && d.rd >= 16u)) {
                                                   EXEC_RAISE_UNDEF();
                                               }
                                               if (p) {
                                                   addr = u ? (base + offset) : (base - offset);
                                               }
-                                              if (!mm_memmap_read(&map, cpu.sec_state, addr, 4u, &val)) {
-                                                  if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
-                                                  return MM_EXEC_CONTINUE;
+                                              if (is_double) {
+                                                  mm_u32 hi = 0u;
+                                                  mm_u32 s_idx = (mm_u32)d.rd * 2u;
+                                                  if (!mm_memmap_read(&map, cpu.sec_state, addr, 4u, &val) ||
+                                                      !mm_memmap_read(&map, cpu.sec_state, addr + 4u, 4u, &hi)) {
+                                                      if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                      return MM_EXEC_CONTINUE;
+                                                  }
+                                                  cpu.s[s_idx] = val;
+                                                  cpu.s[s_idx + 1u] = hi;
+                                              } else {
+                                                  if (!mm_memmap_read(&map, cpu.sec_state, addr, 4u, &val)) {
+                                                      if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                      return MM_EXEC_CONTINUE;
+                                                  }
+                                                  cpu.s[d.rd] = val;
                                               }
-                                              cpu.s[d.rd] = val;
                                               if ((w || !p) && d.rn != 15u) {
                                                   base = u ? (base + offset) : (base - offset);
                                                   if (d.rn == 13u) {
@@ -838,23 +917,33 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                           }
                         case MM_OP_VSTR: {
                                               mm_u32 base = (d.rn == 15u) ? ((f.pc_fetch + 4u) & ~3u) : cpu.r[d.rn];
-                                              mm_u32 offset = d.imm & 0x1FFFFFFFu;
+                                              mm_u32 offset = d.imm & 0x0FFFFFFFu;
                                               mm_bool u = (d.imm & 0x80000000u) != 0u;
                                               mm_bool w = (d.imm & 0x40000000u) != 0u;
                                               mm_bool p = (d.imm & 0x20000000u) != 0u;
+                                              mm_bool is_double = (d.imm & MM_VFP_LS_DOUBLE) != 0u;
                                               mm_u32 addr = base;
                                               if (!fpu_check_or_fault(ctx)) {
                                                   return MM_EXEC_CONTINUE;
                                               }
-                                              if (d.rd >= 32u) {
+                                              if ((!is_double && d.rd >= 32u) || (is_double && d.rd >= 16u)) {
                                                   EXEC_RAISE_UNDEF();
                                               }
                                               if (p) {
                                                   addr = u ? (base + offset) : (base - offset);
                                               }
-                                              if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.s[d.rd])) {
-                                                  if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
-                                                  return MM_EXEC_CONTINUE;
+                                              if (is_double) {
+                                                  mm_u32 s_idx = (mm_u32)d.rd * 2u;
+                                                  if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.s[s_idx]) ||
+                                                      !mm_memmap_write(&map, cpu.sec_state, addr + 4u, 4u, cpu.s[s_idx + 1u])) {
+                                                      if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                      return MM_EXEC_CONTINUE;
+                                                  }
+                                              } else {
+                                                  if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.s[d.rd])) {
+                                                      if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                      return MM_EXEC_CONTINUE;
+                                                  }
                                               }
                                               if ((w || !p) && d.rn != 15u) {
                                                   base = u ? (base + offset) : (base - offset);

@@ -103,6 +103,14 @@ static int arm_vfp_reg_from_mm(mm_u8 reg)
     return ARM_REG_INVALID;
 }
 
+static int arm_vfp_d_reg_from_mm(mm_u8 reg)
+{
+    if (reg < 16u) {
+        return (int)(ARM_REG_D0 + reg);
+    }
+    return ARM_REG_INVALID;
+}
+
 static mm_u32 thumb_expand_imm12(mm_u32 imm12)
 {
     mm_u32 imm8 = imm12 & 0xffu;
@@ -194,6 +202,14 @@ static void log_vfp_reg_mismatch(int idx, int cap_reg, mm_u8 mm_reg)
            idx, mm_name ? mm_name : "?", cap_name ? cap_name : "?");
 }
 
+static void log_vfp_d_reg_mismatch(int idx, int cap_reg, mm_u8 mm_reg)
+{
+    const char *cap_name = cs_reg_name(g_capstone.handle, cap_reg);
+    const char *mm_name = cs_reg_name(g_capstone.handle, arm_vfp_d_reg_from_mm(mm_reg));
+    printf("[CAPSTONE] operand %d vfp reg mismatch expected=%s actual=%s\n",
+           idx, mm_name ? mm_name : "?", cap_name ? cap_name : "?");
+}
+
 static void log_imm_mismatch(int idx, long expected, long actual)
 {
     printf("[CAPSTONE] operand %d imm mismatch expected=%ld actual=%ld\n", idx, expected, actual);
@@ -227,6 +243,20 @@ static mm_bool check_vfp_reg_operand(const cs_arm_op *op, int idx, mm_u8 mm_reg)
     }
     if (op->reg != expected) {
         log_vfp_reg_mismatch(idx, op->reg, mm_reg);
+        return MM_FALSE;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool check_vfp_d_reg_operand(const cs_arm_op *op, int idx, mm_u8 mm_reg)
+{
+    int expected = arm_vfp_d_reg_from_mm(mm_reg);
+    if (op->type != ARM_OP_REG) {
+        log_mem_mismatch("type is not REG");
+        return MM_FALSE;
+    }
+    if (op->reg != expected) {
+        log_vfp_d_reg_mismatch(idx, op->reg, mm_reg);
         return MM_FALSE;
     }
     return MM_TRUE;
@@ -602,13 +632,20 @@ static mm_bool cross_check_operands(const struct mm_fetch_result *fetch, const c
         case ARM_INS_VLDR:
         case ARM_INS_VSTR: {
             long disp;
-            mm_u32 imm = dec->imm & 0x1FFFFFFFu;
+            mm_u32 imm = dec->imm & 0x0FFFFFFFu;
             mm_bool u = (dec->imm & 0x80000000u) != 0u;
+            mm_bool is_double = (dec->imm & MM_VFP_LS_DOUBLE) != 0u;
             if (arm->op_count < 2u) {
                 return MM_FALSE;
             }
-            if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
-                return MM_FALSE;
+            if (is_double) {
+                if (!check_vfp_d_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                    return MM_FALSE;
+                }
+            } else {
+                if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                    return MM_FALSE;
+                }
             }
             disp = u ? (long)imm : -(long)imm;
             return check_mem_operand(&arm->operands[1], dec->rn, 0xffu, disp);

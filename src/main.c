@@ -722,6 +722,9 @@ static mm_bool is_vfp_insn_fast(mm_u32 insn)
     if ((insn & 0xff000f00u) == 0xed000a00u) {
         return MM_TRUE; /* VLDR/VSTR */
     }
+    if ((insn & 0xff000f00u) == 0xed000b00u) {
+        return MM_TRUE; /* VLDR/VSTR (double) */
+    }
     if ((insn & 0xffdc9ff9u) == 0xec900a00u || (insn & 0xffdc9ff9u) == 0xec800a00u) {
         return MM_TRUE; /* VLDM/VSTM */
     }
@@ -775,6 +778,9 @@ static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
         d.raw = 0;
         d.undefined = MM_TRUE;
         return d;
+    }
+    if (capstone_is_enabled()) {
+        return mm_decode_t32(fetch);
     }
     if (fetch->len == 4u && cpu != 0 && scs != 0 &&
         !fpu_access_allowed(cpu, scs) && is_vfp_insn_fast(fetch->insn)) {
@@ -927,6 +933,14 @@ static mm_bool allow_system_reset(const struct mm_target_cfg *cfg, const char *c
 #define CPACR_CP10_SHIFT 20u
 #define CPACR_CP11_SHIFT 22u
 
+static mm_u32 cpacr_for_sec(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    if (scs == 0) {
+        return 0u;
+    }
+    return (sec == MM_NONSECURE) ? scs->cpacr_ns : scs->cpacr_s;
+}
+
 static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs *scs)
 {
     mm_u32 cp10;
@@ -934,8 +948,13 @@ static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs 
     if (cpu == 0 || scs == 0 || !scs->fpu_present) {
         return MM_FALSE;
     }
-    cp10 = (scs->cpacr >> CPACR_CP10_SHIFT) & 0x3u;
-    cp11 = (scs->cpacr >> CPACR_CP11_SHIFT) & 0x3u;
+    if (cpu->sec_state == MM_NONSECURE) {
+        if (((scs->nsacr >> 10) & 0x1u) == 0u || ((scs->nsacr >> 11) & 0x1u) == 0u) {
+            return MM_FALSE;
+        }
+    }
+    cp10 = (cpacr_for_sec(scs, cpu->sec_state) >> CPACR_CP10_SHIFT) & 0x3u;
+    cp11 = (cpacr_for_sec(scs, cpu->sec_state) >> CPACR_CP11_SHIFT) & 0x3u;
     if (cp10 == 0u || cp11 == 0u) {
         return MM_FALSE;
     }

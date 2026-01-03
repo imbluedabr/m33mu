@@ -138,7 +138,9 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
     scs->mmfar = 0;
     scs->bfar = 0;
     scs->afsr = 0;
-    scs->cpacr = 0;
+    scs->cpacr_s = 0;
+    scs->cpacr_ns = 0;
+    scs->nsacr = 0;
     scs->fpccr = 0;
     scs->fpcar = 0;
     scs->fpdscr = 0;
@@ -197,7 +199,8 @@ void mm_scs_set_fpu_present(struct mm_scs *scs, mm_bool present)
         scs->mvfr1 = MVFR1_FPV5_SP_D16;
         scs->mvfr2 = 0;
     } else {
-        scs->cpacr = 0;
+        scs->cpacr_s &= ~0x00F00000u;
+        scs->cpacr_ns &= ~0x00F00000u;
         scs->fpccr = 0;
         scs->fpcar = 0;
         scs->fpdscr = 0;
@@ -357,7 +360,17 @@ static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
     case 0x34: val = scs->mmfar; break; /* MMFAR */
     case 0x38: val = scs->bfar; break; /* BFAR */
     case 0x3C: val = scs->afsr; break; /* AFSR */
-    case 0x88: val = scs->fpu_present ? scs->cpacr : 0u; break; /* CPACR */
+    case 0x88: { /* CPACR / CPACR_NS */
+        mm_u32 cpacr = (eff_sec == MM_NONSECURE) ? scs->cpacr_ns : scs->cpacr_s;
+        if (!scs->fpu_present) {
+            cpacr &= ~0x00F00000u;
+        }
+        val = cpacr;
+        break;
+    }
+    case 0x8C: /* NSACR (secure-only) */
+        val = (eff_sec == MM_SECURE) ? scs->nsacr : 0u;
+        break;
     case 0x234: val = scs->fpu_present ? scs->fpccr : 0u; break; /* FPCCR */
     case 0x238: val = scs->fpu_present ? scs->fpcar : 0u; break; /* FPCAR */
     case 0x23C: val = scs->fpu_present ? scs->fpdscr : 0u; break; /* FPDSCR */
@@ -733,9 +746,22 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     case 0x34: scs->mmfar = value; return MM_TRUE;
     case 0x38: scs->bfar = value; return MM_TRUE;
     case 0x3C: scs->afsr = value; return MM_TRUE;
-    case 0x88:
-        if (scs->fpu_present) {
-            scs->cpacr = value & 0x00F00000u;
+    case 0x88: {
+        mm_u32 mask = 0x00F0FFFFu;
+        mm_u32 v = value & mask;
+        if (!scs->fpu_present) {
+            v &= ~0x00F00000u;
+        }
+        if (eff_sec == MM_NONSECURE) {
+            scs->cpacr_ns = v;
+        } else {
+            scs->cpacr_s = v;
+        }
+        return MM_TRUE;
+    }
+    case 0x8C:
+        if (eff_sec == MM_SECURE) {
+            scs->nsacr = value & 0x00000CFFu;
         }
         return MM_TRUE;
     case 0x234:

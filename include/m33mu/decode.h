@@ -24,6 +24,9 @@
 
 #include "m33mu/types.h"
 
+/* VFP load/store flags packed in decoded imm. */
+#define MM_VFP_LS_DOUBLE (1u << 28)
+
 /* Condition codes for conditional execution and branches. */
 enum mm_cond {
     MM_COND_EQ = 0,

@@ -52,7 +52,9 @@ struct mm_scs {
     mm_u32 mmfar;
     mm_u32 bfar;
     mm_u32 afsr;
-    mm_u32 cpacr;
+    mm_u32 cpacr_s;
+    mm_u32 cpacr_ns;
+    mm_u32 nsacr;
     mm_u32 fpccr;
     mm_u32 fpcar;
     mm_u32 fpdscr;
