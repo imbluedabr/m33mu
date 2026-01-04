@@ -276,10 +276,10 @@ static void hash_set_digest_regs(struct hash_state *h)
 
 static void hash_compute_digest(struct hash_state *h, mm_u32 algo)
 {
-    mm_u32 nblw = h->nblw & HASH_STR_NBLW_MASK;
     h->digest_len = 0u;
 #ifdef M33MU_HAS_WOLFSSL
     {
+        mm_u32 nblw = h->nblw & HASH_STR_NBLW_MASK;
         const mm_u8 *data = h->msg;
         mm_u32 len = h->msg_len;
         mm_u8 last_buf[4];
@@ -707,9 +707,9 @@ static mm_u32 aes_phase(const struct aes_state *a)
     return (a->regs[AES_CR / 4u] >> AES_CR_GCMPH_SHIFT) & 0x3u;
 }
 
+#if defined(M33MU_HAS_WOLFSSL) && defined(WOLFSSL_AESGCM_STREAM)
 static void aes_prepare_gcm(struct aes_state *a, mm_bool decrypt)
 {
-#ifdef M33MU_HAS_WOLFSSL
     mm_u8 key[32];
     mm_u8 iv[16];
     mm_u32 iv_len;
@@ -717,7 +717,6 @@ static void aes_prepare_gcm(struct aes_state *a, mm_bool decrypt)
     aes_build_key(a, key, key_len);
     aes_build_iv_rev(a, iv);
     iv_len = aes_gcm_iv_len(iv);
-#ifdef WOLFSSL_AESGCM_STREAM
     if (iv_len == 16u) {
         a->gcm_use_icb = MM_TRUE;
         memcpy(a->gcm_icb, iv, sizeof(a->gcm_icb));
@@ -729,22 +728,14 @@ static void aes_prepare_gcm(struct aes_state *a, mm_bool decrypt)
         a->gcm_inited = MM_TRUE;
         return;
     }
-#endif
-#ifdef WOLFSSL_AESGCM_STREAM
     if (decrypt) {
         wc_AesGcmDecryptInit(&a->gcm_aes, key, key_len, iv, iv_len);
     } else {
         wc_AesGcmEncryptInit(&a->gcm_aes, key, key_len, iv, iv_len);
     }
-#else
-    wc_AesGcmSetKey(&a->gcm_aes, key, key_len);
-#endif
     a->gcm_inited = MM_TRUE;
-#else
-    (void)a;
-    (void)decrypt;
-#endif
 }
+#endif
 
 static void aes_handle_gcm_block(struct aes_state *a, mm_u32 phase, mm_bool decrypt, const mm_u8 *in, mm_u32 len)
 {
