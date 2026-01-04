@@ -597,7 +597,8 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
             send = MM_TRUE;
         }
         if (send && uart != 0 && uart->fd >= 0) {
-            (void)write(uart->fd, &b, 1);
+            ssize_t w = write(uart->fd, &b, 1);
+            (void)w;
         }
     }
     if (key == KEY_LEFT) {
