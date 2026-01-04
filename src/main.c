@@ -1724,7 +1724,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         mm_u32 sp_frame = sp - 32u;
         mm_u32 sp_fp = sp_frame;
         for (i = 0; i < 8; ++i) {
-            if (!mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
+            if (!mm_memmap_write(map, stack_sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
                 printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
                 record_bus_fault(scs, sp_frame + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return MM_FALSE;
@@ -3000,8 +3000,16 @@ int main(int argc, char **argv)
         }
 
         {
-            mm_bool fpu_enabled = fpu_access_allowed(&cpu, &scs);
-            fprintf(stderr, "[FPU] %s\n", fpu_enabled ? "Enabled" : "Disabled");
+            mm_u32 cpacr_s = scs.cpacr_s;
+            mm_u32 cpacr_ns = scs.cpacr_ns;
+            mm_u32 nsacr = scs.nsacr;
+            mm_bool s_en = ((cpacr_s >> 20) & 0x3u) != 0u && ((cpacr_s >> 22) & 0x3u) != 0u;
+            mm_bool ns_en = ((cpacr_ns >> 20) & 0x3u) != 0u && ((cpacr_ns >> 22) & 0x3u) != 0u;
+            mm_bool nsacr_en = ((nsacr >> 10) & 0x1u) != 0u && ((nsacr >> 11) & 0x1u) != 0u;
+            fprintf(stderr, "[FPU] CPACR_S=%s CPACR_NS=%s NSACR=%s\n",
+                    s_en ? "Enabled" : "Disabled",
+                    ns_en ? "Enabled" : "Disabled",
+                    nsacr_en ? "Enabled" : "Disabled");
         }
 
         {

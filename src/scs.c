@@ -839,6 +839,8 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     case 0x88: {
         mm_u32 mask = 0x00F0FFFFu;
         mm_u32 v = value & mask;
+        mm_u32 old_s = scs->cpacr_s;
+        mm_u32 old_ns = scs->cpacr_ns;
         if (!scs->fpu_present) {
             v &= ~0x00F00000u;
         }
@@ -847,11 +849,23 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
         } else {
             scs->cpacr_s = v;
         }
+        if (scs->fpu_present && (old_s != scs->cpacr_s || old_ns != scs->cpacr_ns)) {
+            mm_bool s_en = ((scs->cpacr_s >> 20) & 0x3u) != 0u && ((scs->cpacr_s >> 22) & 0x3u) != 0u;
+            mm_bool ns_en = ((scs->cpacr_ns >> 20) & 0x3u) != 0u && ((scs->cpacr_ns >> 22) & 0x3u) != 0u;
+            fprintf(stderr, "[FPU] CPACR_S=%s CPACR_NS=%s\n",
+                    s_en ? "Enabled" : "Disabled",
+                    ns_en ? "Enabled" : "Disabled");
+        }
         return MM_TRUE;
     }
     case 0x8C:
         if (eff_sec == MM_SECURE) {
+            mm_u32 old = scs->nsacr;
             scs->nsacr = value & 0x00000CFFu;
+            if (scs->fpu_present && old != scs->nsacr) {
+                mm_bool ns_en = ((scs->nsacr >> 10) & 0x1u) != 0u && ((scs->nsacr >> 11) & 0x1u) != 0u;
+                fprintf(stderr, "[FPU] NSACR=%s\n", ns_en ? "Enabled" : "Disabled");
+            }
         }
         return MM_TRUE;
     case 0x234:
