@@ -1176,6 +1176,7 @@ static void tui_draw(struct mm_tui *tui)
             if (y < log_y + log_h) {
                 y++;
             }
+#ifdef M33MU_HAS_LIBTPMS
             count = mm_tpm_tis_count();
             if (count == 0u) {
                 tui_draw_text(split_x + 2, y, inner_x + inner_w - 1,
@@ -1207,6 +1208,11 @@ static void tui_draw(struct mm_tui *tui)
                     y++;
                 }
             }
+#else
+            tui_draw_text(split_x + 2, y, inner_x + inner_w - 1,
+                          TUI_FG_DIM, console_bg, "TPM: Not built");
+            y++;
+#endif
 
             if (y < log_y + log_h) {
                 y++;
