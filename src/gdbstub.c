@@ -120,6 +120,7 @@ static void gdb_send_packet(int fd, const char *payload)
     size_t len = strlen(payload);
     size_t i;
     size_t pos = 0;
+    ssize_t w;
 
     buf[pos++] = '$';
     for (i = 0; i < len && pos < sizeof(buf) - 4; ++i) {
@@ -129,7 +130,8 @@ static void gdb_send_packet(int fd, const char *payload)
     buf[pos++] = '#';
     buf[pos++] = nibble_to_hex((mm_u8)((csum >> 4) & 0x0fu));
     buf[pos++] = nibble_to_hex((mm_u8)(csum & 0x0fu));
-    (void)write(fd, buf, pos);
+    w = write(fd, buf, pos);
+    (void)w;
 }
 
 static void gdb_send_console(struct mm_gdb_stub *stub, const char *msg)
@@ -736,10 +738,12 @@ static mm_bool gdb_recv_packet(struct mm_gdb_stub *stub, char *out, size_t out_c
     }
     expect |= (unsigned char)hex_to_nibble(ch);
     if (sum != expect) {
-        (void)write(stub->client_fd, "-", 1);
+        r = write(stub->client_fd, "-", 1);
+        (void)r;
         return MM_FALSE;
     }
-    (void)write(stub->client_fd, "+", 1);
+    r = write(stub->client_fd, "+", 1);
+    (void)r;
     return MM_TRUE;
 }
 
