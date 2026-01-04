@@ -25,6 +25,12 @@
 #include <capstone/capstone.h>
 #include <stdio.h>
 
+#if defined(CS_API_MAJOR) && (CS_API_MAJOR >= 5)
+#define M33MU_CAPSTONE_HAS_POST_INDEX 1
+#else
+#define M33MU_CAPSTONE_HAS_POST_INDEX 0
+#endif
+
 struct capstone_ctx {
     csh handle;
     mm_bool ready;
@@ -492,10 +498,18 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_REVSH: return dec->kind == MM_OP_REVSH;
         case ARM_INS_MRS: return dec->kind == MM_OP_MRS;
         case ARM_INS_MSR: return dec->kind == MM_OP_MSR;
+#ifdef ARM_INS_TT
         case ARM_INS_TT: return dec->kind == MM_OP_TT;
+#endif
+#ifdef ARM_INS_TTT
         case ARM_INS_TTT: return dec->kind == MM_OP_TTT;
+#endif
+#ifdef ARM_INS_TTA
         case ARM_INS_TTA: return dec->kind == MM_OP_TTA;
+#endif
+#ifdef ARM_INS_TTAT
         case ARM_INS_TTAT: return dec->kind == MM_OP_TTAT;
+#endif
         case ARM_INS_SDIV: return dec->kind == MM_OP_SDIV;
         case ARM_INS_UDIV: return dec->kind == MM_OP_UDIV;
         case ARM_INS_SMULL: return dec->kind == MM_OP_SMULL;
@@ -511,9 +525,15 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_SMLATB:
         case ARM_INS_SMLATT:
             return dec->kind == MM_OP_SMLA;
+#ifdef ARM_INS_BXNS
         case ARM_INS_BXNS: return dec->kind == MM_OP_BXNS;
+#endif
+#ifdef ARM_INS_BLXNS
         case ARM_INS_BLXNS: return dec->kind == MM_OP_BLXNS;
+#endif
+#ifdef ARM_INS_SG
         case ARM_INS_SG: return dec->kind == MM_OP_SG;
+#endif
         case ARM_INS_VADD: return dec->kind == MM_OP_VADD;
         case ARM_INS_VSUB: return dec->kind == MM_OP_VSUB;
         case ARM_INS_VMUL: return dec->kind == MM_OP_VMUL;
@@ -825,10 +845,18 @@ static mm_bool cross_check_operands(const struct mm_fetch_result *fetch, const c
                     expect_post = MM_FALSE;
                 }
                 if (expect_wb) {
-                    if (!arm->writeback || arm->post_index != expect_post) {
+                    if (!arm->writeback) {
                         log_mem_mismatch("writeback/post-index mismatch");
                         return MM_FALSE;
                     }
+#if M33MU_CAPSTONE_HAS_POST_INDEX
+                    if (arm->post_index != expect_post) {
+                        log_mem_mismatch("writeback/post-index mismatch");
+                        return MM_FALSE;
+                    }
+#else
+                    (void)expect_post;
+#endif
                 }
                 if (expect_wb && expect_post && arm->op_count >= 3u && arm->operands[2].type == ARM_OP_IMM) {
                     int base = arm_reg_from_mm(dec->rn);
