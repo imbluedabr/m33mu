@@ -138,7 +138,7 @@ extern void mm_system_request_reset(void);
 /* OTG FS base addresses */
 #define OTG_FS_BASE     0x42040000u
 #define OTG_FS_SEC_BASE 0x52040000u
-#define OTG_FS_SIZE     0x88000u
+#define OTG_FS_SIZE     0x1000u
 
 /* UCPD1 register offsets (subset) */
 #define UCPD_CFGR1 0x000u

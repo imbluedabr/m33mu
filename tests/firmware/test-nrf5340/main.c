@@ -122,11 +122,8 @@ void SysTick_Handler(void)
 static uint32_t wait_systick(uint32_t target_ms)
 {
     uint32_t start = systick_ms;
-    volatile uint32_t spin = 0;
     while ((uint32_t)(systick_ms - start) < target_ms) {
-        if (++spin > 2000000u) {
-            break;
-        }
+        __asm volatile("wfi");
     }
     return (uint32_t)(systick_ms - start);
 }
@@ -173,6 +170,8 @@ int main(void)
     tx[1] = 0xFFu;
     tx[2] = 0xFFu;
     tx[3] = 0xFFu;
+
+    spim0_transfer(tx, rx, 4u);
 
     GPIO_OUTCLR(GPIO_P0_BASE) = 1u << 0;
     spim0_transfer(tx, rx, 4u);

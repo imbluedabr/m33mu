@@ -53,6 +53,34 @@ static inline void sau_set_region(uint32_t rnr, uint32_t base, uint32_t limit_in
   SAU_RLAR = (limit_inclusive & 0xFFFFFFE0u) | (nsc ? 2u : 0u) | 1u;
 }
 
+/* GTZC MPCBB (STM32H5) for SRAM security attribution. */
+#define GTZC1_BASE             (0x50032400u)
+#define GTZC1_MPCBB1_SECCFGR   ((volatile uint32_t *)(GTZC1_BASE + 0x0800u + 0x100u))
+#define GTZC1_MPCBB2_SECCFGR   ((volatile uint32_t *)(GTZC1_BASE + 0x0C00u + 0x100u))
+#define GTZC1_MPCBB3_SECCFGR   ((volatile uint32_t *)(GTZC1_BASE + 0x1000u + 0x100u))
+
+static void gtzc_mpcbb_init(void) {
+  int i;
+  /* MPCBB block size is 512B on STM32H5.
+   * - SRAM1: 256KB => 16 words of SECCFGR (512 blocks).
+   *   Make lower 128KB non-secure, upper 128KB secure.
+   */
+  for (i = 0; i < 8; ++i) {
+    GTZC1_MPCBB1_SECCFGR[i] = 0x00000000u; /* NS */
+  }
+  for (i = 8; i < 16; ++i) {
+    GTZC1_MPCBB1_SECCFGR[i] = 0xFFFFFFFFu; /* Secure */
+  }
+  /* SRAM2 (64KB): secure. */
+  for (i = 0; i < 4; ++i) {
+    GTZC1_MPCBB2_SECCFGR[i] = 0xFFFFFFFFu;
+  }
+  /* SRAM3 (320KB): secure. */
+  for (i = 0; i < 20; ++i) {
+    GTZC1_MPCBB3_SECCFGR[i] = 0xFFFFFFFFu;
+  }
+}
+
 static inline void dsb(void){ __asm volatile("dsb 0xF" ::: "memory"); }
 static inline void isb(void){ __asm volatile("isb 0xF" ::: "memory"); }
 
@@ -155,6 +183,7 @@ void Reset_Handler(void) {
   // Secure VTOR (optional, but explicit)
   SCB_VTOR_S = FLASH_S_BASE;
 
+  gtzc_mpcbb_init();
   sau_init_for_test();
 
   // Point NS VTOR at NS vector table

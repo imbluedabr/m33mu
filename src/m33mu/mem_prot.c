@@ -166,6 +166,30 @@ static const char *attr_name(enum mm_sau_attr attr)
     }
 }
 
+static void memfault_reason(const struct mm_prot_ctx *ctx,
+                            enum mm_access_type type,
+                            enum mm_sec_state sec,
+                            mm_u32 addr,
+                            const char *reason,
+                            enum mm_sau_attr attr,
+                            enum mm_sec_state addr_sec,
+                            mm_bool mpcbb_hit)
+{
+    mm_bool privileged = MM_TRUE;
+    if (ctx != 0 && ctx->cpu != 0) {
+        privileged = mm_cpu_get_privileged(ctx->cpu);
+    }
+    printf("[MEMFAULT_CAUSE] sec=%s type=%s addr=0x%08lx reason=%s attr=%s addr_sec=%s src=%s priv=%d\n",
+           sec_name(sec),
+           type_name(type),
+           (unsigned long)addr,
+           (reason != 0) ? reason : "?",
+           attr_name(attr),
+           sec_name(addr_sec),
+           mpcbb_hit ? "MPCBB" : "SAU",
+           privileged ? 1 : 0);
+}
+
 static void prot_trace_req(const struct mm_prot_ctx *ctx,
                            enum mm_access_type type,
                            enum mm_sec_state sec,
@@ -360,6 +384,7 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
     enum mm_sec_state addr_sec;
     mm_bool ignore_addr_sec;
     mm_bool privileged = MM_TRUE;
+    mm_bool mpcbb_hit = MM_FALSE;
     mm_u32 needed = 0;
     size_t i;
 
@@ -390,6 +415,7 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
     }
 
     if (!mm_rp2350_access_check(addr, sec, privileged)) {
+        memfault_reason(ctx, type, sec, addr, "rp2350", MM_SAU_SECURE, sec, MM_FALSE);
         record_memfault(ctx, sec, type, addr);
         if (sec == MM_NONSECURE) {
             record_securefault(ctx, type, addr);
@@ -405,13 +431,14 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
     addr_sec = MM_SECURE;
     attr = MM_SAU_SECURE;
     {
-        mm_bool mpcbb_hit = mpcbb_attr_for_addr(ctx, addr, &attr, &addr_sec);
+        mpcbb_hit = mpcbb_attr_for_addr(ctx, addr, &attr, &addr_sec);
         if (!mpcbb_hit && ctx->scs != 0) {
             attr = mm_sau_attr_for_addr(ctx->scs, addr);
             addr_sec = (attr == MM_SAU_NONSECURE) ? MM_NONSECURE : MM_SECURE;
         }
         if (sec == MM_NONSECURE) {
             if (attr == MM_SAU_SECURE) {
+                memfault_reason(ctx, type, sec, addr, "secure-attr", attr, addr_sec, mpcbb_hit);
                 record_securefault(ctx, type, addr);
                 /* Also raise a non-secure fault so NS firmware can handle it
                  * (HardFault/MemManage depending on SHCSR settings). */
@@ -420,6 +447,7 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
             }
             if (attr == MM_SAU_NSC) {
                 if (type != MM_ACCESS_EXEC) {
+                    memfault_reason(ctx, type, sec, addr, "nsc-data", attr, addr_sec, mpcbb_hit);
                     record_securefault(ctx, type, addr);
                     record_memfault(ctx, sec, type, addr);
                     return MM_FALSE;
@@ -430,6 +458,7 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
 
     if (type == MM_ACCESS_EXEC && ctx->scs != 0) {
         if (mm_mpu_is_xn_exec(ctx->scs, sec, addr)) {
+            memfault_reason(ctx, type, sec, addr, "mpu-xn", attr, addr_sec, mpcbb_hit);
             record_memfault(ctx, sec, type, addr);
             return MM_FALSE;
         }
@@ -465,11 +494,13 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
             }
             return MM_TRUE;
         }
+        memfault_reason(ctx, type, sec, addr, "perm", attr, addr_sec, mpcbb_hit);
         record_memfault(ctx, sec, type, addr);
         return MM_FALSE;
     }
 
     /* No matching region: fault. */
+    memfault_reason(ctx, type, sec, addr, "no-region", attr, addr_sec, mpcbb_hit);
     record_memfault(ctx, sec, type, addr);
     return MM_FALSE;
 }

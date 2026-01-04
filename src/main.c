@@ -940,6 +940,7 @@ static mm_bool allow_system_reset(const struct mm_target_cfg *cfg, const char *c
 #define FP_STACK_BYTES (FP_STACK_WORDS * 4u)
 #define CPACR_CP10_SHIFT 20u
 #define CPACR_CP11_SHIFT 22u
+#define AIRCR_BFHFNMINS (1u << 13)
 
 static mm_u32 cpacr_for_sec(const struct mm_scs *scs, enum mm_sec_state sec)
 {
@@ -974,7 +975,12 @@ static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs 
 
 static mm_bool fpu_stack_active(const struct mm_cpu *cpu, const struct mm_scs *scs)
 {
+    mm_u32 ctrl;
     if (!fpu_access_allowed(cpu, scs)) {
+        return MM_FALSE;
+    }
+    ctrl = (cpu->sec_state == MM_NONSECURE) ? cpu->control_ns : cpu->control_s;
+    if ((ctrl & (1u << 2)) == 0u) {
         return MM_FALSE;
     }
     return cpu->fp_active ? MM_TRUE : MM_FALSE;
@@ -1628,6 +1634,8 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     enum mm_mode pre_mode;
     mm_u32 frame[8];
     enum mm_sec_state sec;
+    enum mm_sec_state handler_sec;
+    enum mm_sec_state stack_sec;
     int i;
 
     if (cpu == 0 || map == 0 || scs == 0) {
@@ -1635,13 +1643,18 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     }
 
     sec = cpu->sec_state;
+    handler_sec = sec;
+    if (sec == MM_SECURE && (scs->aircr_s & AIRCR_BFHFNMINS) != 0u) {
+        handler_sec = MM_NONSECURE;
+    }
+    stack_sec = handler_sec;
     scs->hfsr |= (1u << 30); /* FORCED */
-    if (sec == MM_NONSECURE) {
+    if (handler_sec == MM_NONSECURE) {
         scs->shcsr_ns |= (1u << 1); /* HARDFAULTACT */
     } else {
         scs->shcsr_s |= (1u << 1);
     }
-    (void)mm_exception_read_handler(map, scs, sec, MM_VECT_HARDFAULT, &handler);
+    (void)mm_exception_read_handler(map, scs, handler_sec, MM_VECT_HARDFAULT, &handler);
 
     {
         mm_u32 cfsr_dbg = 0;
@@ -1681,12 +1694,26 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     frame[7] = fault_xpsr | 0x01000000u; /* Preserve full xPSR/IT/flags/IPSR; ensure T */
 
     pre_mode = cpu->mode;
-    use_psp_entry = (pre_mode == MM_THREAD) && (((sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s) & 0x2u);
+    use_psp_entry = (pre_mode == MM_THREAD) && (((stack_sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s) & 0x2u);
     fp_stack = fpu_stack_active(cpu, scs);
-    exc_ret_val = exc_return_encode(sec, use_psp_entry, pre_mode == MM_THREAD, fp_stack ? MM_FALSE : MM_TRUE);
+    exc_ret_val = exc_return_encode(stack_sec, use_psp_entry, pre_mode == MM_THREAD, fp_stack ? MM_FALSE : MM_TRUE);
+    {
+        mm_u32 ctrl = (stack_sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s;
+        mm_u32 cpacr = cpacr_for_sec(scs, stack_sec);
+        mm_bool fpu_allowed = fpu_access_allowed(cpu, scs);
+        printf("[MEMFAULT_FPU] sec=%d fp_active=%d ctrl=0x%08lx cpacr=0x%08lx nsacr=0x%08lx fpu_allowed=%d fp_stack=%d exc_ret=0x%08lx\n",
+               (int)stack_sec,
+               (int)cpu->fp_active,
+               (unsigned long)ctrl,
+               (unsigned long)cpacr,
+               (unsigned long)scs->nsacr,
+               (int)fpu_allowed,
+               (int)fp_stack,
+               (unsigned long)exc_ret_val);
+    }
 
-    sp = use_psp_entry ? ((sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s)
-                       : ((sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s);
+    sp = use_psp_entry ? ((stack_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s)
+                       : ((stack_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s);
     if ((scs->ccr & CCR_STKALIGN) != 0u && (sp & 7u) != 0u) {
         sp -= 4u; /* Align stack to 8-byte boundary. */
         frame[7] |= (1u << 9); /* Stack alignment padding flag. */
@@ -1706,18 +1733,18 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         if (fp_stack) {
             sp_fp = sp_frame - FP_STACK_BYTES;
             for (i = 0; i < 16; ++i) {
-                if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
+                if (!mm_memmap_write(map, stack_sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
                     printf("HardFault: FP stacking failed at 0x%08lx\n",
                            (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
                     record_bus_fault(scs, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                     return MM_FALSE;
                 }
             }
-            if (!mm_memmap_write(map, sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
+            if (!mm_memmap_write(map, stack_sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
                 record_bus_fault(scs, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return MM_FALSE;
             }
-            if (!mm_memmap_write(map, sec, sp_fp + (17u * 4u), 4u, 0u)) {
+            if (!mm_memmap_write(map, stack_sec, sp_fp + (17u * 4u), 4u, 0u)) {
                 record_bus_fault(scs, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return MM_FALSE;
             }
@@ -1728,14 +1755,14 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         }
     }
     if (use_psp_entry) {
-        if (sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
+        if (stack_sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
     } else {
-        if (sec == MM_NONSECURE) cpu->msp_ns = sp; else cpu->msp_s = sp;
+        if (stack_sec == MM_NONSECURE) cpu->msp_ns = sp; else cpu->msp_s = sp;
     }
     if (cpu->exc_depth < MM_EXC_STACK_MAX) {
         cpu->exc_sp[cpu->exc_depth] = sp;
         cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
-        cpu->exc_sec[cpu->exc_depth] = sec;
+        cpu->exc_sec[cpu->exc_depth] = stack_sec;
         cpu->exc_depth++;
     }
     if (stack_trace_enabled()) {
@@ -1748,10 +1775,11 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         dump_exc_stack_state(cpu, "EXC_STACK_PUSH");
     }
     /* Handler mode always uses MSP (ARM ARM DDI0553). Set R13 accordingly. */
-    cpu->r[13] = (sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
+    cpu->r[13] = (handler_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
     cpu->xpsr = (fault_xpsr & 0xF8000000u) | 0x01000003u;
     cpu->r[14] = exc_ret_val;
     cpu->mode = MM_HANDLER;
+    cpu->sec_state = handler_sec;
     cpu->r[15] = handler | 1u;
     return MM_TRUE;
 }
@@ -1802,11 +1830,9 @@ static mm_bool raise_mem_fault(struct mm_cpu *cpu, struct mm_memmap *map, struct
         g_fault_pending = MM_TRUE;
     }
 
-    /* TrustZone: SAU attribution violations are recorded in SAU_SFSR/SAU_SFAR.
-     * For now we deliver the fault in the originating security state (so NS
-     * firmware can handle and continue), while leaving SecureFault pending
-     * information available for inspection. */
-    if (sec == MM_SECURE && scs->securefault_pending) {
+    /* TrustZone: if a SecureFault is pending (e.g. NS access to Secure attribution),
+     * route to SecureFault in Secure state. */
+    if (scs->securefault_pending) {
         scs->securefault_pending = MM_FALSE;
         return enter_exception_ex(cpu, map, scs, MM_VECT_SECUREFAULT, fault_pc, fault_xpsr, MM_SECURE);
     }
@@ -2808,7 +2834,11 @@ int main(int argc, char **argv)
                 }
                 map.ram.length = cfg_total_ram(&cfg);
             }
-            mm_target_register_mmio(&cfg, &map.mmio);
+            if (!mm_target_register_mmio(&cfg, &map.mmio)) {
+                fprintf(stderr, "Failed to register MMIO for CPU %s\n", (cpu_name != 0) ? cpu_name : "unknown");
+                rc = 1;
+                goto cleanup;
+            }
             mm_spiflash_register_mmap_regions(&map.mmio);
             mm_target_flash_bind(&cfg, &map, flash, cfg.flash_size_s, opt_persist ? &persist : 0);
             mm_target_usart_reset(&cfg);
@@ -2821,7 +2851,6 @@ int main(int argc, char **argv)
 
             mm_scs_init(&scs, 0x410fc241u);
             mm_scs_set_fpu_present(&scs, (cfg.flags & MM_TARGET_FLAG_FPU) != 0u);
-            fprintf(stderr, "[FPU] %s\n", scs.fpu_present ? "Enabled" : "Disabled");
             if (cfg.core_count > 1u) {
                 mm_scs_init(&scs1, 0x410fc241u);
                 mm_scs_set_fpu_present(&scs1, (cfg.flags & MM_TARGET_FLAG_FPU) != 0u);
@@ -2962,17 +2991,22 @@ int main(int argc, char **argv)
                     cpu1.exc_depth = 0;
                     cpu1.tz_depth = 0;
                     cpu1.sleeping = MM_TRUE;
-                    cpu1.sleep_wfe = MM_TRUE;
-                    cpu1.event_reg = MM_FALSE;
-                    it_pattern1 = 0;
-                    it_remaining1 = 0;
-                    it_cond1 = 0;
-                }
+                cpu1.sleep_wfe = MM_TRUE;
+                cpu1.event_reg = MM_FALSE;
+                it_pattern1 = 0;
+                it_remaining1 = 0;
+                it_cond1 = 0;
             }
+        }
 
-            {
-                enum mm_sec_state boot_sec = force_ns_boot ? MM_NONSECURE : MM_SECURE;
-                active_core = 0;
+        {
+            mm_bool fpu_enabled = fpu_access_allowed(&cpu, &scs);
+            fprintf(stderr, "[FPU] %s\n", fpu_enabled ? "Enabled" : "Disabled");
+        }
+
+        {
+            enum mm_sec_state boot_sec = force_ns_boot ? MM_NONSECURE : MM_SECURE;
+            active_core = 0;
                 g_active_prot_ctx = &prot;
                 if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
                     mm_rp2350_set_active_core(0);

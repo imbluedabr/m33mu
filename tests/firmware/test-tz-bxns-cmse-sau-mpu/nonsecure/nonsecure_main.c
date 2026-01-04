@@ -122,8 +122,14 @@ void HardFault_C(stack_frame_t* f) {
 }
 
 void MemManage_C(stack_frame_t* f) {
-  g_status |= (1u << 3);  // MPU-fault caught
-  f->pc = g_resume_pc;    // resume after the XN call site
+  if (g_resume_pc != 0u) {
+    g_status |= (1u << 3);  // MPU-fault caught
+    f->pc = g_resume_pc;    // resume after the XN call site
+    g_resume_pc = 0u;
+  } else {
+    g_status |= (1u << 2);  // SAU/MPCBB fault caught
+    f->pc += thumb_insn_len(f->pc); // skip faulting access
+  }
   SCB_CFSR = 0xFFFFFFFFu;  // clear
 }
 
@@ -133,6 +139,9 @@ __attribute__((naked)) void HardFault_Handler(void) {
     "ite eq           \n"
     "mrseq r0, msp    \n"
     "mrsne r0, psp    \n"
+    "tst lr, #0x10    \n"
+    "it eq            \n"
+    "addeq r0, r0, #0x48 \n"
     "b HardFault_C    \n"
   );
 }
@@ -143,6 +152,9 @@ __attribute__((naked)) void MemManage_Handler(void) {
     "ite eq           \n"
     "mrseq r0, msp    \n"
     "mrsne r0, psp    \n"
+    "tst lr, #0x10    \n"
+    "it eq            \n"
+    "addeq r0, r0, #0x48 \n"
     "b MemManage_C    \n"
   );
 }
@@ -178,6 +190,9 @@ const void* const vectors_ns[] = {
 };
 
 void Reset_Handler(void) {
+  /* Enable MemManage early so SAU/MPCBB faults are handled in MemManage. */
+  SCB_SHCSR |= (1u << 16); // MEMFAULTENA
+
   /* IRQ4 should be targetable to Non-secure via ITNS0 (set by Secure boot). */
   NVIC_ISER0 = (1u << 4);
   NVIC_ISPR0 = (1u << 4);

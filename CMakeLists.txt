@@ -417,7 +417,6 @@ add_custom_target(firmware-build
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-nrf5340 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-fpu-instructions app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-rtos-exceptions app.bin
-  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-systick-wfi app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-tz-bxns-cmse-sau-mpu clean all
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
@@ -425,7 +424,6 @@ add_custom_target(firmware-build
 add_custom_target(test-firmware
   COMMAND /bin/sh -c "$<TARGET_FILE:m33mu> tests/firmware/test-stm32h563/app.bin || true"
   COMMAND /bin/sh -c "$<TARGET_FILE:m33mu> tests/firmware/test-rtos-exceptions/app.bin || true"
-  COMMAND /bin/sh -c "$<TARGET_FILE:m33mu> tests/firmware/test-systick-wfi/app.bin || true"
   COMMAND /bin/sh -c "$<TARGET_FILE:m33mu> tests/firmware/test-tz-bxns-cmse-sau-mpu/build/secure.bin tests/firmware/test-tz-bxns-cmse-sau-mpu/build/nonsecure.bin:0x2000 || true"
   DEPENDS m33mu firmware-build
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

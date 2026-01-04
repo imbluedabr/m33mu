@@ -1,0 +1,35 @@
+name: test-firmware
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtpms-dev vde2 libcapstone-dev libwolfssl-dev libvdeplug-dev vde-switch
+          sudo apt-get install -y gcc-arm-none-eabi
+      - name: Configure
+        run: cmake -S . -B build
+      - name: Build m33mu
+        run: cmake --build build
+      - name: Build firmware
+        run: cmake --build build --target firmware-build
+      - name: Run STM32H5 firmware test (SPI peripherals selection)
+        run: build/m33mu tests/firmware/test-stm32h563/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --uart-stdout --expect-bkpt=0x7f --timeout=60
+
+      - name: Run STM32U5 firmware test (SPI peripherals selection)
+        run: build/m33mu  tests/firmware/test-stm32u585/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --expect-bkpt=0x7f --timeout=60 --uart-stdout --cpu stm32u585
+      - name: Run STM32L5 firmware test (SPI peripherals selection)
+        run: build/m33mu  tests/firmware/test-stm32l552/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --expect-bkpt=0x7f --timeout=60 --uart-stdout --cpu stm32l552
+      - name: Run nRF5340 firmware test (SPI flash read/write)
+        run: build/m33mu  tests/firmware/test-nrf5340/app.bin --spiflash:SPI0:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --expect-bkpt=0x7f --timeout=60 --uart-stdout --cpu nrf5340
+      - name: Run STM32H5 firmware test (Floating point instructions)
+        run: build/m33mu tests/firmware/test-fpu-instructions/app.bin --uart-stdout --expect-bkpt=0x7f --timeout=60
