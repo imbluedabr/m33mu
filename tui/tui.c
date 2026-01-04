@@ -1124,7 +1124,9 @@ static void tui_draw(struct mm_tui *tui)
             size_t i;
             size_t count;
             struct mm_spiflash_info flash_info;
+#ifdef M33MU_HAS_LIBTPMS
             struct mm_tpm_tis_info tpm_info;
+#endif
             struct mm_usbdev_status usb_status;
             enum mm_eth_backend_type eth_backend;
             mm_u8 eth_mac[6];
