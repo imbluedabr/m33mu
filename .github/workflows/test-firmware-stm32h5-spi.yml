@@ -1,0 +1,27 @@
+name: test-firmware
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtpms-dev vde2 vde_switch libcapstone-dev libwolfssl-dev libvdeplug2-dev gcc-arm-none-eabi
+      - name: Configure
+        run: cmake -S . -B build
+      - name: Build m33mu
+        run: cmake --build build
+      - name: Build firmware
+        run: cmake --build build --target firmware-build
+      - name: Run firmware test (SPI peripherals selection)
+        run: build/m33mu tests/firmware/test-stm32h563/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --uart-stdout --expect-bkpt=0x7f --timeout=60
+      - name: Run firmware test (Floating point instructions)
+        run: build/m33mu tests/firmware/test-fpu-instructions/app.bin --uart-stdout --expect-bkpt=0x7f --timeout=60

@@ -59,6 +59,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdlib.h>
+#include <signal.h>
 
 #define CCR_DIV_0_TRP (1u << 4)
 #define CCR_STKALIGN (1u << 9)
@@ -134,6 +135,12 @@ static mm_u32 cfg_total_ram(const struct mm_target_cfg *cfg)
         return total;
     }
     return cfg->ram_size_s;
+}
+
+static void handle_timeout_alarm(int sig)
+{
+    (void)sig;
+    _exit(127);
 }
 
 static void dump_cpu_regs(const struct mm_cpu *cpu, const char *tag)
@@ -1419,8 +1426,6 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         int pend_irq = mm_nvic_select_routed(nvic, cpu, &irq_sec);
         if (pend_irq >= 0) {
             mm_u32 exc_num = 16u + (mm_u32)pend_irq;
-            printf("[IRQ] irq=%d target=%s\n", pend_irq,
-                   (irq_sec == MM_NONSECURE) ? "NS" : "S");
             mm_nvic_set_pending(nvic, (mm_u32)pend_irq, MM_FALSE);
             if (!enter_exception_ex(cpu, map, scs, exc_num, cpu->r[15] & ~1u, cpu->xpsr, irq_sec)) {
                 if (done) *done = MM_TRUE;
@@ -2368,6 +2373,10 @@ int main(int argc, char **argv)
     mm_bool opt_capstone_pc = MM_FALSE;
     mm_bool opt_boot_offset = MM_FALSE;
     mm_u32 boot_offset = 0;
+    mm_bool opt_expect_bkpt = MM_FALSE;
+    mm_u32 expect_bkpt = 0;
+    mm_bool expect_bkpt_hit = MM_FALSE;
+    mm_u32 opt_timeout = 0;
 
     if (strcmp_trace_env != 0 && strcmp_trace_env[0] != '\0') {
         if (parse_pc_trace_range(strcmp_trace_env, &strcmp_trace_start, &strcmp_trace_end)) {
@@ -2439,6 +2448,19 @@ int main(int argc, char **argv)
             opt_meminfo = MM_TRUE;
         } else if (strcmp(argv[i], "--record") == 0) {
             opt_record = MM_TRUE;
+        } else if (strncmp(argv[i], "--expect-bkpt=", 14) == 0) {
+            if (!parse_hex_u32(argv[i] + 14, &expect_bkpt)) {
+                fprintf(stderr, "invalid expect-bkpt value: %s\n", argv[i]);
+                return 1;
+            }
+            opt_expect_bkpt = MM_TRUE;
+        } else if (strncmp(argv[i], "--timeout=", 10) == 0) {
+            unsigned long t = strtoul(argv[i] + 10, 0, 10);
+            if (t == 0u) {
+                fprintf(stderr, "invalid timeout: %s\n", argv[i]);
+                return 1;
+            }
+            opt_timeout = (mm_u32)t;
         } else if (strcmp(argv[i], "--no-tz") == 0) {
             opt_no_tz = MM_TRUE;
         } else if (strncmp(argv[i], "--boot-offset=", 14) == 0) {
@@ -2540,6 +2562,7 @@ int main(int argc, char **argv)
                         "[--capstone] [--capstone-verbose] "
 #endif
                         "[--uart-stdout] [--quit-on-faults] [--meminfo] [--no-tz] [--gdb-symbols <elf>] "
+                        "[--expect-bkpt=0xNN] [--timeout=seconds] "
                         "[--boot-offset=0xN] "
                         "[--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]] "
                         "[--usb[:port=<n>]] "
@@ -2560,6 +2583,14 @@ int main(int argc, char **argv)
     mm_uart_io_set_stdout(opt_uart_stdout);
     if (opt_meminfo) {
         mm_scs_set_meminfo(MM_TRUE);
+    }
+    if (opt_timeout > 0u) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = handle_timeout_alarm;
+        sigemptyset(&sa.sa_mask);
+        (void)sigaction(SIGALRM, &sa, 0);
+        alarm(opt_timeout);
     }
 
     if (cpu_name == 0) {
@@ -3345,8 +3376,6 @@ handle_pending:
                     pend_irq = mm_nvic_select_routed(&nvic, &cpu, &irq_sec);
                     if (pend_irq >= 0) {
                         mm_u32 exc_num = 16u + (mm_u32)pend_irq;
-                        printf("[IRQ] irq=%d target=%s\n", pend_irq,
-                               (irq_sec == MM_NONSECURE) ? "NS" : "S");
                         /* Clear pending when accepted. */
                         mm_nvic_set_pending(&nvic, (mm_u32)pend_irq, MM_FALSE);
                         if (!enter_exception_ex(&cpu, &map, &scs, exc_num, cpu.r[15] & ~1u, cpu.xpsr, irq_sec)) {
@@ -3604,6 +3633,17 @@ handle_pending:
                             }
                             continue;
                         }
+                        if (d.kind == MM_OP_BKPT) {
+                            printf("[BKPT] imm=0x%02lx\n", (unsigned long)d.imm);
+                            if (opt_expect_bkpt) {
+                                if (d.imm == expect_bkpt) {
+                                    expect_bkpt_hit = MM_TRUE;
+                                    printf("[EXPECT BKPT] Success\n");
+                                } else {
+                                    printf("[EXPECT BKPT] Fail\n");
+                                }
+                            }
+                        }
                         if (opt_tui && !opt_gdb && done && d.kind == MM_OP_BKPT) {
                             done = MM_FALSE;
                             tui_paused = MM_TRUE;
@@ -3699,6 +3739,9 @@ cleanup:
         mm_tui_register(0);
         mm_tui_stop_thread(&tui);
         mm_tui_shutdown(&tui);
+    }
+    if (opt_expect_bkpt && rc == 0) {
+        rc = expect_bkpt_hit ? 0 : 1;
     }
     return rc;
 }

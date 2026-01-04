@@ -690,6 +690,7 @@ int main(void)
                         printf("SPI read/write OK\r\n");
                     } else {
                         printf("SPI read/write errors: %lu\r\n", (unsigned long)errors);
+                        __asm volatile("bkpt #0x7e");
                     }
 
                     printf("MMAP read @0x60000000:\r\n");
@@ -701,12 +702,21 @@ int main(void)
                     printf("TPM TIS test start\r\n");
                     tpm_tis_read(TPM_ACCESS, tpm_buf, 1u);
                     printf("TPM_ACCESS: %02x\r\n", tpm_buf[0]);
+                    if (tpm_buf[0] == 0xFFu) {
+                        __asm volatile("bkpt #0x7e");
+                    }
                     tpm_buf[0] = 0x02u; /* request locality */
                     tpm_tis_write(TPM_ACCESS, tpm_buf, 1u);
                     tpm_tis_read(TPM_STS, tpm_buf, 1u);
                     printf("TPM_STS: %02x\r\n", tpm_buf[0]);
+                    if (tpm_buf[0] == 0xFFu) {
+                        __asm volatile("bkpt #0x7e");
+                    }
                     tpm_tis_read(TPM_BURST_COUNT, tpm_buf, 2u);
                     printf("TPM_BURST: %02x%02x\r\n", tpm_buf[1], tpm_buf[0]);
+                    if (tpm_buf[0] == 0xFFu && tpm_buf[1] == 0xFFu) {
+                        __asm volatile("bkpt #0x7e");
+                    }
 
                     {
                         uint8_t cmd[12] = {
@@ -730,6 +740,18 @@ int main(void)
                             printf("%02x ", tpm_buf[i]);
                         }
                         printf("\r\n");
+                        {
+                            uint32_t all_ff = 1u;
+                            for (i = 0; i < 10u; ++i) {
+                                if (tpm_buf[i] != 0xFFu) {
+                                    all_ff = 0u;
+                                    break;
+                                }
+                            }
+                            if (all_ff) {
+                                __asm volatile("bkpt #0x7e");
+                            }
+                        }
                     }
                 }
                 last = now;

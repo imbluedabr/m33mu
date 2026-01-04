@@ -33,6 +33,12 @@ Start the interactive terminal UI.
 .BR --record
 Enable in-memory execution trace for reverse stepping.
 .TP
+.BR --expect-bkpt= NN
+Exit with code 0 only if a BKPT with the given immediate (hex) is hit.
+.TP
+.BR --timeout= seconds
+Exit with code 127 if the host timeout elapses (SIGALRM).
+.TP
 .BR --persist
 Write modified flash contents back to the input image files.
 .TP

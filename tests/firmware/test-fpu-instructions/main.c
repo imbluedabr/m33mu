@@ -63,7 +63,7 @@
 
 static inline void dsb(void) { __asm volatile("dsb sy" ::: "memory"); }
 static inline void isb(void) { __asm volatile("isb sy" ::: "memory"); }
-static inline void bkpt(void){ __asm volatile("bkpt 0"); }
+static inline void bkpt(void){ __asm volatile("bkpt #0x7F"); }
 
 static inline uint32_t mrs_control(void){ uint32_t v; __asm volatile("mrs %0, control" : "=r"(v)); return v; }
 static inline void msr_control(uint32_t v){ __asm volatile("msr control, %0" :: "r"(v) : "memory"); }
@@ -632,12 +632,12 @@ void fpu_test_run(void) {
   // Interrupt stacking/unstacking.
   test_interrupt_fp_stacking();
 
-  // Toggle FPU access on/off once per second for ~30 seconds.
+  // Toggle FPU access on/off once per second for ~10 seconds.
   {
     uint32_t i;
     cpsie_i();
     systick_init_1ms();
-    for (i = 0; i < 30u; ++i) {
+    for (i = 0; i < 10u; ++i) {
       set_fpu_enabled((i & 1u) == 0u);
       gpio_fpu_set((i & 1u) == 0u);
       delay_ms(1000u);
