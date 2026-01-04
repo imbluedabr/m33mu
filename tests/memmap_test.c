@@ -49,13 +49,14 @@ static int test_banked_flash_same_backing(void)
     cfg.ram_base_s = cfg.ram_base_ns = 0;
     cfg.ram_size_s = cfg.ram_size_ns = 0;
 
+    memset(flash, 0xFF, sizeof(flash));
     flash[0] = 0x12;
     flash[1] = 0x34;
     mm_memmap_init(&map, regions, 4);
     if (!mm_memmap_configure_flash(&map, &cfg, flash, MM_TRUE)) return 1;
     map.flash.base = 0;
     if (!mm_memmap_read(&map, MM_SECURE, 0, 4, &val)) return 1;
-    if (val != 0x3412u) return 1;
+    if (val != 0xFFFF3412u) return 1;
     return 0;
 }
 

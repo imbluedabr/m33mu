@@ -1,0 +1,19 @@
+name: ctest
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+
+jobs:
+  ctest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build

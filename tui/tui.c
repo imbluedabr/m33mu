@@ -643,16 +643,16 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
     if (key == KEY_F(4)) {
         if (tui->serial_count > 0) {
             if (tui->window2_mode == MM_TUI_WIN2_UART) {
-                if (tui->serial_count > 1) {
-                    tui->serial_selected = (tui->serial_selected + 1) % tui->serial_count;
-                } else {
-                    tui->window2_mode = MM_TUI_WIN2_PERIPH;
-                }
+                tui->window2_mode = MM_TUI_WIN2_PERIPH;
             } else if (tui->window2_mode == MM_TUI_WIN2_PERIPH) {
                 tui->window2_mode = MM_TUI_WIN2_GPIO;
             } else {
                 tui->window2_mode = MM_TUI_WIN2_UART;
-                tui->serial_selected = 0;
+                if (tui->serial_count > 1) {
+                    tui->serial_selected = (tui->serial_selected + 1) % tui->serial_count;
+                } else {
+                    tui->serial_selected = 0;
+                }
             }
         } else {
             tui->window2_mode = (mm_u8)((tui->window2_mode + 1u) % 2u);
