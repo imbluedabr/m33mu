@@ -113,6 +113,7 @@ static mm_u32 read_be_word(const mm_u8 *buf)
            (mm_u32)buf[3];
 }
 
+#ifdef M33MU_HAS_WOLFSSL
 static mm_bool aes_buf_ensure(mm_u8 **buf, mm_u32 *cap, mm_u32 need)
 {
     mm_u32 new_cap;
@@ -137,6 +138,7 @@ static mm_bool aes_buf_append(mm_u8 **buf, mm_u32 *len, mm_u32 *cap, const mm_u8
     *len += size;
     return MM_TRUE;
 }
+#endif
 
 static void aes_reset_auth_state(struct aes_state *a)
 {
@@ -154,6 +156,7 @@ static void aes_reset_auth_state(struct aes_state *a)
     a->gcm_capture_ok = MM_TRUE;
 }
 
+#ifdef M33MU_HAS_WOLFSSL
 static void aes_build_iv_rev(const struct aes_state *a, mm_u8 *iv_out)
 {
     mm_u32 i;
@@ -165,7 +168,9 @@ static void aes_build_iv_rev(const struct aes_state *a, mm_u8 *iv_out)
         iv_out[i * 4u + 3u] = (mm_u8)(w & 0xffu);
     }
 }
+#endif
 
+#ifdef M33MU_HAS_WOLFSSL
 static void aes_ccm_init_from_b0(struct aes_state *a)
 {
     mm_u8 b0[16];
@@ -189,6 +194,7 @@ static void aes_ccm_init_from_b0(struct aes_state *a)
     a->ccm_ctr_valid = MM_TRUE;
     a->ccm_inited = MM_TRUE;
 }
+#endif
 
 void hash_reset_state(struct hash_state *h, mm_bool full_reset)
 {
@@ -270,97 +276,98 @@ static void hash_set_digest_regs(struct hash_state *h)
 
 static void hash_compute_digest(struct hash_state *h, mm_u32 algo)
 {
-    const mm_u8 *data = h->msg;
-    mm_u32 len = h->msg_len;
-    mm_u8 last_buf[4];
-    mm_u32 last_len = 0u;
     mm_u32 nblw = h->nblw & HASH_STR_NBLW_MASK;
-    if (nblw != 0u && len > 0u) {
-        mm_u32 valid_bits = nblw;
-        mm_u32 valid_bytes = (valid_bits + 7u) / 8u;
-        mm_u32 bytes_before = (len >= 4u) ? (len - 4u) : 0u;
-        mm_u32 rem_bits = valid_bits % 8u;
-        memcpy(last_buf, h->msg + bytes_before, 4u);
-        if (valid_bytes < 4u) {
-            memset(last_buf + valid_bytes, 0, 4u - valid_bytes);
-        }
-        if (rem_bits != 0u && valid_bytes > 0u) {
-            mm_u8 mask = (mm_u8)((1u << rem_bits) - 1u);
-            last_buf[valid_bytes - 1u] &= mask;
-        }
-        data = h->msg;
-        len = bytes_before;
-        last_len = valid_bytes;
-    }
-
     h->digest_len = 0u;
 #ifdef M33MU_HAS_WOLFSSL
-    switch (algo) {
-    case 0x0u: {
-        wc_Sha sha;
-        wc_InitSha(&sha);
-        wc_ShaUpdate(&sha, data, len);
-        if (last_len != 0u) wc_ShaUpdate(&sha, last_buf, last_len);
-        wc_ShaFinal(&sha, h->digest);
-        h->digest_len = 20u;
-        break;
-    }
-    case 0x2u: {
-        wc_Sha224 sha;
-        wc_InitSha224(&sha);
-        wc_Sha224Update(&sha, data, len);
-        if (last_len != 0u) wc_Sha224Update(&sha, last_buf, last_len);
-        wc_Sha224Final(&sha, h->digest);
-        h->digest_len = 28u;
-        break;
-    }
-    case 0x3u: {
-        wc_Sha256 sha;
-        wc_InitSha256(&sha);
-        wc_Sha256Update(&sha, data, len);
-        if (last_len != 0u) wc_Sha256Update(&sha, last_buf, last_len);
-        wc_Sha256Final(&sha, h->digest);
-        h->digest_len = 32u;
-        break;
-    }
-    case 0xCu: {
-        wc_Sha384 sha;
-        wc_InitSha384(&sha);
-        wc_Sha384Update(&sha, data, len);
-        if (last_len != 0u) wc_Sha384Update(&sha, last_buf, last_len);
-        wc_Sha384Final(&sha, h->digest);
-        h->digest_len = 48u;
-        break;
-    }
-    case 0xDu: {
-        wc_Sha512_224 sha;
-        wc_InitSha512_224(&sha);
-        wc_Sha512_224Update(&sha, data, len);
-        if (last_len != 0u) wc_Sha512_224Update(&sha, last_buf, last_len);
-        wc_Sha512_224Final(&sha, h->digest);
-        h->digest_len = 28u;
-        break;
-    }
-    case 0xEu: {
-        wc_Sha512_256 sha;
-        wc_InitSha512_256(&sha);
-        wc_Sha512_256Update(&sha, data, len);
-        if (last_len != 0u) wc_Sha512_256Update(&sha, last_buf, last_len);
-        wc_Sha512_256Final(&sha, h->digest);
-        h->digest_len = 32u;
-        break;
-    }
-    case 0xFu: {
-        wc_Sha512 sha;
-        wc_InitSha512(&sha);
-        wc_Sha512Update(&sha, data, len);
-        if (last_len != 0u) wc_Sha512Update(&sha, last_buf, last_len);
-        wc_Sha512Final(&sha, h->digest);
-        h->digest_len = 64u;
-        break;
-    }
-    default:
-        break;
+    {
+        const mm_u8 *data = h->msg;
+        mm_u32 len = h->msg_len;
+        mm_u8 last_buf[4];
+        mm_u32 last_len = 0u;
+        if (nblw != 0u && len > 0u) {
+            mm_u32 valid_bits = nblw;
+            mm_u32 valid_bytes = (valid_bits + 7u) / 8u;
+            mm_u32 bytes_before = (len >= 4u) ? (len - 4u) : 0u;
+            mm_u32 rem_bits = valid_bits % 8u;
+            memcpy(last_buf, h->msg + bytes_before, 4u);
+            if (valid_bytes < 4u) {
+                memset(last_buf + valid_bytes, 0, 4u - valid_bytes);
+            }
+            if (rem_bits != 0u && valid_bytes > 0u) {
+                mm_u8 mask = (mm_u8)((1u << rem_bits) - 1u);
+                last_buf[valid_bytes - 1u] &= mask;
+            }
+            data = h->msg;
+            len = bytes_before;
+            last_len = valid_bytes;
+        }
+        switch (algo) {
+        case 0x0u: {
+            wc_Sha sha;
+            wc_InitSha(&sha);
+            wc_ShaUpdate(&sha, data, len);
+            if (last_len != 0u) wc_ShaUpdate(&sha, last_buf, last_len);
+            wc_ShaFinal(&sha, h->digest);
+            h->digest_len = 20u;
+            break;
+        }
+        case 0x2u: {
+            wc_Sha224 sha;
+            wc_InitSha224(&sha);
+            wc_Sha224Update(&sha, data, len);
+            if (last_len != 0u) wc_Sha224Update(&sha, last_buf, last_len);
+            wc_Sha224Final(&sha, h->digest);
+            h->digest_len = 28u;
+            break;
+        }
+        case 0x3u: {
+            wc_Sha256 sha;
+            wc_InitSha256(&sha);
+            wc_Sha256Update(&sha, data, len);
+            if (last_len != 0u) wc_Sha256Update(&sha, last_buf, last_len);
+            wc_Sha256Final(&sha, h->digest);
+            h->digest_len = 32u;
+            break;
+        }
+        case 0xCu: {
+            wc_Sha384 sha;
+            wc_InitSha384(&sha);
+            wc_Sha384Update(&sha, data, len);
+            if (last_len != 0u) wc_Sha384Update(&sha, last_buf, last_len);
+            wc_Sha384Final(&sha, h->digest);
+            h->digest_len = 48u;
+            break;
+        }
+        case 0xDu: {
+            wc_Sha512_224 sha;
+            wc_InitSha512_224(&sha);
+            wc_Sha512_224Update(&sha, data, len);
+            if (last_len != 0u) wc_Sha512_224Update(&sha, last_buf, last_len);
+            wc_Sha512_224Final(&sha, h->digest);
+            h->digest_len = 28u;
+            break;
+        }
+        case 0xEu: {
+            wc_Sha512_256 sha;
+            wc_InitSha512_256(&sha);
+            wc_Sha512_256Update(&sha, data, len);
+            if (last_len != 0u) wc_Sha512_256Update(&sha, last_buf, last_len);
+            wc_Sha512_256Final(&sha, h->digest);
+            h->digest_len = 32u;
+            break;
+        }
+        case 0xFu: {
+            wc_Sha512 sha;
+            wc_InitSha512(&sha);
+            wc_Sha512Update(&sha, data, len);
+            if (last_len != 0u) wc_Sha512Update(&sha, last_buf, last_len);
+            wc_Sha512Final(&sha, h->digest);
+            h->digest_len = 64u;
+            break;
+        }
+        default:
+            break;
+        }
     }
 #else
     (void)algo;
@@ -549,6 +556,7 @@ mm_bool aes_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_o
     return MM_TRUE;
 }
 
+#ifdef M33MU_HAS_WOLFSSL
 static void aes_build_key(struct aes_state *a, mm_u8 *key_out, mm_u32 key_len)
 {
     mm_u32 i;
@@ -582,8 +590,9 @@ static mm_u32 aes_gcm_iv_len(const mm_u8 *iv)
     }
     return 16u;
 }
+#endif
 
-#ifndef WOLFSSL_AESGCM_STREAM
+#if defined(M33MU_HAS_WOLFSSL) && !defined(WOLFSSL_AESGCM_STREAM)
 static void aes_unreverse_words(mm_u8 *buf)
 {
     mm_u32 i;
@@ -596,6 +605,7 @@ static void aes_unreverse_words(mm_u8 *buf)
 }
 #endif
 
+#ifdef M33MU_HAS_WOLFSSL
 static void aes_store_iv(struct aes_state *a, const mm_u8 *iv_in)
 {
     mm_u32 i;
@@ -606,6 +616,7 @@ static void aes_store_iv(struct aes_state *a, const mm_u8 *iv_in)
                               (mm_u32)iv_in[i * 4u + 3u];
     }
 }
+#endif
 
 #ifdef M33MU_HAS_WOLFSSL
 static void aes_store_iv_words(struct aes_state *a, const word32 *iv_words)
@@ -672,6 +683,8 @@ static void aes_process_block(struct aes_state *a)
     (void)key_len;
     (void)key;
     (void)iv;
+    (void)chmod;
+    (void)decrypt;
     memcpy(a->out_block, a->in_block, sizeof(a->out_block));
 #endif
     a->out_ready = MM_TRUE;
@@ -728,6 +741,7 @@ static void aes_prepare_gcm(struct aes_state *a, mm_bool decrypt)
 #endif
     a->gcm_inited = MM_TRUE;
 #else
+    (void)a;
     (void)decrypt;
 #endif
 }
@@ -819,6 +833,7 @@ static void aes_handle_gcm_block(struct aes_state *a, mm_u32 phase, mm_bool decr
     }
 #endif
 #else
+    (void)a;
     (void)phase;
     (void)decrypt;
     (void)in;
@@ -952,6 +967,7 @@ static void aes_finalize_gcm(struct aes_state *a, mm_bool decrypt)
     a->out_ready = MM_TRUE;
     a->out_word = 0u;
 #else
+    (void)a;
     (void)decrypt;
 #endif
 }
@@ -995,6 +1011,7 @@ static void aes_handle_ccm_block(struct aes_state *a, mm_u32 phase, mm_bool decr
         }
     }
 #else
+    (void)a;
     (void)phase;
     (void)decrypt;
     (void)in;
@@ -1027,6 +1044,7 @@ static void aes_finalize_ccm(struct aes_state *a, mm_bool decrypt)
     a->out_ready = MM_TRUE;
     a->out_word = 0u;
 #else
+    (void)a;
     (void)decrypt;
 #endif
 }

@@ -787,7 +787,7 @@ static void tui_draw(struct mm_tui *tui)
     tui_draw_text(console_w + 2, 3, w - 1, menu_fg, menu_bg, "Stop/Continue (F2)");
     tui_draw_text(console_w + 2, 5, w - 1, menu_fg, menu_bg,
                   (tui->window1_mode == MM_TUI_WIN1_LOG) ? "CPU (F3)" : "LOG (F3)");
-    tui_draw_text(console_w + 2, 7, w - 1, menu_fg, menu_bg, "Next window2 (F4)");
+    tui_draw_text(console_w + 2, 7, w - 1, menu_fg, menu_bg, "Next peripheral (F4)");
     {
         uintattr_t reload_fg = tui->target_running ? TUI_FG_DIM : menu_fg;
         tui_draw_text(console_w + 2, 9, w - 1, reload_fg, menu_bg, "Reload images (F5)");
