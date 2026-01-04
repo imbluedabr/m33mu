@@ -411,6 +411,11 @@ endif()
 # -----------------------------------------------------------------------------
 add_custom_target(firmware-build
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563 app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32u585 app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32l552 app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-mcxw app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-nrf5340 app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-fpu-instructions app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-rtos-exceptions app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-systick-wfi app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-tz-bxns-cmse-sau-mpu clean all
