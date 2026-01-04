@@ -5,6 +5,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <sys/random.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <stdlib.h>
 #include "nrf5340/nrf5340_mmio.h"
 #include "nrf5340/nrf5340_wdt.h"
 #include "m33mu/memmap.h"
@@ -448,6 +451,7 @@ static mm_bool nvmc_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
 static mm_bool rng_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
     struct rng_state *rng = (struct rng_state *)opaque;
+    ssize_t n;
     if (rng == 0 || value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
     if ((offset + size_bytes) > RNG_SIZE) return MM_FALSE;
 
@@ -456,7 +460,18 @@ static mm_bool rng_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
             *value_out = (mm_u32)rng->value;
             return MM_TRUE;
         }
-        (void)getrandom(&rng->value, sizeof(rng->value), 0);
+        for (;;) {
+            n = getrandom(&rng->value, sizeof(rng->value), 0);
+            if (n == (ssize_t)sizeof(rng->value)) {
+                break;
+            }
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            fprintf(stderr, "[RNG] getrandom failed: %s\n",
+                    (n < 0) ? strerror(errno) : "short read");
+            exit(1);
+        }
         rng->regs[RNG_EVENTS_VALRDY / 4] = 1u;
         *value_out = (mm_u32)rng->value;
         return MM_TRUE;
@@ -469,13 +484,25 @@ static mm_bool rng_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
 static mm_bool rng_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
     struct rng_state *rng = (struct rng_state *)opaque;
+    ssize_t n;
     if (rng == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
     if ((offset + size_bytes) > RNG_SIZE) return MM_FALSE;
 
     if (offset == RNG_TASKS_START && size_bytes == 4) {
         if ((value & 1u) != 0u) {
             rng->running = MM_TRUE;
-            (void)getrandom(&rng->value, sizeof(rng->value), 0);
+            for (;;) {
+                n = getrandom(&rng->value, sizeof(rng->value), 0);
+                if (n == (ssize_t)sizeof(rng->value)) {
+                    break;
+                }
+                if (n < 0 && errno == EINTR) {
+                    continue;
+                }
+                fprintf(stderr, "[RNG] getrandom failed: %s\n",
+                        (n < 0) ? strerror(errno) : "short read");
+                exit(1);
+            }
             rng->regs[RNG_EVENTS_VALRDY / 4] = 1u;
         }
         return MM_TRUE;
