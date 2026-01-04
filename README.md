@@ -5,8 +5,6 @@
 m33mu is a Cortex-M33 emulator.
 m33mu emulates ARMv8-M Cortex-M targets with TrustZone awareness.
 
-Current status: Beta
-
 
 ## Copyright / License
 
