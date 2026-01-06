@@ -63,6 +63,10 @@
 #ifdef M33MU_HAS_LIBDW
 #include <elfutils/libdwfl.h>
 #endif
+#ifdef M33MU_HAS_LIBELF
+#include <libelf.h>
+#include <gelf.h>
+#endif
 
 #define CCR_DIV_0_TRP (1u << 4)
 #define CCR_STKALIGN (1u << 9)
@@ -259,7 +263,22 @@ struct mm_image_spec {
     char *path;
     mm_u32 offset;
     size_t loaded;
+    mm_u32 load_start;
+    mm_u32 load_end;
+    mm_u8 type;
 };
+
+enum mm_image_type {
+    MM_IMAGE_BIN = 0,
+    MM_IMAGE_ELF,
+    MM_IMAGE_IHEX,
+    MM_IMAGE_UNKNOWN
+};
+
+static int load_image_autodetect(struct mm_image_spec *img,
+                                 const struct mm_target_cfg *cfg,
+                                 mm_u8 *flash,
+                                 size_t flash_size);
 
 static mm_u32 read_u32_le(const mm_u8 *buf)
 {
@@ -343,6 +362,7 @@ static mm_bool reload_images(struct mm_image_spec *images,
                              int image_count,
                              mm_u8 *flash,
                              size_t flash_size,
+                             const struct mm_target_cfg *cfg,
                              size_t *loaded_total,
                              size_t *loaded_max_end)
 {
@@ -357,16 +377,13 @@ static mm_bool reload_images(struct mm_image_spec *images,
         flash[idx] = 0xFFu;
     }
     for (i = 0; i < image_count; ++i) {
-        size_t n = 0;
-        mm_u32 b0 = images[i].offset;
-        if (load_file_at(images[i].path, flash, flash_size, images[i].offset, &n) != 0) {
+        if (load_image_autodetect(&images[i], cfg, flash, flash_size) != 0) {
             fprintf(stderr, "failed to reload image %s\n", images[i].path);
             return MM_FALSE;
         }
-        images[i].loaded = n;
-        total += n;
-        if ((size_t)b0 + n > max_end) {
-            max_end = (size_t)b0 + n;
+        total += images[i].loaded;
+        if ((size_t)images[i].load_end > max_end) {
+            max_end = (size_t)images[i].load_end;
         }
     }
     *loaded_total = total;
@@ -617,35 +634,40 @@ static void build_symbol_db(const struct mm_image_spec *images,
         for (i = 0; i < (int)gdb_symbol_count; ++i) {
             const char *sym = gdb_symbols[i];
             if (sym != 0 && sym[0] != '\0' && access(sym, R_OK) == 0) {
-                (void)add_symbol_path(sym, paths, &path_count, 32u);
+                if (add_symbol_path(sym, paths, &path_count, 32u)) {
+                    printf("Symbols: %s (from --gdb-symbols)\n", sym);
+                }
             }
         }
     }
     for (i = 0; i < image_count; ++i) {
-        const char *img = (images != 0) ? images[i].path : 0;
+        const struct mm_image_spec *img = (images != 0) ? &images[i] : 0;
+        const char *img_path = (img != 0) ? img->path : 0;
         size_t len;
-        if (img == 0 || img[0] == '\0') continue;
-        len = strlen(img);
-        if (len > 4 && strcmp(img + len - 4, ".elf") == 0) {
-            if (access(img, R_OK) == 0) {
+        if (img_path == 0 || img_path[0] == '\0') continue;
+        len = strlen(img_path);
+        if (img != 0 && img->type == MM_IMAGE_ELF) {
+            if (access(img_path, R_OK) == 0) {
                 mm_bool skip = MM_FALSE;
                 if (gdb_symbols != 0) {
                     int si;
                     for (si = 0; si < (int)gdb_symbol_count; ++si) {
-                        if (symbol_stem_match(img, gdb_symbols[si])) {
+                        if (symbol_stem_match(img_path, gdb_symbols[si])) {
                             skip = MM_TRUE;
                             break;
                         }
                     }
                 }
                 if (!skip) {
-                    (void)add_symbol_path(img, paths, &path_count, 32u);
+                    if (add_symbol_path(img_path, paths, &path_count, 32u)) {
+                        printf("Symbols: %s (auto for %s)\n", img_path, img_path);
+                    }
                 }
             }
-        } else if (len > 4 && strcmp(img + len - 4, ".bin") == 0) {
+        } else if (len > 4) {
             if (elf_count < 32u) {
                 snprintf(elf_paths[elf_count], sizeof(elf_paths[elf_count]),
-                         "%.*s.elf", (int)(len - 4), img);
+                         "%.*s.elf", (int)(len - 4), img_path);
                 if (access(elf_paths[elf_count], R_OK) == 0) {
                     mm_bool skip = MM_FALSE;
                     if (gdb_symbols != 0) {
@@ -658,7 +680,9 @@ static void build_symbol_db(const struct mm_image_spec *images,
                         }
                     }
                     if (!skip) {
-                        (void)add_symbol_path(elf_paths[elf_count], paths, &path_count, 32u);
+                        if (add_symbol_path(elf_paths[elf_count], paths, &path_count, 32u)) {
+                            printf("Symbols: %s (auto for %s)\n", elf_paths[elf_count], img_path);
+                        }
                     }
                 }
                 elf_count++;
@@ -1032,6 +1056,353 @@ static int load_file_at(const char *path, mm_u8 *dst, size_t max_len, mm_u32 off
         return -1;
     }
     return load_file(path, dst + offset, max_len - (size_t)offset, loaded);
+}
+
+static const char *image_type_name(mm_u8 type)
+{
+    switch (type) {
+    case MM_IMAGE_ELF: return "ELF";
+    case MM_IMAGE_IHEX: return "IHEX";
+    case MM_IMAGE_BIN: return "BIN";
+    default: return "UNKNOWN";
+    }
+}
+
+static mm_u8 detect_image_type(const char *path)
+{
+    FILE *f;
+    unsigned char buf[8];
+    size_t n;
+    if (path == 0) return MM_IMAGE_UNKNOWN;
+    {
+        const char *ext = strrchr(path, '.');
+        if (ext != 0) {
+            if (strcmp(ext, ".elf") == 0) return MM_IMAGE_ELF;
+            if (strcmp(ext, ".hex") == 0 || strcmp(ext, ".ihex") == 0) return MM_IMAGE_IHEX;
+        }
+    }
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return MM_IMAGE_UNKNOWN;
+    }
+    n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    if (n >= 4 && buf[0] == 0x7fu && buf[1] == 'E' && buf[2] == 'L' && buf[3] == 'F') {
+        return MM_IMAGE_ELF;
+    }
+    if (n > 0 && buf[0] == ':') {
+        return MM_IMAGE_IHEX;
+    }
+    return MM_IMAGE_BIN;
+}
+
+static mm_bool map_flash_offset(const struct mm_target_cfg *cfg, mm_u32 addr, mm_u32 *off_out)
+{
+    if (cfg == 0 || off_out == 0) return MM_FALSE;
+    if (addr >= cfg->flash_base_s && addr < (cfg->flash_base_s + cfg->flash_size_s)) {
+        *off_out = addr - cfg->flash_base_s;
+        return MM_TRUE;
+    }
+    if (addr >= cfg->flash_base_ns && addr < (cfg->flash_base_ns + cfg->flash_size_ns)) {
+        *off_out = addr - cfg->flash_base_ns;
+        return MM_TRUE;
+    }
+    if (addr < cfg->flash_size_s) {
+        *off_out = addr;
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static int load_elf_segments(const char *path,
+                             const struct mm_target_cfg *cfg,
+                             mm_u8 *flash,
+                             size_t flash_size,
+                             mm_u32 offset,
+                             mm_u32 *start_out,
+                             mm_u32 *end_out,
+                             size_t *loaded_out)
+{
+#ifdef M33MU_HAS_LIBELF
+    int fd = -1;
+    FILE *f = NULL;
+    Elf *elf = NULL;
+    GElf_Ehdr ehdr;
+    size_t phnum = 0;
+    size_t i;
+    mm_bool any = MM_FALSE;
+    mm_u32 min_off = 0xffffffffu;
+    mm_u32 max_off = 0u;
+    size_t loaded = 0;
+
+    if (start_out) *start_out = 0u;
+    if (end_out) *end_out = 0u;
+    if (loaded_out) *loaded_out = 0u;
+    if (cfg == 0 || flash == 0 || flash_size == 0u) {
+        return -1;
+    }
+    if (elf_version(EV_CURRENT) == EV_NONE) {
+        return -1;
+    }
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+    fd = fileno(f);
+    elf = elf_begin(fd, ELF_C_READ, NULL);
+    if (elf == NULL) {
+        fclose(f);
+        return -1;
+    }
+    if (gelf_getehdr(elf, &ehdr) == NULL) {
+        elf_end(elf);
+        fclose(f);
+        return -1;
+    }
+    if (elf_getphdrnum(elf, &phnum) != 0) {
+        elf_end(elf);
+        fclose(f);
+        return -1;
+    }
+    for (i = 0; i < phnum; ++i) {
+        GElf_Phdr phdr;
+        mm_u32 addr;
+        mm_u32 off;
+        size_t to_read;
+        if (gelf_getphdr(elf, (int)i, &phdr) == NULL) {
+            continue;
+        }
+        if (phdr.p_type != PT_LOAD || phdr.p_filesz == 0) {
+            continue;
+        }
+        addr = (mm_u32)phdr.p_paddr;
+        if (addr == 0u) {
+            addr = (mm_u32)phdr.p_vaddr;
+        }
+        if (!map_flash_offset(cfg, addr, &off)) {
+            if (addr < cfg->flash_size_s) {
+                off = addr;
+            } else {
+                fprintf(stderr, "warning: ELF segment 0x%08lx out of flash range (file %s)\n",
+                        (unsigned long)addr, path);
+                continue;
+            }
+        }
+        if (addr < cfg->flash_size_s && offset != 0u) {
+            off += offset;
+        }
+        if ((size_t)off >= flash_size) {
+            fprintf(stderr, "warning: ELF segment offset 0x%08lx out of bounds (file %s)\n",
+                    (unsigned long)off, path);
+            continue;
+        }
+        to_read = (size_t)phdr.p_filesz;
+        if ((size_t)off + to_read > flash_size) {
+            to_read = flash_size - (size_t)off;
+        }
+        if (fseek(f, (long)phdr.p_offset, SEEK_SET) != 0) {
+            continue;
+        }
+        if (fread(flash + off, 1, to_read, f) != to_read) {
+            fprintf(stderr, "warning: short read for ELF segment (file %s)\n", path);
+        }
+        if (off < min_off) min_off = off;
+        if (off + (mm_u32)to_read > max_off) max_off = off + (mm_u32)to_read;
+        loaded += to_read;
+        any = MM_TRUE;
+    }
+    elf_end(elf);
+    fclose(f);
+    if (!any) {
+        return -1;
+    }
+    if (start_out) *start_out = min_off;
+    if (end_out) *end_out = max_off;
+    if (loaded_out) *loaded_out = loaded;
+    return 0;
+#else
+    (void)path;
+    (void)cfg;
+    (void)flash;
+    (void)flash_size;
+    (void)offset;
+    if (start_out) *start_out = 0u;
+    if (end_out) *end_out = 0u;
+    if (loaded_out) *loaded_out = 0u;
+    return -1;
+#endif
+}
+
+static mm_bool parse_ihex_byte(const char *s, mm_u8 *out)
+{
+    int hi, lo;
+    if (s == 0 || out == 0) return MM_FALSE;
+    hi = (s[0] >= '0' && s[0] <= '9') ? (s[0] - '0')
+        : (s[0] >= 'a' && s[0] <= 'f') ? (s[0] - 'a' + 10)
+        : (s[0] >= 'A' && s[0] <= 'F') ? (s[0] - 'A' + 10)
+        : -1;
+    lo = (s[1] >= '0' && s[1] <= '9') ? (s[1] - '0')
+        : (s[1] >= 'a' && s[1] <= 'f') ? (s[1] - 'a' + 10)
+        : (s[1] >= 'A' && s[1] <= 'F') ? (s[1] - 'A' + 10)
+        : -1;
+    if (hi < 0 || lo < 0) return MM_FALSE;
+    *out = (mm_u8)((hi << 4) | lo);
+    return MM_TRUE;
+}
+
+static int load_ihex(const char *path,
+                     const struct mm_target_cfg *cfg,
+                     mm_u8 *flash,
+                     size_t flash_size,
+                     mm_u32 offset,
+                     mm_u32 *start_out,
+                     mm_u32 *end_out,
+                     size_t *loaded_out)
+{
+    FILE *f;
+    char line[1024];
+    mm_u32 upper = 0;
+    mm_u32 min_off = 0xffffffffu;
+    mm_u32 max_off = 0u;
+    size_t loaded = 0;
+    mm_bool any = MM_FALSE;
+
+    if (start_out) *start_out = 0u;
+    if (end_out) *end_out = 0u;
+    if (loaded_out) *loaded_out = 0u;
+    if (cfg == 0 || flash == 0 || flash_size == 0u) {
+        return -1;
+    }
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+    while (fgets(line, sizeof(line), f) != NULL) {
+        mm_u8 count;
+        mm_u8 rectype;
+        mm_u8 b;
+        mm_u32 addr;
+        mm_u32 full;
+        int i;
+        if (line[0] != ':') {
+            continue;
+        }
+        if (!parse_ihex_byte(line + 1, &count)) {
+            continue;
+        }
+        if (!parse_ihex_byte(line + 3, &b)) {
+            continue;
+        }
+        addr = (mm_u32)b << 8;
+        if (!parse_ihex_byte(line + 5, &b)) {
+            continue;
+        }
+        addr |= b;
+        if (!parse_ihex_byte(line + 7, &rectype)) {
+            continue;
+        }
+        if (rectype == 0x00u) {
+            mm_u32 off;
+            full = (upper << 16) + addr;
+            if (!map_flash_offset(cfg, full, &off)) {
+                if (full < cfg->flash_size_s) {
+                    off = full;
+                } else {
+                    continue;
+                }
+            }
+            if (full < cfg->flash_size_s && offset != 0u) {
+                off += offset;
+            }
+            for (i = 0; i < count; ++i) {
+                mm_u8 byte;
+                size_t pos = 9u + (size_t)i * 2u;
+                if (!parse_ihex_byte(line + pos, &byte)) {
+                    break;
+                }
+                if ((size_t)off + (size_t)i < flash_size) {
+                    flash[off + (mm_u32)i] = byte;
+                }
+            }
+            if (off < min_off) min_off = off;
+            if (off + (mm_u32)count > max_off) max_off = off + (mm_u32)count;
+            loaded += count;
+            any = MM_TRUE;
+        } else if (rectype == 0x01u) {
+            break;
+        } else if (rectype == 0x04u) {
+            mm_u8 hi, lo;
+            if (parse_ihex_byte(line + 9, &hi) && parse_ihex_byte(line + 11, &lo)) {
+                upper = ((mm_u32)hi << 8) | (mm_u32)lo;
+            }
+        } else if (rectype == 0x02u) {
+            mm_u8 hi, lo;
+            if (parse_ihex_byte(line + 9, &hi) && parse_ihex_byte(line + 11, &lo)) {
+                upper = (((mm_u32)hi << 8) | (mm_u32)lo) >> 4;
+            }
+        }
+    }
+    fclose(f);
+    if (!any) {
+        return -1;
+    }
+    if (start_out) *start_out = min_off;
+    if (end_out) *end_out = max_off;
+    if (loaded_out) *loaded_out = loaded;
+    return 0;
+}
+
+static int load_image_autodetect(struct mm_image_spec *img,
+                                 const struct mm_target_cfg *cfg,
+                                 mm_u8 *flash,
+                                 size_t flash_size)
+{
+    mm_u32 start = 0;
+    mm_u32 end = 0;
+    size_t loaded = 0;
+    if (img == 0 || img->path == 0) {
+        return -1;
+    }
+    img->type = detect_image_type(img->path);
+    img->loaded = 0;
+    img->load_start = 0;
+    img->load_end = 0;
+    switch (img->type) {
+    case MM_IMAGE_ELF:
+        if (img->offset != 0u) {
+            printf("warning: ignoring offset for ELF image %s\n", img->path);
+        }
+        if (load_elf_segments(img->path, cfg, flash, flash_size, img->offset, &start, &end, &loaded) != 0) {
+            fprintf(stderr, "failed to load ELF image %s (missing libelf?)\n", img->path);
+            return -1;
+        }
+        img->loaded = loaded;
+        img->load_start = start;
+        img->load_end = end;
+        break;
+    case MM_IMAGE_IHEX:
+        if (img->offset != 0u) {
+            printf("warning: applying offset to IHEX image %s\n", img->path);
+        }
+        if (load_ihex(img->path, cfg, flash, flash_size, img->offset, &start, &end, &loaded) != 0) {
+            return -1;
+        }
+        img->loaded = loaded;
+        img->load_start = start;
+        img->load_end = end;
+        break;
+    case MM_IMAGE_BIN:
+    default:
+        if (load_file_at(img->path, flash, flash_size, img->offset, &loaded) != 0) {
+            return -1;
+        }
+        img->type = MM_IMAGE_BIN;
+        img->loaded = loaded;
+        img->load_start = img->offset;
+        img->load_end = img->offset + (mm_u32)loaded;
+        break;
+    }
+    return 0;
 }
 
 static mm_bool parse_u32(const char *s, mm_u32 *out)
@@ -2936,6 +3307,9 @@ int main(int argc, char **argv)
             images[image_count].path = 0;
             images[image_count].offset = 0;
             images[image_count].loaded = 0;
+            images[image_count].load_start = 0;
+            images[image_count].load_end = 0;
+            images[image_count].type = MM_IMAGE_UNKNOWN;
             if (!parse_image_spec(argv[i], &images[image_count].path, &images[image_count].offset)) {
                 fprintf(stderr, "invalid image spec: %s\n", argv[i]);
                 return 1;
@@ -2962,14 +3336,13 @@ int main(int argc, char **argv)
 #ifdef M33MU_HAS_LIBTPMS
                         "[--tpm:SPIx:cs=GPIONAME[:file=<path>]] "
 #endif
-                        "<image.bin[:offset]> [more images...]\n",
+                        "<image.bin[:offset]|image.elf|image.hex> [more images...]\n",
                 argv[0]);
         return 1;
     }
 
     g_quit_on_faults = opt_quit_on_faults;
     g_call_trace = opt_call_trace;
-    build_symbol_db(images, image_count, gdb_symbols_list, gdb_symbols_count);
     if (opt_tui && opt_uart_stdout) {
         fprintf(stderr, "warning: --uart-stdout disabled while TUI is active\n");
         opt_uart_stdout = MM_FALSE;
@@ -3066,40 +3439,55 @@ int main(int argc, char **argv)
     }
 
     for (i = 0; i < image_count; ++i) {
-        size_t n = 0;
         int j;
         mm_u32 b0;
-        b0 = images[i].offset;
-        if (load_file_at(images[i].path, flash, cfg.flash_size_s, images[i].offset, &n) != 0) {
+        mm_u32 b1;
+        if (load_image_autodetect(&images[i], &cfg, flash, cfg.flash_size_s) != 0) {
             fprintf(stderr, "failed to load image %s\n", images[i].path);
             rc = 1;
             goto cleanup;
         }
-        images[i].loaded = n;
-        loaded_total += n;
-        if ((size_t)images[i].offset + n > loaded_max_end) {
-            loaded_max_end = (size_t)images[i].offset + n;
+        b0 = images[i].load_start;
+        b1 = images[i].load_end;
+        loaded_total += images[i].loaded;
+        if ((size_t)b1 > loaded_max_end) {
+            loaded_max_end = (size_t)b1;
         }
         for (j = 0; j < i; ++j) {
-            mm_u32 a0 = images[j].offset;
-            mm_u32 a1 = images[j].offset + (mm_u32)images[j].loaded;
-            mm_u32 b1 = b0 + (mm_u32)images[i].loaded;
+            mm_u32 a0 = images[j].load_start;
+            mm_u32 a1 = images[j].load_end;
             if (!(b1 <= a0 || b0 >= a1)) {
                 fprintf(stderr, "warning: image %s overlaps %s\n", images[i].path, images[j].path);
             }
         }
+        printf("Loaded %s image %s: %zu bytes [0x%08lx..0x%08lx]\n",
+               image_type_name(images[i].type),
+               images[i].path,
+               images[i].loaded,
+               (unsigned long)images[i].load_start,
+               (unsigned long)images[i].load_end);
     }
+
+    build_symbol_db(images, image_count, gdb_symbols_list, gdb_symbols_count);
 
     memset(&persist, 0, sizeof(persist));
     if (opt_persist) {
         const char *paths[16];
         mm_u32 offsets[16];
         int k;
+        int persist_count = 0;
         for (k = 0; k < image_count; ++k) {
-            paths[k] = images[k].path;
-            offsets[k] = images[k].offset;
+            if (images[k].type != MM_IMAGE_BIN) {
+                printf("warning: persist skipped for non-BIN image %s\n", images[k].path);
+                continue;
+            }
+            paths[persist_count] = images[k].path;
+            offsets[persist_count] = images[k].offset;
+            persist_count++;
         }
-        mm_flash_persist_build(&persist, flash, cfg.flash_size_s, paths, offsets, image_count);
+        if (persist_count > 0) {
+            mm_flash_persist_build(&persist, flash, cfg.flash_size_s, paths, offsets, persist_count);
+        }
     }
 
     mm_gdb_stub_init(&gdb);
@@ -3126,13 +3514,6 @@ int main(int argc, char **argv)
     }
 
     {
-        int k;
-        for (k = 0; k < image_count; ++k) {
-            printf("Loaded %zu bytes from %s @+0x%08lx\n",
-                   images[k].loaded,
-                   images[k].path,
-                   (unsigned long)images[k].offset);
-        }
         printf("Loaded total %zu bytes (max_end=0x%08lx)\n",
                loaded_total,
                (unsigned long)loaded_max_end);
@@ -3630,17 +4011,25 @@ int main(int argc, char **argv)
                 }
 
                 if (!opt_gdb && reload_pending && tui_paused) {
-                    if (reload_images(images, image_count, flash, cfg.flash_size_s, &loaded_total, &loaded_max_end)) {
+                    if (reload_images(images, image_count, flash, cfg.flash_size_s, &cfg, &loaded_total, &loaded_max_end)) {
                         if (opt_persist) {
                             const char *paths[16];
                             mm_u32 offsets[16];
                             int k;
+                            int persist_count = 0;
                             for (k = 0; k < image_count; ++k) {
-                                paths[k] = images[k].path;
-                                offsets[k] = images[k].offset;
+                                if (images[k].type != MM_IMAGE_BIN) {
+                                    continue;
+                                }
+                                paths[persist_count] = images[k].path;
+                                offsets[persist_count] = images[k].offset;
+                                persist_count++;
                             }
-                            mm_flash_persist_build(&persist, flash, cfg.flash_size_s, paths, offsets, image_count);
+                            if (persist_count > 0) {
+                                mm_flash_persist_build(&persist, flash, cfg.flash_size_s, paths, offsets, persist_count);
+                            }
                         }
+                        build_symbol_db(images, image_count, gdb_symbols_list, gdb_symbols_count);
                         mm_system_request_reset();
                     }
                     reload_pending = MM_FALSE;

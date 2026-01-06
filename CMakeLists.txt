@@ -364,7 +364,32 @@ if(M33MU_HAS_NCURSES)
 endif()
 
 # -----------------------------------------------------------------------------
-# 7) Optional libdw/libdwfl detection (symbolization)
+# 7) Optional libelf detection (ELF loader)
+# -----------------------------------------------------------------------------
+set(M33MU_HAS_LIBELF FALSE)
+find_path(LIBELF_INCLUDE_DIR
+  NAMES libelf.h
+)
+find_library(LIBELF_LIBRARY
+  NAMES elf
+)
+if(LIBELF_INCLUDE_DIR AND LIBELF_LIBRARY)
+  set(M33MU_HAS_LIBELF TRUE)
+  add_library(libelf::libelf UNKNOWN IMPORTED)
+  set_target_properties(libelf::libelf PROPERTIES
+    IMPORTED_LOCATION "${LIBELF_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${LIBELF_INCLUDE_DIR}"
+  )
+  target_compile_definitions(m33mu_lib PUBLIC M33MU_HAS_LIBELF=1)
+  target_link_libraries(m33mu_lib PUBLIC libelf::libelf)
+else()
+  list(APPEND M33MU_CONFIG_WARNINGS
+    "libelf not found: ELF loading disabled (symbolization/call trace may be limited)."
+  )
+endif()
+
+# -----------------------------------------------------------------------------
+# 8) Optional libdw/libdwfl detection (symbolization)
 # -----------------------------------------------------------------------------
 set(M33MU_HAS_LIBDW FALSE)
 if(M33MU_ENABLE_LIBDW)
@@ -379,10 +404,6 @@ if(M33MU_ENABLE_LIBDW)
     NAMES dw
     HINTS ${PC_LIBDW_LIBRARY_DIRS}
   )
-  find_library(LIBELF_LIBRARY
-    NAMES elf
-    HINTS ${PC_LIBDW_LIBRARY_DIRS}
-  )
   if(LIBDW_INCLUDE_DIR AND LIBDW_LIBRARY AND LIBELF_LIBRARY)
     set(M33MU_HAS_LIBDW TRUE)
     add_library(libdw::libdw UNKNOWN IMPORTED)
@@ -390,21 +411,16 @@ if(M33MU_ENABLE_LIBDW)
       IMPORTED_LOCATION "${LIBDW_LIBRARY}"
       INTERFACE_INCLUDE_DIRECTORIES "${LIBDW_INCLUDE_DIR}"
     )
-    add_library(libdw::libelf UNKNOWN IMPORTED)
-    set_target_properties(libdw::libelf PROPERTIES
-      IMPORTED_LOCATION "${LIBELF_LIBRARY}"
-      INTERFACE_INCLUDE_DIRECTORIES "${LIBDW_INCLUDE_DIR}"
-    )
   else()
-    list(APPEND M33MU_CONFIG_WARNINGS
-      "libdw/libdwfl not found: symbolization disabled."
-    )
+  list(APPEND M33MU_CONFIG_WARNINGS
+    "libdw/libdwfl not found: symbolization disabled (call trace + ELF symbol names unavailable)."
+  )
   endif()
 endif()
 
 if(M33MU_HAS_LIBDW)
   target_compile_definitions(m33mu_lib PUBLIC M33MU_HAS_LIBDW=1)
-  target_link_libraries(m33mu_lib PUBLIC libdw::libdw libdw::libelf)
+  target_link_libraries(m33mu_lib PUBLIC libdw::libdw libelf::libelf)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -603,6 +619,11 @@ if(M33MU_HAS_NCURSES)
 else()
   set(M33MU_STATUS_NCURSES "${M33MU_COLOR_RED}not found${M33MU_COLOR_RESET}")
 endif()
+if(M33MU_HAS_LIBELF)
+  set(M33MU_STATUS_LIBELF "${M33MU_COLOR_GREEN}detected${M33MU_COLOR_RESET}")
+else()
+  set(M33MU_STATUS_LIBELF "${M33MU_COLOR_RED}not found${M33MU_COLOR_RESET}")
+endif()
 if(M33MU_HAS_LIBDW)
   set(M33MU_STATUS_LIBDW "${M33MU_COLOR_GREEN}detected${M33MU_COLOR_RESET}")
 else()
@@ -613,10 +634,11 @@ message(STATUS "${M33MU_COLOR_YELLOW}  TPM/libtpms: ${M33MU_STATUS_TPM}${M33MU_C
 message(STATUS "${M33MU_COLOR_YELLOW}  wolfSSL: ${M33MU_STATUS_WOLFSSL}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  vde-2: ${M33MU_STATUS_VDE} (${M33MU_STATUS_VDE_SWITCH})${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  ncurses: ${M33MU_STATUS_NCURSES}${M33MU_COLOR_RESET}")
+message(STATUS "${M33MU_COLOR_YELLOW}  libelf: ${M33MU_STATUS_LIBELF}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  libdw/libdwfl: ${M33MU_STATUS_LIBDW}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  tests enabled: ${M33MU_BUILD_TESTS}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_MAGENTA}  --------------------------------------------${M33MU_COLOR_RESET}")
-message(STATUS "${M33MU_COLOR_YELLOW}  features: capstone=${M33MU_HAS_CAPSTONE} tpm=${M33MU_HAS_LIBTPMS} wolfssl=${M33MU_HAS_WOLFSSL} vde=${M33MU_HAS_VDE} tui=${M33MU_HAS_NCURSES} libdw=${M33MU_HAS_LIBDW}${M33MU_COLOR_RESET}")
+message(STATUS "${M33MU_COLOR_YELLOW}  features: capstone=${M33MU_HAS_CAPSTONE} tpm=${M33MU_HAS_LIBTPMS} wolfssl=${M33MU_HAS_WOLFSSL} vde=${M33MU_HAS_VDE} tui=${M33MU_HAS_NCURSES} libelf=${M33MU_HAS_LIBELF} libdw=${M33MU_HAS_LIBDW}${M33MU_COLOR_RESET}")
 
 if(M33MU_CONFIG_WARNINGS)
   foreach(msg IN LISTS M33MU_CONFIG_WARNINGS)

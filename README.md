@@ -110,7 +110,7 @@ Run the included sample firmwares:
 Both tests execute entirely from the in-repo binaries; no downloads required. Use `--gdb` to start the integrated GDB RSP server on port 1234, and `--record` to enable the in-memory execution trace (reverse stepping).
 
 ## Loading multiple images
-`m33mu` can load more than one raw binary image into the emulated flash window. Each image argument can optionally include a `:offset` suffix, interpreted as a byte offset into flash (accepts `0x...`).
+`m33mu` can load more than one image into the emulated flash window. Raw binaries may include a `:offset` suffix (byte offset into flash, accepts `0x...`). ELF and Intel HEX images are auto-detected and scattered into flash by their load addresses.
 
 Example (Secure image at offset 0, Non-secure image at offset 0x2000):
 
@@ -121,17 +121,18 @@ build/m33mu tests/firmware/test-tz-bxns-cmse-sau-mpu/build/secure.bin tests/firm
 ## Command line usage
 
 ```
-build/m33mu [--cpu <cpu>] [--gdb] [--port <n>] [--gdb-symbols <elf>] [--dump] [--tui] [--record] [--persist] [--capstone] [--uart-stdout] [--quit-on-faults] [--meminfo] [--no-tz] <image.bin[:offset]> [more images...]
+build/m33mu [--cpu <cpu>] [--gdb] [--port <n>] [--gdb-symbols <elf>] [--dump] [--tui] [--record] [--persist] [--capstone] [--uart-stdout] [--quit-on-faults] [--meminfo] [--no-tz] <image.bin[:offset]|image.elf|image.hex> [more images...]
 ```
 
 Options:
 - `--cpu <cpu>`: select the CPU profile (default: `stm32h563`).
 - `--gdb`: start the GDB remote server (RSP) on port 1234 (override with `--port`).
 - `--port <n>`: set the GDB server port (1-65535).
-- `--gdb-symbols <elf>`: load symbols from the specified ELF (defaults to the first image).
+- `--gdb-symbols <elf>`: load symbols from the specified ELF (can be repeated; user-provided ELFs take priority over auto-detected ones).
 - `--dump`: print per-instruction decode (`[DUMP] ...`) and selected TrustZone transitions.
 - `--tui`: start the interactive terminal UI.
 - `--record`: enable in-memory execution trace for reverse stepping.
+- `--call-trace`: log call/return, interrupt, and TrustZone SG transitions with symbol names when available.
 - `--persist`: write modified flash contents back to the input image files.
 - `--capstone`: enable Capstone-based cross-check logging for decode/execute.
 - `--capstone-verbose`: include operand cross-check details in Capstone logs.

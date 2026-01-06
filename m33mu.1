@@ -8,8 +8,9 @@ m33mu \- Cortex-M33 emulator
 .RI [ image.bin[:offset] ...]
 .SH DESCRIPTION
 m33mu emulates ARMv8-M Cortex-M targets with TrustZone awareness.
-It can load one or more raw binary images into flash; each image may include a
-byte offset suffix (hex supported).
+It can load one or more images into flash. Raw binaries may include a byte
+offset suffix (hex supported). ELF and Intel HEX images are auto-detected and
+scattered into flash by their load addresses.
 .SH OPTIONS
 .TP
 .BR --cpu " " <cpu>
