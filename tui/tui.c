@@ -843,7 +843,11 @@ static void tui_draw(struct mm_tui *tui)
         for (x = 0; x < w; ++x) {
             tui_put_cell(x, h - 1, ' ', tui_attr(status_fg), tui_attr(status_bg));
         }
-        tui_draw_text(1, h - 1, w - 1, status_fg, status_bg, "m33mu --tui");
+        if (!tui->target_running && tui->func_valid && tui->func_name[0] != '\0') {
+            tui_draw_text(1, h - 1, w - 1, status_fg, status_bg, tui->func_name);
+        } else {
+            tui_draw_text(1, h - 1, w - 1, status_fg, status_bg, "m33mu --tui");
+        }
     }
 
     /* Console */
@@ -1526,6 +1530,9 @@ void mm_tui_set_image0(struct mm_tui *tui, const char *path)
 {
     if (tui == 0 || path == 0) return;
     snprintf(tui->image0_path, sizeof(tui->image0_path), "%s", path);
+    tui->func_pc = 0u;
+    tui->func_valid = MM_FALSE;
+    tui->func_name[0] = '\0';
 }
 
 void mm_tui_set_cpu_name(struct mm_tui *tui, const char *name)
@@ -1538,6 +1545,25 @@ void mm_tui_set_cpu_name(struct mm_tui *tui, const char *name)
         return;
     }
     snprintf(tui->cpu_name, sizeof(tui->cpu_name), "%s", name);
+}
+
+void mm_tui_set_function(struct mm_tui *tui, mm_u32 pc, const char *name)
+{
+    size_t len;
+    if (tui == 0) return;
+    tui->func_pc = pc;
+    if (name == 0 || name[0] == '\0') {
+        tui->func_name[0] = '\0';
+        tui->func_valid = MM_FALSE;
+        return;
+    }
+    len = strlen(name);
+    if (len >= sizeof(tui->func_name)) {
+        len = sizeof(tui->func_name) - 1u;
+    }
+    memcpy(tui->func_name, name, len);
+    tui->func_name[len] = '\0';
+    tui->func_valid = MM_TRUE;
 }
 
 void mm_tui_set_core_state(struct mm_tui *tui,

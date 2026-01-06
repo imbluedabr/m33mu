@@ -97,6 +97,7 @@ struct mm_cpu {
     mm_u32 exc_sp[MM_EXC_STACK_MAX];
     mm_bool exc_use_psp[MM_EXC_STACK_MAX];
     enum mm_sec_state exc_sec[MM_EXC_STACK_MAX];
+    mm_u16 exc_num[MM_EXC_STACK_MAX];
     int exc_depth;
 
     /* TrustZone call stack for Secure->Non-secure BLXNS callbacks.

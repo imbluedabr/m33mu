@@ -94,6 +94,13 @@ void mm_tui_set_cpu_name(struct mm_tui *tui, const char *name)
     (void)name;
 }
 
+void mm_tui_set_function(struct mm_tui *tui, mm_u32 pc, const char *name)
+{
+    (void)tui;
+    (void)pc;
+    (void)name;
+}
+
 void mm_tui_set_core_state(struct mm_tui *tui,
                            mm_u32 pc,
                            mm_u32 sp,

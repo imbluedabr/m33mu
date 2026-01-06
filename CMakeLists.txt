@@ -25,6 +25,7 @@ option(M33MU_BUILD_TESTS        "Build tests in tests/"                 ON)
 option(M33MU_ENABLE_CAPSTONE    "Enable capstone integration if found"  ON)
 option(M33MU_ENABLE_TPM_LIBTPMS "Enable libtpms integration if found"   ON)
 option(M33MU_ENABLE_WOLFSSL     "Enable wolfSSL integration if found"   ON)
+option(M33MU_ENABLE_LIBDW       "Enable libdw/libdwfl symbolization if found" ON)
 
 # -----------------------------------------------------------------------------
 # Compiler flags (match Makefile)
@@ -363,6 +364,50 @@ if(M33MU_HAS_NCURSES)
 endif()
 
 # -----------------------------------------------------------------------------
+# 7) Optional libdw/libdwfl detection (symbolization)
+# -----------------------------------------------------------------------------
+set(M33MU_HAS_LIBDW FALSE)
+if(M33MU_ENABLE_LIBDW)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(PC_LIBDW QUIET libdw)
+  endif()
+  find_path(LIBDW_INCLUDE_DIR
+    NAMES elfutils/libdwfl.h
+    HINTS ${PC_LIBDW_INCLUDE_DIRS}
+  )
+  find_library(LIBDW_LIBRARY
+    NAMES dw
+    HINTS ${PC_LIBDW_LIBRARY_DIRS}
+  )
+  find_library(LIBELF_LIBRARY
+    NAMES elf
+    HINTS ${PC_LIBDW_LIBRARY_DIRS}
+  )
+  if(LIBDW_INCLUDE_DIR AND LIBDW_LIBRARY AND LIBELF_LIBRARY)
+    set(M33MU_HAS_LIBDW TRUE)
+    add_library(libdw::libdw UNKNOWN IMPORTED)
+    set_target_properties(libdw::libdw PROPERTIES
+      IMPORTED_LOCATION "${LIBDW_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${LIBDW_INCLUDE_DIR}"
+    )
+    add_library(libdw::libelf UNKNOWN IMPORTED)
+    set_target_properties(libdw::libelf PROPERTIES
+      IMPORTED_LOCATION "${LIBELF_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${LIBDW_INCLUDE_DIR}"
+    )
+  else()
+    list(APPEND M33MU_CONFIG_WARNINGS
+      "libdw/libdwfl not found: symbolization disabled."
+    )
+  endif()
+endif()
+
+if(M33MU_HAS_LIBDW)
+  target_compile_definitions(m33mu_lib PUBLIC M33MU_HAS_LIBDW=1)
+  target_link_libraries(m33mu_lib PUBLIC libdw::libdw libdw::libelf)
+endif()
+
+# -----------------------------------------------------------------------------
 # Executable
 # -----------------------------------------------------------------------------
 add_executable(m33mu "${CMAKE_SOURCE_DIR}/src/main.c")
@@ -558,14 +603,20 @@ if(M33MU_HAS_NCURSES)
 else()
   set(M33MU_STATUS_NCURSES "${M33MU_COLOR_RED}not found${M33MU_COLOR_RESET}")
 endif()
+if(M33MU_HAS_LIBDW)
+  set(M33MU_STATUS_LIBDW "${M33MU_COLOR_GREEN}detected${M33MU_COLOR_RESET}")
+else()
+  set(M33MU_STATUS_LIBDW "${M33MU_COLOR_RED}not found${M33MU_COLOR_RESET}")
+endif()
 message(STATUS "${M33MU_COLOR_YELLOW}  capstone: ${M33MU_STATUS_CAPSTONE}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  TPM/libtpms: ${M33MU_STATUS_TPM}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  wolfSSL: ${M33MU_STATUS_WOLFSSL}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  vde-2: ${M33MU_STATUS_VDE} (${M33MU_STATUS_VDE_SWITCH})${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  ncurses: ${M33MU_STATUS_NCURSES}${M33MU_COLOR_RESET}")
+message(STATUS "${M33MU_COLOR_YELLOW}  libdw/libdwfl: ${M33MU_STATUS_LIBDW}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  tests enabled: ${M33MU_BUILD_TESTS}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_MAGENTA}  --------------------------------------------${M33MU_COLOR_RESET}")
-message(STATUS "${M33MU_COLOR_YELLOW}  features: capstone=${M33MU_HAS_CAPSTONE} tpm=${M33MU_HAS_LIBTPMS} wolfssl=${M33MU_HAS_WOLFSSL} vde=${M33MU_HAS_VDE} tui=${M33MU_HAS_NCURSES}${M33MU_COLOR_RESET}")
+message(STATUS "${M33MU_COLOR_YELLOW}  features: capstone=${M33MU_HAS_CAPSTONE} tpm=${M33MU_HAS_LIBTPMS} wolfssl=${M33MU_HAS_WOLFSSL} vde=${M33MU_HAS_VDE} tui=${M33MU_HAS_NCURSES} libdw=${M33MU_HAS_LIBDW}${M33MU_COLOR_RESET}")
 
 if(M33MU_CONFIG_WARNINGS)
   foreach(msg IN LISTS M33MU_CONFIG_WARNINGS)

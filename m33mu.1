@@ -22,7 +22,7 @@ Start the GDB remote server (RSP) on port 1234.
 Set the GDB server port (1-65535).
 .TP
 .BR --gdb-symbols " " <elf>
-Load symbols from the specified ELF (defaults to the first image).
+Load symbols from the specified ELF. Can be specified multiple times; user-provided ELFs take priority over auto-detected ones.
 .TP
 .BR --dump
 Print per-instruction decode and selected TrustZone transitions.
@@ -32,6 +32,9 @@ Start the interactive terminal UI.
 .TP
 .BR --record
 Enable in-memory execution trace for reverse stepping.
+.TP
+.BR --call-trace
+Log call/return, interrupt, and TrustZone SG transitions with symbol names when available.
 .TP
 .BR --expect-bkpt= NN
 Exit with code 0 only if a BKPT with the given immediate (hex) is hit.

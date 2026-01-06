@@ -60,6 +60,9 @@
 #include <time.h>
 #include <stdlib.h>
 #include <signal.h>
+#ifdef M33MU_HAS_LIBDW
+#include <elfutils/libdwfl.h>
+#endif
 
 #define CCR_DIV_0_TRP (1u << 4)
 #define CCR_STKALIGN (1u << 9)
@@ -80,6 +83,9 @@
 #define DEFAULT_BATCH_CYCLES 64ull         /* ~1 us @ 64 MHz */
 #define DEFAULT_SYNC_GRANULARITY 640ull    /* ~10 us pacing interval */
 #define IDLE_SLEEP_NS 200000ull            /* 200 us host nap when fully idle */
+
+static mm_bool g_quit_on_faults = MM_FALSE;
+static mm_bool g_call_trace = MM_FALSE;
 
 static mm_u64 host_now_ns(void)
 {
@@ -461,6 +467,325 @@ static void launch_gdb_tui(const struct mm_tui *tui)
     }
 }
 
+#ifdef M33MU_HAS_LIBDW
+struct mm_symbol_ctx {
+    Dwfl *dwfl;
+    mm_bool ready;
+};
+
+static struct mm_symbol_ctx g_symbol_ctx;
+
+static void symbol_ctx_reset(void)
+{
+    if (g_symbol_ctx.dwfl != 0) {
+        dwfl_end(g_symbol_ctx.dwfl);
+        g_symbol_ctx.dwfl = 0;
+    }
+    g_symbol_ctx.ready = MM_FALSE;
+}
+
+static mm_bool symbol_ctx_build(const char **elf_paths, size_t count)
+{
+    static const Dwfl_Callbacks callbacks = {
+        .find_elf = dwfl_build_id_find_elf,
+        .find_debuginfo = dwfl_standard_find_debuginfo,
+        .section_address = dwfl_offline_section_address
+    };
+    Dwfl *dwfl;
+    size_t i;
+    mm_bool any_added = MM_FALSE;
+
+    symbol_ctx_reset();
+    if (elf_paths == 0 || count == 0u) {
+        return MM_FALSE;
+    }
+    dwfl = dwfl_begin(&callbacks);
+    if (dwfl == 0) {
+        return MM_FALSE;
+    }
+    for (i = 0; i < count; ++i) {
+        if (elf_paths[i] == 0 || elf_paths[i][0] == '\0') {
+            continue;
+        }
+        if (dwfl_report_offline(dwfl, elf_paths[i], elf_paths[i], -1) != 0) {
+            any_added = MM_TRUE;
+        }
+    }
+    if (!any_added || dwfl_report_end(dwfl, 0, 0) != 0) {
+        dwfl_end(dwfl);
+        return MM_FALSE;
+    }
+    g_symbol_ctx.dwfl = dwfl;
+    g_symbol_ctx.ready = MM_TRUE;
+    return MM_TRUE;
+}
+#else
+static mm_bool symbol_ctx_build(const char **elf_paths, size_t count)
+{
+    (void)elf_paths;
+    (void)count;
+    return MM_FALSE;
+}
+#endif
+
+static mm_bool symbol_lookup_name(mm_u32 pc, char *out, size_t out_len)
+{
+#ifdef M33MU_HAS_LIBDW
+    Dwfl_Module *mod;
+    const char *name;
+    mm_u32 addr;
+    size_t len;
+    if (out == 0 || out_len == 0) return MM_FALSE;
+    out[0] = '\0';
+    if (!g_symbol_ctx.ready || g_symbol_ctx.dwfl == 0) {
+        return MM_FALSE;
+    }
+    addr = pc & ~1u;
+    mod = dwfl_addrmodule(g_symbol_ctx.dwfl, addr);
+    if (mod == 0) {
+        return MM_FALSE;
+    }
+    name = dwfl_module_addrname(mod, addr);
+    if (name == 0 || name[0] == '\0' || name[0] == '?') {
+        return MM_FALSE;
+    }
+    len = strlen(name);
+    if (len >= out_len) {
+        len = out_len - 1u;
+    }
+    memcpy(out, name, len);
+    out[len] = '\0';
+    return MM_TRUE;
+#else
+    (void)pc;
+    (void)out;
+    (void)out_len;
+    return MM_FALSE;
+#endif
+}
+
+static const char *path_basename(const char *path)
+{
+    const char *slash;
+    if (path == 0) return "";
+    slash = strrchr(path, '/');
+    return (slash != 0) ? (slash + 1) : path;
+}
+
+static mm_bool symbol_stem_match(const char *a, const char *b)
+{
+    const char *abase = path_basename(a);
+    const char *bbase = path_basename(b);
+    const char *adot = strrchr(abase, '.');
+    const char *bdot = strrchr(bbase, '.');
+    size_t alen = (adot != 0) ? (size_t)(adot - abase) : strlen(abase);
+    size_t blen = (bdot != 0) ? (size_t)(bdot - bbase) : strlen(bbase);
+    if (alen == 0 || blen == 0 || alen != blen) {
+        return MM_FALSE;
+    }
+    return (memcmp(abase, bbase, alen) == 0) ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool add_symbol_path(const char *path, const char **list, size_t *count, size_t max)
+{
+    size_t i;
+    if (path == 0 || path[0] == '\0' || list == 0 || count == 0 || *count >= max) {
+        return MM_FALSE;
+    }
+    for (i = 0; i < *count; ++i) {
+        if (strcmp(list[i], path) == 0) {
+            return MM_FALSE;
+        }
+    }
+    list[*count] = path;
+    (*count)++;
+    return MM_TRUE;
+}
+
+static void build_symbol_db(const struct mm_image_spec *images,
+                            int image_count,
+                            const char **gdb_symbols,
+                            size_t gdb_symbol_count)
+{
+    const char *paths[32];
+    char elf_paths[32][512];
+    size_t path_count = 0;
+    size_t elf_count = 0;
+    int i;
+
+    if (gdb_symbols != 0 && gdb_symbol_count > 0u) {
+        for (i = 0; i < (int)gdb_symbol_count; ++i) {
+            const char *sym = gdb_symbols[i];
+            if (sym != 0 && sym[0] != '\0' && access(sym, R_OK) == 0) {
+                (void)add_symbol_path(sym, paths, &path_count, 32u);
+            }
+        }
+    }
+    for (i = 0; i < image_count; ++i) {
+        const char *img = (images != 0) ? images[i].path : 0;
+        size_t len;
+        if (img == 0 || img[0] == '\0') continue;
+        len = strlen(img);
+        if (len > 4 && strcmp(img + len - 4, ".elf") == 0) {
+            if (access(img, R_OK) == 0) {
+                mm_bool skip = MM_FALSE;
+                if (gdb_symbols != 0) {
+                    int si;
+                    for (si = 0; si < (int)gdb_symbol_count; ++si) {
+                        if (symbol_stem_match(img, gdb_symbols[si])) {
+                            skip = MM_TRUE;
+                            break;
+                        }
+                    }
+                }
+                if (!skip) {
+                    (void)add_symbol_path(img, paths, &path_count, 32u);
+                }
+            }
+        } else if (len > 4 && strcmp(img + len - 4, ".bin") == 0) {
+            if (elf_count < 32u) {
+                snprintf(elf_paths[elf_count], sizeof(elf_paths[elf_count]),
+                         "%.*s.elf", (int)(len - 4), img);
+                if (access(elf_paths[elf_count], R_OK) == 0) {
+                    mm_bool skip = MM_FALSE;
+                    if (gdb_symbols != 0) {
+                        int si;
+                        for (si = 0; si < (int)gdb_symbol_count; ++si) {
+                            if (symbol_stem_match(elf_paths[elf_count], gdb_symbols[si])) {
+                                skip = MM_TRUE;
+                                break;
+                            }
+                        }
+                    }
+                    if (!skip) {
+                        (void)add_symbol_path(elf_paths[elf_count], paths, &path_count, 32u);
+                    }
+                }
+                elf_count++;
+            }
+        }
+    }
+    (void)symbol_ctx_build(paths, path_count);
+}
+
+static void calltrace_lookup_name(mm_u32 pc, char *out, size_t out_len)
+{
+    if (out == 0 || out_len == 0) return;
+    out[0] = '\0';
+    if (symbol_lookup_name(pc, out, out_len)) {
+        return;
+    }
+    snprintf(out, out_len, "unknown");
+}
+
+static void calltrace_log_call(mm_u32 addr,
+                               const struct mm_cpu *cpu)
+{
+    char name[128];
+    if (!g_call_trace || cpu == 0) return;
+    calltrace_lookup_name(addr, name, sizeof(name));
+    printf("[CALL TRACE] 0x%08lx: %s(r0=0x%08lx, r1=0x%08lx, r2=0x%08lx, r3=0x%08lx)\n",
+           (unsigned long)(addr & ~1u),
+           name,
+           (unsigned long)cpu->r[0],
+           (unsigned long)cpu->r[1],
+           (unsigned long)cpu->r[2],
+           (unsigned long)cpu->r[3]);
+}
+
+static void calltrace_log_return(mm_u32 addr,
+                                 const struct mm_cpu *cpu)
+{
+    char name[128];
+    if (!g_call_trace || cpu == 0) return;
+    calltrace_lookup_name(addr, name, sizeof(name));
+    printf("[CALL TRACE] 0x%08lx: %s returned 0x%08lx\n",
+           (unsigned long)(addr & ~1u),
+           name,
+           (unsigned long)cpu->r[0]);
+}
+
+static void calltrace_log_nsc(mm_u32 addr)
+{
+    char name[128];
+    if (!g_call_trace) return;
+    calltrace_lookup_name(addr, name, sizeof(name));
+    printf("[CALL TRACE] 0x%08lx: NSC call %s (on SG)\n",
+           (unsigned long)(addr & ~1u),
+           name);
+}
+
+static void calltrace_log_ns_resume(mm_u32 addr)
+{
+    if (!g_call_trace) return;
+    printf("[CALL TRACE] 0x%08lx: NS RESUME (from SG)\n",
+           (unsigned long)(addr & ~1u));
+}
+
+static void calltrace_log_interrupt(mm_u32 addr, mm_u32 irq)
+{
+    if (!g_call_trace) return;
+    printf("[CALL TRACE] 0x%08lx: INTERRUPT #%lu\n",
+           (unsigned long)(addr & ~1u),
+           (unsigned long)irq);
+}
+
+static void calltrace_log_irq_resume(mm_u32 addr)
+{
+    if (!g_call_trace) return;
+    printf("[CALL TRACE] 0x%08lx: RESUME from IRQ\n",
+           (unsigned long)(addr & ~1u));
+}
+
+static void calltrace_handle_decoded(const struct mm_cpu *cpu,
+                                     const struct mm_fetch_result *fetch,
+                                     const struct mm_decoded *dec)
+{
+    mm_u32 target;
+    if (!g_call_trace || cpu == 0 || fetch == 0 || dec == 0) {
+        return;
+    }
+    switch (dec->kind) {
+    case MM_OP_BL:
+        target = (fetch->pc_fetch + 4u + dec->imm) | 1u;
+        calltrace_log_call(target, cpu);
+        break;
+    case MM_OP_BLX:
+        target = cpu->r[dec->rm];
+        calltrace_log_call(target, cpu);
+        break;
+    case MM_OP_BLXNS:
+        target = cpu->r[dec->rm];
+        calltrace_log_call(target, cpu);
+        break;
+    case MM_OP_BX:
+        if (dec->rm == 14u) {
+            target = cpu->r[14];
+            if ((target & 0xffffff00u) == 0xffffff00u) {
+                break;
+            }
+            if (cpu->sec_state == MM_NONSECURE &&
+                cpu->tz_depth > 0 &&
+                target == 0xDEAD0001u) {
+                calltrace_log_ns_resume(fetch->pc_fetch);
+                break;
+            }
+            calltrace_log_return(fetch->pc_fetch, cpu);
+        }
+        break;
+    case MM_OP_POP:
+        if ((dec->imm & 0x0100u) != 0u) {
+            calltrace_log_return(fetch->pc_fetch, cpu);
+        }
+        break;
+    case MM_OP_SG:
+        calltrace_log_nsc(fetch->pc_fetch);
+        break;
+    default:
+        break;
+    }
+}
+
 static mm_bool handle_tui(struct mm_tui *tui,
                           mm_bool opt_tui,
                           mm_bool *opt_capstone,
@@ -481,6 +806,8 @@ static mm_bool handle_tui(struct mm_tui *tui,
 {
     mm_u32 actions;
     mm_bool running;
+    char func_name[128];
+    mm_u32 func_pc;
 
     if (!opt_tui || tui == 0) {
         return MM_FALSE;
@@ -515,6 +842,20 @@ static mm_bool handle_tui(struct mm_tui *tui,
                               (mm_u8)cpu->mode,
                               *steps_latched);
         mm_tui_set_registers(tui, cpu, fpu_enabled);
+    }
+    func_pc = 0u;
+    func_name[0] = '\0';
+    if (!running) {
+        func_pc = (cpu != 0) ? cpu->r[15] : tui->core_pc;
+        if (tui->func_pc != func_pc) {
+            if (symbol_lookup_name(func_pc, func_name, sizeof(func_name))) {
+                mm_tui_set_function(tui, func_pc, func_name);
+            } else {
+                mm_tui_set_function(tui, func_pc, 0);
+            }
+        }
+    } else if (tui->func_valid) {
+        mm_tui_set_function(tui, 0u, 0);
     }
     if (cpu_name != 0) {
         mm_tui_set_cpu_name(tui, cpu_name);
@@ -880,7 +1221,6 @@ static mm_bool parse_image_spec(const char *spec, char **path_out, mm_u32 *offse
     return MM_TRUE;
 }
 
-static mm_bool g_quit_on_faults = MM_FALSE;
 static mm_bool g_fault_pending = MM_FALSE;
 static int g_stack_trace = -1;
 static struct mm_prot_ctx *g_active_prot_ctx = 0;
@@ -1030,6 +1370,7 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     mm_u32 psp_ns_val;
     mm_u32 control_s_val;
     mm_u32 control_ns_val;
+    mm_u16 exc_num = 0u;
     mm_u32 fp_base_sp;
     mm_u32 fp_reserved;
     int i;
@@ -1077,6 +1418,9 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     }
     if (cpu->exc_depth > 0) {
         cpu->exc_depth--;
+    }
+    if (cpu->exc_depth < MM_EXC_STACK_MAX) {
+        exc_num = cpu->exc_num[cpu->exc_depth];
     }
     if (stack_trace_enabled() ||
         (svc_stack_trace_enabled() && (cpu->xpsr & 0x1ffu) == MM_VECT_SVCALL)) {
@@ -1304,6 +1648,9 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     }
     cpu->sec_state = info.target_sec;
     cpu->mode = info.to_thread ? MM_THREAD : MM_HANDLER;
+    if (info.to_thread && exc_num >= 16u) {
+        calltrace_log_irq_resume(cpu->r[15]);
+    }
     if (stack_trace_enabled()) {
         printf("[EXC_UNSTACK] new pc=0x%08lx sp=0x%08lx r13=0x%08lx mode=%d sec=%d\n",
                (unsigned long)cpu->r[15],
@@ -1530,6 +1877,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
 
         {
             struct mm_execute_ctx exec_ctx;
+            calltrace_handle_decoded(cpu, &f, &d);
             exec_ctx.cpu = cpu;
             exec_ctx.map = map;
             exec_ctx.scs = scs;
@@ -1763,6 +2111,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         cpu->exc_sp[cpu->exc_depth] = sp;
         cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
         cpu->exc_sec[cpu->exc_depth] = stack_sec;
+        cpu->exc_num[cpu->exc_depth] = (mm_u16)MM_VECT_HARDFAULT;
         cpu->exc_depth++;
     }
     if (stack_trace_enabled()) {
@@ -2055,6 +2404,7 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
         cpu->exc_sp[cpu->exc_depth] = sp;
         cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
         cpu->exc_sec[cpu->exc_depth] = sec;
+        cpu->exc_num[cpu->exc_depth] = (mm_u16)MM_VECT_USAGEFAULT;
         cpu->exc_depth++;
     }
     /* Handler mode uses MSP; reflect that in R13. */
@@ -2102,6 +2452,10 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
 
     if (cpu == 0 || map == 0 || scs == 0) {
         return MM_FALSE;
+    }
+
+    if (exc_num >= 16u) {
+        calltrace_log_interrupt(return_pc, exc_num - 16u);
     }
 
     sec = cpu->sec_state;
@@ -2273,6 +2627,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
             cpu->exc_sp[cpu->exc_depth] = sp;
             cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
             cpu->exc_sec[cpu->exc_depth] = sec;
+            cpu->exc_num[cpu->exc_depth] = (mm_u16)exc_num;
             cpu->exc_depth++;
         }
     }
@@ -2334,7 +2689,10 @@ int main(int argc, char **argv)
     mm_bool opt_uart_stdout = MM_FALSE;
     mm_bool opt_meminfo = MM_FALSE;
     mm_bool opt_record = MM_FALSE;
+    mm_bool opt_call_trace = MM_FALSE;
     const char *gdb_symbols = 0;
+    const char *gdb_symbols_list[32];
+    size_t gdb_symbols_count = 0;
     int gdb_port = 1234;
     const char *cpu_name = 0;
     int i;
@@ -2438,6 +2796,12 @@ int main(int argc, char **argv)
 #endif
         } else if (strcmp(argv[i], "--gdb-symbols") == 0 && i + 1 < argc) {
             gdb_symbols = argv[i + 1];
+            if (gdb_symbols_count < (sizeof(gdb_symbols_list) / sizeof(gdb_symbols_list[0]))) {
+                gdb_symbols_list[gdb_symbols_count++] = gdb_symbols;
+            } else {
+                fprintf(stderr, "too many --gdb-symbols entries\n");
+                return 1;
+            }
             i++;
         } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             gdb_port = atoi(argv[i + 1]);
@@ -2474,6 +2838,8 @@ int main(int argc, char **argv)
             opt_meminfo = MM_TRUE;
         } else if (strcmp(argv[i], "--record") == 0) {
             opt_record = MM_TRUE;
+        } else if (strcmp(argv[i], "--call-trace") == 0) {
+            opt_call_trace = MM_TRUE;
         } else if (strncmp(argv[i], "--expect-bkpt=", 14) == 0) {
             if (!parse_hex_u32(argv[i] + 14, &expect_bkpt)) {
                 fprintf(stderr, "invalid expect-bkpt value: %s\n", argv[i]);
@@ -2587,7 +2953,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_USE_LIBCAPSTONE
                         "[--capstone] [--capstone-verbose] "
 #endif
-                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--no-tz] [--gdb-symbols <elf>] "
+                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--call-trace] [--no-tz] [--gdb-symbols <elf>] "
                         "[--expect-bkpt=0xNN] [--timeout=seconds] "
                         "[--boot-offset=0xN] "
                         "[--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]] "
@@ -2602,6 +2968,8 @@ int main(int argc, char **argv)
     }
 
     g_quit_on_faults = opt_quit_on_faults;
+    g_call_trace = opt_call_trace;
+    build_symbol_db(images, image_count, gdb_symbols_list, gdb_symbols_count);
     if (opt_tui && opt_uart_stdout) {
         fprintf(stderr, "warning: --uart-stdout disabled while TUI is active\n");
         opt_uart_stdout = MM_FALSE;
@@ -3651,6 +4019,7 @@ handle_pending:
 
                     {
                         struct mm_execute_ctx exec_ctx;
+                        calltrace_handle_decoded(&cpu, &f, &d);
                         exec_ctx.cpu = &cpu;
                         exec_ctx.map = &map;
                         exec_ctx.scs = &scs;
