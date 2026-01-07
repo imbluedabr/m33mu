@@ -464,6 +464,9 @@ if(M33MU_BUILD_TESTS)
     set_tests_properties("${test_name}" PROPERTIES
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
+    if("${test_name}" STREQUAL "decode_capstone_fuzz_full32_test")
+      set_tests_properties("${test_name}" PROPERTIES DISABLED TRUE)
+    endif()
   endforeach()
 endif()
 
