@@ -228,7 +228,7 @@ static int capstone_should_skip(const char *mnemonic, const char *op_str)
     return 0;
 }
 
-static int run_full32(mm_u32 seed)
+static int run_range(mm_u32 start, mm_u32 end)
 {
     struct mm_mem mem;
     struct mm_cpu cpu;
@@ -240,6 +240,8 @@ static int run_full32(mm_u32 seed)
     mm_u32 high;
     mm_u32 start_low;
     mm_u32 start_high;
+    mm_u32 end_low;
+    mm_u32 end_high;
     int failures = 0;
     unsigned long hits = 0;
     char mnemonic[64];
@@ -247,7 +249,7 @@ static int run_full32(mm_u32 seed)
     int cap_id = 0;
     int cap_ok;
     mm_u64 tested = 0;
-    const mm_u64 total = 0x100000000ull;
+    mm_u64 total = 0;
 
     mem.base = 0;
     mem.length = 4;
@@ -258,11 +260,23 @@ static int run_full32(mm_u32 seed)
         cpu.r[r] = 0u;
     }
 
-    start_low = seed & 0xffffu;
-    start_high = (seed >> 16) & 0xffffu;
+    start_low = start & 0xffffu;
+    start_high = (start >> 16) & 0xffffu;
+    end_low = end & 0xffffu;
+    end_high = (end >> 16) & 0xffffu;
+    total = (mm_u64)end - (mm_u64)start + 1ull;
+    for (low = 0u; low <= 0xffffu; ++low) {
+        mm_u32 min_high;
+        mm_u32 max_high;
+        mm_u32 first_high;
+        mm_u64 skip;
 
-    for (low = start_low; low <= 0xffffu; ++low) {
-        mm_u32 first_high = (low == start_low) ? start_high : 0u;
+        min_high = start_high + ((low < start_low) ? 1u : 0u);
+        max_high = end_high - ((low > end_low) ? 1u : 0u);
+        if (min_high > max_high) {
+            continue;
+        }
+        first_high = min_high;
 
         bytes[0] = (mm_u8)(low & 0xffu);
         bytes[1] = (mm_u8)((low >> 8) & 0xffu);
@@ -276,11 +290,10 @@ static int run_full32(mm_u32 seed)
         }
 
         if (fetch.len == 2u) {
-            mm_u64 skip = 0x10000ull - (mm_u64)first_high;
+            skip = (mm_u64)max_high - (mm_u64)min_high + 1ull;
             insn = (first_high << 16) | low;
             tested += skip;
             maybe_print_progress(tested, total, hits);
-
             cap_ok = capstone_decode_one(&fetch, &cap_id, mnemonic, sizeof(mnemonic), op_str, sizeof(op_str));
             if (!cap_ok) {
                 continue;
@@ -318,7 +331,7 @@ static int run_full32(mm_u32 seed)
             continue;
         }
 
-        for (high = first_high; high <= 0xffffu; ++high) {
+        for (high = first_high; high <= max_high; ++high) {
             insn = (high << 16) | low;
             bytes[2] = (mm_u8)((insn >> 16) & 0xffu);
             bytes[3] = (mm_u8)((insn >> 24) & 0xffu);
@@ -375,135 +388,15 @@ static int run_full32(mm_u32 seed)
         }
     }
 
-    if (failures == 0) {
-        for (low = 0; low <= start_low; ++low) {
-            mm_u32 max_high = (low == start_low) ? (start_high - 1u) : 0xffffu;
-
-            if (low == start_low && start_high == 0u) {
-                break;
-            }
-            bytes[0] = (mm_u8)(low & 0xffu);
-            bytes[1] = (mm_u8)((low >> 8) & 0xffu);
-            bytes[2] = 0u;
-            bytes[3] = 0u;
-
-            cpu.r[15] = 1u;
-            fetch = mm_fetch_t32(&cpu, &mem);
-            if (fetch.fault) {
-                continue;
-            }
-
-            if (fetch.len == 2u) {
-                insn = low;
-                tested += (mm_u64)max_high + 1ull;
-                maybe_print_progress(tested, total, hits);
-
-                cap_ok = capstone_decode_one(&fetch, &cap_id, mnemonic, sizeof(mnemonic), op_str, sizeof(op_str));
-                if (!cap_ok) {
-                    continue;
-                }
-                if (capstone_should_skip(mnemonic, op_str)) {
-                    continue;
-                }
-
-                hits++;
-                /* printf("HIT insn=0x%08lx raw=0x%08lx len=%u capstone=%s %s\n",
-                       (unsigned long)insn,
-                       (unsigned long)fetch.insn,
-                       (unsigned)fetch.len,
-                       mnemonic,
-                       op_str); */
-
-                dec = mm_decode_t32(&fetch);
-                if (!capstone_cross_check(&fetch, &dec)) {
-                    const char *reason = (dec.kind == MM_OP_UNDEFINED) ? "unknown decode" : "misdecode";
-                    printf("MISS insn=0x%08lx raw=0x%08lx len=%u capstone=%s %s reason=%s mm_kind=%u rd=%u rn=%u rm=%u imm=0x%08lx\n",
-                           (unsigned long)insn,
-                           (unsigned long)fetch.insn,
-                           (unsigned)fetch.len,
-                           mnemonic,
-                           op_str,
-                           reason,
-                           (unsigned)dec.kind,
-                           (unsigned)dec.rd,
-                           (unsigned)dec.rn,
-                           (unsigned)dec.rm,
-                           (unsigned long)dec.imm);
-                    failures = 1;
-                    break;
-                }
-                continue;
-            }
-
-            for (high = 0; high <= max_high; ++high) {
-                insn = (high << 16) | low;
-                bytes[2] = (mm_u8)((insn >> 16) & 0xffu);
-                bytes[3] = (mm_u8)((insn >> 24) & 0xffu);
-
-                cpu.r[15] = 1u;
-                fetch = mm_fetch_t32(&cpu, &mem);
-                if (fetch.fault) {
-                    tested++;
-                    maybe_print_progress(tested, total, hits);
-                    continue;
-                }
-
-                tested++;
-                maybe_print_progress(tested, total, hits);
-
-                cap_ok = capstone_decode_one(&fetch, &cap_id, mnemonic, sizeof(mnemonic), op_str, sizeof(op_str));
-                if (!cap_ok) {
-                    continue;
-                }
-                if (capstone_should_skip(mnemonic, op_str)) {
-                    continue;
-                }
-
-                hits++;
-                /* printf("HIT insn=0x%08lx raw=0x%08lx len=%u capstone=%s %s\n",
-                       (unsigned long)insn,
-                       (unsigned long)fetch.insn,
-                       (unsigned)fetch.len,
-                       mnemonic,
-                       op_str); */
-
-                dec = mm_decode_t32(&fetch);
-                if (!capstone_cross_check(&fetch, &dec)) {
-                    const char *reason = (dec.kind == MM_OP_UNDEFINED) ? "unknown decode" : "misdecode";
-                    printf("MISS insn=0x%08lx raw=0x%08lx len=%u capstone=%s %s reason=%s mm_kind=%u rd=%u rn=%u rm=%u imm=0x%08lx\n",
-                           (unsigned long)insn,
-                           (unsigned long)fetch.insn,
-                           (unsigned)fetch.len,
-                           mnemonic,
-                           op_str,
-                           reason,
-                           (unsigned)dec.kind,
-                           (unsigned)dec.rd,
-                           (unsigned)dec.rn,
-                           (unsigned)dec.rm,
-                           (unsigned long)dec.imm);
-                    failures = 1;
-                    break;
-                }
-            }
-
-            if (failures != 0) {
-                break;
-            }
-        }
-    }
-
-    if (failures == 0) {
-        printf("decode_capstone_fuzz_full32_test: hits=%lu tested=%llu\n",
-               hits, (unsigned long long)tested);
-    }
     return failures;
 }
 
 int main(int argc, char **argv)
 {
     int res;
-    mm_u32 seed = 0;
+    int i;
+    mm_u32 start = 0u;
+    mm_u32 end = 0xffffffffu;
 
     if (!capstone_available() || !capstone_init()) {
         printf("decode_capstone_fuzz_full32_test: capstone not available\n");
@@ -517,14 +410,26 @@ int main(int argc, char **argv)
         (void)alarm(5);
     }
 
-    for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--seed") == 0) {
+    for (i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--start") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "decode_capstone_fuzz_full32_test: --seed requires a value\n");
+                fprintf(stderr, "decode_capstone_fuzz_full32_test: --start requires a value\n");
                 return 1;
             }
-            if (parse_u32(argv[i + 1], &seed) != 0) {
-                fprintf(stderr, "decode_capstone_fuzz_full32_test: invalid --seed value '%s'\n", argv[i + 1]);
+            if (parse_u32(argv[i + 1], &start) != 0) {
+                fprintf(stderr, "decode_capstone_fuzz_full32_test: invalid --start value '%s'\n", argv[i + 1]);
+                return 1;
+            }
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "--end") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "decode_capstone_fuzz_full32_test: --end requires a value\n");
+                return 1;
+            }
+            if (parse_u32(argv[i + 1], &end) != 0) {
+                fprintf(stderr, "decode_capstone_fuzz_full32_test: invalid --end value '%s'\n", argv[i + 1]);
                 return 1;
             }
             i++;
@@ -534,8 +439,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    res = run_full32(seed);
+    if (start > end) {
+        fprintf(stderr, "decode_capstone_fuzz_full32_test: --start must be <= --end\n");
+        capstone_shutdown();
+        return 1;
+    }
 
+    printf("decode_capstone_fuzz_full32_test: start=0x%08x end=0x%08x\n",
+           (unsigned)start, (unsigned)end);
+    res = run_range(start, end);
     capstone_shutdown();
     return res;
 }

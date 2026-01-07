@@ -2336,17 +2336,18 @@ static struct mm_decoded decode_32(mm_u32 insn)
     }
 
     /* VMRS/VMSR (FPSCR transfer). */
-    if ((insn & 0xffff0fffu) == 0xeef10a10u) {
-        d.kind = MM_OP_VMRS;
-        d.rd = (mm_u8)((insn >> 12) & 0x0fu);
-        d.undefined = MM_FALSE;
-        return d;
-    }
-    if ((insn & 0xffff0fffu) == 0xeee10a10u) {
-        d.kind = MM_OP_VMSR;
-        d.rd = (mm_u8)((insn >> 12) & 0x0fu);
-        d.undefined = MM_FALSE;
-        return d;
+    {
+        mm_u8 op1 = (mm_u8)((insn >> 21) & 0x7u);
+        mm_u8 opcode = (mm_u8)((insn >> 20) & 0x1u); /* 0=VMSR, 1=VMRS */
+        mm_u8 crn = (mm_u8)((insn >> 16) & 0x0fu);
+        mm_u8 coproc = (mm_u8)((insn >> 8) & 0x0fu);
+        if ((insn & 0x0f000010u) == 0x0e000010u &&
+            (coproc == 10u || coproc == 11u) && op1 == 7u && crn == 1u) {
+            d.kind = (opcode != 0u) ? MM_OP_VMRS : MM_OP_VMSR;
+            d.rd = (mm_u8)((insn >> 12) & 0x0fu);
+            d.undefined = MM_FALSE;
+            return d;
+        }
     }
 
     /* Coprocessor register transfer (MCR/MRC), Thumb-2 */
