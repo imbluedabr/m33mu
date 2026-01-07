@@ -2078,11 +2078,44 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu,
                                  mm_u32 fault_xpsr,
                                  mm_u32 ufsr_bits);
 
+static mm_bool fault_clock_hit(mm_u64 cycle, const mm_u64 *clocks, mm_u8 count)
+{
+    mm_u8 i;
+    if (cycle == 0u || clocks == 0 || count == 0u) return MM_FALSE;
+    for (i = 0; i < count; ++i) {
+        if (clocks[i] == cycle) {
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
+static mm_bool fault_clock_add(mm_u64 value, mm_u64 *clocks, mm_u8 *count)
+{
+    mm_u8 i;
+    mm_u8 cap;
+    if (value == 0u || clocks == 0 || count == 0) return MM_FALSE;
+    cap = 16u;
+    if (*count >= cap) return MM_FALSE;
+    for (i = 0; i < *count; ++i) {
+        if (clocks[i] == value) {
+            return MM_TRUE;
+        }
+        if (clocks[i] + 1u == value || value + 1u == clocks[i]) {
+            return MM_FALSE;
+        }
+    }
+    clocks[(*count)++] = value;
+    return MM_TRUE;
+}
+
 static mm_bool step_core_simple(struct mm_cpu *cpu,
                                 struct mm_scs *scs,
                                 struct mm_nvic *nvic,
                                 struct mm_memmap *map,
                                 const struct mm_target_cfg *cfg,
+                                const mm_u64 *fault_clocks,
+                                mm_u8 fault_clock_count,
                                 mm_u64 *cycle_total,
                                 mm_u64 *vcycles,
                                 mm_u64 *cycles_since_poll,
@@ -2114,6 +2147,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         cpu->sleep_wfe = MM_FALSE;
         cpu->event_reg = MM_FALSE;
     }
+
 
     if (mm_trace_enabled()) {
         mm_trace_begin_step(cpu, cpu->r[15] & ~1u);
@@ -2166,6 +2200,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         struct mm_fetch_result f;
         struct mm_decoded d;
         mm_bool execute_it;
+        mm_bool fault_skip = MM_FALSE;
         const mm_u32 insn_cycles = 1u;
 
         if (cycle_total) *cycle_total += insn_cycles;
@@ -2173,6 +2208,9 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         if (cycles_since_poll) *cycles_since_poll += insn_cycles;
         mm_scs_systick_advance(scs, insn_cycles);
         mm_timer_tick(cfg, insn_cycles);
+        if (cycle_total && fault_clock_hit(*cycle_total, fault_clocks, fault_clock_count)) {
+            fault_skip = MM_TRUE;
+        }
 
         cpu->r[13] = mm_cpu_get_active_sp(cpu);
 
@@ -2237,6 +2275,21 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
 
         if (!execute_it && d.kind != MM_OP_IT) {
             if (*it_remaining > 0u) {
+                mm_u8 raw = itstate_get(cpu->xpsr);
+                *it_pattern >>= 1;
+                (*it_remaining)--;
+                raw = itstate_advance(raw);
+                cpu->xpsr = itstate_set(cpu->xpsr, raw);
+            }
+            result = MM_TRUE;
+            goto out;
+        }
+
+        if (fault_skip) {
+            printf("[FAULT-CLOCK] skip pc=0x%08lx cycle=%llu\n",
+                   (unsigned long)(f.pc_fetch | 1u),
+                   (unsigned long long)(cycle_total ? *cycle_total : 0u));
+            if (*it_remaining > 0u && d.kind != MM_OP_IT) {
                 mm_u8 raw = itstate_get(cpu->xpsr);
                 *it_pattern >>= 1;
                 (*it_remaining)--;
@@ -3133,6 +3186,8 @@ int main(int argc, char **argv)
     mm_u32 expect_bkpt = 0;
     mm_bool expect_bkpt_hit = MM_FALSE;
     mm_u32 opt_timeout = 0;
+    mm_u64 opt_fault_clocks[16];
+    mm_u8 opt_fault_clock_count = 0;
 
     if (strcmp_trace_env != 0 && strcmp_trace_env[0] != '\0') {
         if (parse_pc_trace_range(strcmp_trace_env, &strcmp_trace_start, &strcmp_trace_end)) {
@@ -3212,12 +3267,62 @@ int main(int argc, char **argv)
             opt_record = MM_TRUE;
         } else if (strcmp(argv[i], "--call-trace") == 0) {
             opt_call_trace = MM_TRUE;
+        } else if (strcmp(argv[i], "--fault-clock") == 0) {
+            unsigned long long t;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing fault-clock value\n");
+                return 1;
+            }
+            t = strtoull(argv[i + 1], 0, 10);
+            if (t == 0u) {
+                fprintf(stderr, "invalid fault-clock: %s\n", argv[i + 1]);
+                return 1;
+            }
+            if (!fault_clock_add((mm_u64)t, opt_fault_clocks, &opt_fault_clock_count)) {
+                fprintf(stderr, "invalid or contiguous fault-clock: %s\n", argv[i + 1]);
+                return 1;
+            }
+            i++;
+        } else if (strncmp(argv[i], "--fault-clock=", 13) == 0) {
+            unsigned long long t = strtoull(argv[i] + 13, 0, 10);
+            if (t == 0u) {
+                fprintf(stderr, "invalid fault-clock: %s\n", argv[i]);
+                return 1;
+            }
+            if (!fault_clock_add((mm_u64)t, opt_fault_clocks, &opt_fault_clock_count)) {
+                fprintf(stderr, "invalid or contiguous fault-clock: %s\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--expect-bkpt") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing expect-bkpt value\n");
+                return 1;
+            }
+            if (!parse_hex_u32(argv[i + 1], &expect_bkpt)) {
+                fprintf(stderr, "invalid expect-bkpt value: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_expect_bkpt = MM_TRUE;
+            i++;
         } else if (strncmp(argv[i], "--expect-bkpt=", 14) == 0) {
             if (!parse_hex_u32(argv[i] + 14, &expect_bkpt)) {
                 fprintf(stderr, "invalid expect-bkpt value: %s\n", argv[i]);
                 return 1;
             }
             opt_expect_bkpt = MM_TRUE;
+        } else if (strcmp(argv[i], "--timeout") == 0) {
+            unsigned long t;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing timeout value\n");
+                return 1;
+            }
+            t = strtoul(argv[i + 1], 0, 10);
+            if (t == 0u) {
+                fprintf(stderr, "invalid timeout: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_timeout = (mm_u32)t;
+            i++;
         } else if (strncmp(argv[i], "--timeout=", 10) == 0) {
             unsigned long t = strtoul(argv[i] + 10, 0, 10);
             if (t == 0u) {
@@ -3328,8 +3433,8 @@ int main(int argc, char **argv)
 #ifdef M33MU_USE_LIBCAPSTONE
                         "[--capstone] [--capstone-verbose] "
 #endif
-                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--call-trace] [--no-tz] [--gdb-symbols <elf>] "
-                        "[--expect-bkpt=0xNN] [--timeout=seconds] "
+                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--call-trace] [--fault-clock N] [--no-tz] [--gdb-symbols <elf>] "
+                        "[--expect-bkpt 0xNN] [--timeout seconds] "
                         "[--boot-offset=0xN] "
                         "[--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]] "
                         "[--usb[:port=<n>]] "
@@ -3492,6 +3597,16 @@ int main(int argc, char **argv)
     }
 
     mm_gdb_stub_init(&gdb);
+    if (opt_fault_clock_count > 0u) {
+        mm_u8 i;
+        if (opt_fault_clock_count > (mm_u8)(sizeof(gdb.fault_clocks) / sizeof(gdb.fault_clocks[0]))) {
+            opt_fault_clock_count = (mm_u8)(sizeof(gdb.fault_clocks) / sizeof(gdb.fault_clocks[0]));
+        }
+        for (i = 0; i < opt_fault_clock_count; ++i) {
+            gdb.fault_clocks[i] = opt_fault_clocks[i];
+        }
+        gdb.fault_clock_count = opt_fault_clock_count;
+    }
     if (opt_gdb) {
         if (gdb_port <= 0 || gdb_port > 65535) {
             fprintf(stderr, "invalid gdb port: %d\n", gdb_port);
@@ -3534,6 +3649,8 @@ int main(int argc, char **argv)
             mm_u64 vcycles = 0;
             mm_u64 vcycles_last_sync = 0;
             mm_u64 cycles_since_poll = 0;
+            mm_u64 fault_clocks[16];
+            mm_u8 fault_clock_count = opt_fault_clock_count;
             const mm_u64 poll_granularity = DEFAULT_BATCH_CYCLES;
             mm_u64 sync_granularity = DEFAULT_SYNC_GRANULARITY;
             mm_u64 host0_ns = host_now_ns();
@@ -3541,6 +3658,15 @@ int main(int argc, char **argv)
             mm_u64 hz_now = 0;
             mm_u64 last_hz = 0;
             tui_steps_offset = 0;
+            if (fault_clock_count > 0u) {
+                mm_u8 i;
+                if (fault_clock_count > (mm_u8)(sizeof(fault_clocks) / sizeof(fault_clocks[0]))) {
+                    fault_clock_count = (mm_u8)(sizeof(fault_clocks) / sizeof(fault_clocks[0]));
+                }
+                for (i = 0; i < fault_clock_count; ++i) {
+                    fault_clocks[i] = opt_fault_clocks[i];
+                }
+            }
 
             mm_system_clear_reset();
             mm_memmap_init(&map, regions, sizeof(regions) / sizeof(regions[0]));
@@ -3961,7 +4087,17 @@ int main(int argc, char **argv)
                         if (!mm_rp2350_core1_running()) {
                             break;
                         }
-                        if (!step_core_simple(&cpu1, &scs1, &nvic1, &map, &cfg,
+                        if (opt_gdb) {
+                            mm_u8 i;
+                            fault_clock_count = gdb.fault_clock_count;
+                            if (fault_clock_count > (mm_u8)(sizeof(fault_clocks) / sizeof(fault_clocks[0]))) {
+                                fault_clock_count = (mm_u8)(sizeof(fault_clocks) / sizeof(fault_clocks[0]));
+                            }
+                            for (i = 0; i < fault_clock_count; ++i) {
+                                fault_clocks[i] = gdb.fault_clocks[i];
+                            }
+                        }
+                        if (!step_core_simple(&cpu1, &scs1, &nvic1, &map, &cfg, fault_clocks, fault_clock_count,
                                               &cycle_total, &vcycles, &cycles_since_poll,
                                               &it_pattern1, &it_remaining1, &it_cond1, &done)) {
                             break;
@@ -4212,12 +4348,26 @@ handle_pending:
                     mm_u32 pc_before_exec = 0;
                     const mm_u32 insn_cycles = 1u;
                     mm_bool trace_started = MM_FALSE;
+                    mm_bool fault_skip = MM_FALSE;
                     (void)pc_before_exec;
                     cycles_since_poll += insn_cycles;
                     cycle_total += insn_cycles;
                     vcycles += insn_cycles;
                     mm_scs_systick_advance(&scs, insn_cycles);
                     mm_timer_tick(&cfg, insn_cycles);
+                    if (opt_gdb) {
+                        mm_u8 i;
+                        fault_clock_count = gdb.fault_clock_count;
+                        if (fault_clock_count > (mm_u8)(sizeof(fault_clocks) / sizeof(fault_clocks[0]))) {
+                            fault_clock_count = (mm_u8)(sizeof(fault_clocks) / sizeof(fault_clocks[0]));
+                        }
+                        for (i = 0; i < fault_clock_count; ++i) {
+                            fault_clocks[i] = gdb.fault_clocks[i];
+                        }
+                    }
+                    if (fault_clock_hit(cycle_total, fault_clocks, fault_clock_count)) {
+                        fault_skip = MM_TRUE;
+                    }
 
                     /* Keep R13 consistent with the active banked SP so that instructions
                      * like LDR/STR [SP,#imm] and function prologue/epilogue sequences
@@ -4394,6 +4544,24 @@ handle_pending:
                     }
                     if (!execute_it && d.kind != MM_OP_IT) {
                         if (it_remaining > 0u) {
+                            mm_u8 raw = itstate_get(cpu.xpsr);
+                            it_pattern >>= 1;
+                            it_remaining--;
+                            raw = itstate_advance(raw);
+                            cpu.xpsr = itstate_set(cpu.xpsr, raw);
+                        }
+                        if (trace_started) {
+                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                            mm_trace_end_step(&cpu);
+                        }
+                        continue;
+                    }
+
+                    if (fault_skip) {
+                        printf("[FAULT-CLOCK] skip pc=0x%08lx cycle=%llu\n",
+                               (unsigned long)(f.pc_fetch | 1u),
+                               (unsigned long long)cycle_total);
+                        if (it_remaining > 0u && d.kind != MM_OP_IT) {
                             mm_u8 raw = itstate_get(cpu.xpsr);
                             it_pattern >>= 1;
                             it_remaining--;

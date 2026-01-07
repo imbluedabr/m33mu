@@ -37,6 +37,8 @@ struct mm_gdb_stub {
     mm_bool request_reset;
     mm_bool request_quit;
     mm_bool reverse_exec;
+    mm_u64 fault_clocks[16];
+    mm_u8 fault_clock_count;
     struct {
         mm_u32 addr;
         mm_u8 len;

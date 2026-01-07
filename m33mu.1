@@ -37,10 +37,13 @@ Enable in-memory execution trace for reverse stepping.
 .BR --call-trace
 Log call/return, interrupt, and TrustZone SG transitions with symbol names when available.
 .TP
-.BR --expect-bkpt= NN
+.BR --expect-bkpt " " NN
 Exit with code 0 only if a BKPT with the given immediate (hex) is hit.
 .TP
-.BR --timeout= seconds
+.BR --fault-clock " " NNN
+Skip execution of the instruction fetched when the virtual cycle counter reaches NNN. May be specified multiple times (up to 16), but values cannot be contiguous. Used to emulate "fault injection" attacks, to skip single instructions (based on clock time).
+.TP
+.BR --timeout " " seconds
 Exit with code 127 if the host timeout elapses (SIGALRM).
 .TP
 .BR --persist

@@ -169,6 +169,7 @@ void mm_gdb_stub_init(struct mm_gdb_stub *stub)
     stub->request_reset = MM_FALSE;
     stub->request_quit = MM_FALSE;
     stub->reverse_exec = MM_FALSE;
+    stub->fault_clock_count = 0;
     {
         size_t i;
         for (i = 0; i < sizeof(stub->breakpoints) / sizeof(stub->breakpoints[0]); ++i) {
@@ -364,6 +365,25 @@ static size_t gdb_encode_registers(struct mm_cpu *cpu, char *out, size_t out_cap
     }
     out[pos] = '\0';
     return pos;
+}
+
+static mm_bool gdb_fault_clock_add(struct mm_gdb_stub *stub, mm_u64 value)
+{
+    mm_u8 i;
+    if (stub == 0 || value == 0u) return MM_FALSE;
+    if (stub->fault_clock_count >= (mm_u8)(sizeof(stub->fault_clocks) / sizeof(stub->fault_clocks[0]))) {
+        return MM_FALSE;
+    }
+    for (i = 0; i < stub->fault_clock_count; ++i) {
+        if (stub->fault_clocks[i] == value) {
+            return MM_TRUE;
+        }
+        if (stub->fault_clocks[i] + 1u == value || value + 1u == stub->fault_clocks[i]) {
+            return MM_FALSE;
+        }
+    }
+    stub->fault_clocks[stub->fault_clock_count++] = value;
+    return MM_TRUE;
 }
 
 static mm_bool gdb_read_bytes(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr, mm_u8 *dst, size_t len)
@@ -823,6 +843,66 @@ void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_
             } else if (strcmp(cmd, "monitor quit") == 0 || strcmp(cmd, "quit") == 0) {
                 stub->request_quit = MM_TRUE;
                 gdb_send_packet(stub->client_fd, "OK");
+            } else if (strcmp(cmd, "monitor fault-clock") == 0 ||
+                       strcmp(cmd, "monitor fault clock") == 0 ||
+                       strcmp(cmd, "fault-clock") == 0 ||
+                       strcmp(cmd, "fault clock") == 0) {
+                char msg[256];
+                size_t pos = 0;
+                mm_u8 i;
+                if (stub->fault_clock_count == 0u) {
+                    snprintf(msg, sizeof(msg), "fault-clock: disabled\n");
+                } else {
+                    pos += (size_t)snprintf(msg + pos, sizeof(msg) - pos, "fault-clock:");
+                    for (i = 0; i < stub->fault_clock_count && pos < sizeof(msg); ++i) {
+                        pos += (size_t)snprintf(msg + pos, sizeof(msg) - pos, " %llu",
+                                                (unsigned long long)stub->fault_clocks[i]);
+                    }
+                    if (pos + 1u < sizeof(msg)) {
+                        msg[pos++] = '\n';
+                        msg[pos] = '\0';
+                    }
+                }
+                gdb_send_console(stub, msg);
+                gdb_send_packet(stub->client_fd, "OK");
+            } else if (strcmp(cmd, "monitor fault-clock clear") == 0 ||
+                       strcmp(cmd, "monitor fault clock clear") == 0 ||
+                       strcmp(cmd, "fault-clock clear") == 0 ||
+                       strcmp(cmd, "fault clock clear") == 0) {
+                stub->fault_clock_count = 0;
+                gdb_send_console(stub, "fault-clock cleared\n");
+                gdb_send_packet(stub->client_fd, "OK");
+            } else if (strncmp(cmd, "monitor fault-clock ", 20) == 0 ||
+                       strncmp(cmd, "monitor fault clock ", 21) == 0 ||
+                       strncmp(cmd, "fault-clock ", 11) == 0 ||
+                       strncmp(cmd, "fault clock ", 12) == 0) {
+                const char *arg = NULL;
+                unsigned long long v;
+                char *endp = NULL;
+                if (strncmp(cmd, "monitor fault-clock ", 20) == 0) {
+                    arg = cmd + 20;
+                } else if (strncmp(cmd, "monitor fault clock ", 21) == 0) {
+                    arg = cmd + 21;
+                } else if (strncmp(cmd, "fault-clock ", 11) == 0) {
+                    arg = cmd + 11;
+                } else {
+                    arg = cmd + 12;
+                }
+                v = strtoull(arg, &endp, 10);
+                if (arg == NULL || arg[0] == '\0' || endp == arg) {
+                    gdb_send_console(stub, "fault-clock: invalid value\n");
+                    gdb_send_error(stub, 1);
+                } else if (v == 0u) {
+                    stub->fault_clock_count = 0;
+                    gdb_send_console(stub, "fault-clock cleared\n");
+                    gdb_send_packet(stub->client_fd, "OK");
+                } else if (!gdb_fault_clock_add(stub, (mm_u64)v)) {
+                    gdb_send_console(stub, "fault-clock: invalid or contiguous\n");
+                    gdb_send_error(stub, 1);
+                } else {
+                    gdb_send_console(stub, "fault-clock added\n");
+                    gdb_send_packet(stub->client_fd, "OK");
+                }
             } else {
                 gdb_send_packet(stub->client_fd, "OK");
             }
