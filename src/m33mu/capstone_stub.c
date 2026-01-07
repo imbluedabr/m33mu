@@ -34,6 +34,19 @@ void capstone_log(const struct mm_fetch_result *fetch)
     (void)fetch;
 }
 
+int capstone_decode_one(const struct mm_fetch_result *fetch, int *id_out,
+                        char *mnemonic_out, size_t mnemonic_cap,
+                        char *op_str_out, size_t op_str_cap)
+{
+    (void)fetch;
+    (void)id_out;
+    (void)mnemonic_out;
+    (void)mnemonic_cap;
+    (void)op_str_out;
+    (void)op_str_cap;
+    return 0;
+}
+
 mm_bool capstone_cross_check(const struct mm_fetch_result *fetch, const struct mm_decoded *dec)
 {
     (void)fetch;
