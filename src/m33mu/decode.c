@@ -2336,13 +2336,13 @@ static struct mm_decoded decode_32(mm_u32 insn)
     }
 
     /* VMRS/VMSR (FPSCR transfer). */
-    if ((insn & 0xffff0f00u) == 0xeef10a00u) {
+    if ((insn & 0xffff0fffu) == 0xeef10a10u) {
         d.kind = MM_OP_VMRS;
         d.rd = (mm_u8)((insn >> 12) & 0x0fu);
         d.undefined = MM_FALSE;
         return d;
     }
-    if ((insn & 0xffff0f00u) == 0xeee10a00u) {
+    if ((insn & 0xffff0fffu) == 0xeee10a10u) {
         d.kind = MM_OP_VMSR;
         d.rd = (mm_u8)((insn >> 12) & 0x0fu);
         d.undefined = MM_FALSE;

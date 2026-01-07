@@ -3385,7 +3385,6 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                (unsigned long)cpu.r[14],
                                (unsigned)d.kind);
                     }
-
 #undef cpu
 #undef map
 #undef scs
