@@ -23,6 +23,7 @@
 #define M33MU_CAPSTONE_H
 
 #include "m33mu/types.h"
+#include <stddef.h>
 
 struct mm_fetch_result;
 struct mm_decoded;
@@ -34,6 +35,9 @@ void capstone_shutdown(void);
 mm_bool capstone_set_enabled(mm_bool enabled);
 mm_bool capstone_is_enabled(void);
 void capstone_log(const struct mm_fetch_result *fetch);
+int capstone_decode_one(const struct mm_fetch_result *fetch, int *id_out,
+                        char *mnemonic_out, size_t mnemonic_cap,
+                        char *op_str_out, size_t op_str_cap);
 mm_bool capstone_cross_check(const struct mm_fetch_result *fetch, const struct mm_decoded *dec);
 mm_bool capstone_it_check_pre(const struct mm_fetch_result *fetch, const struct mm_decoded *dec,
                               mm_u8 it_pattern, mm_u8 it_remaining, mm_u8 it_cond);

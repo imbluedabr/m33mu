@@ -192,6 +192,54 @@ void capstone_log(const struct mm_fetch_result *fetch)
     cs_free(insn, count);
 }
 
+int capstone_decode_one(const struct mm_fetch_result *fetch, int *id_out,
+                        char *mnemonic_out, size_t mnemonic_cap,
+                        char *op_str_out, size_t op_str_cap)
+{
+    uint8_t code_buf[4];
+    const uint8_t *code;
+    size_t size;
+    uint64_t address;
+    cs_insn *insn = 0;
+    size_t count;
+
+    if (!g_capstone.ready || !g_capstone.enabled || fetch == 0 || fetch->len == 0u) {
+        return 0;
+    }
+
+    if (fetch->len == 2u) {
+        mm_u16 hw1 = (mm_u16)(fetch->insn & 0xffffu);
+        code_buf[0] = (uint8_t)(hw1 & 0xffu);
+        code_buf[1] = (uint8_t)((hw1 >> 8) & 0xffu);
+    } else {
+        mm_u16 hw1 = (mm_u16)((fetch->insn >> 16) & 0xffffu);
+        mm_u16 hw2 = (mm_u16)(fetch->insn & 0xffffu);
+        code_buf[0] = (uint8_t)(hw1 & 0xffu);
+        code_buf[1] = (uint8_t)((hw1 >> 8) & 0xffu);
+        code_buf[2] = (uint8_t)(hw2 & 0xffu);
+        code_buf[3] = (uint8_t)((hw2 >> 8) & 0xffu);
+    }
+    code = code_buf;
+    size = (size_t)fetch->len;
+    address = (uint64_t)fetch->pc_fetch;
+
+    count = cs_disasm(g_capstone.handle, code, size, address, 1, &insn);
+    if (count == 0 || insn == 0) {
+        return 0;
+    }
+    if (id_out != 0) {
+        *id_out = insn[0].id;
+    }
+    if (mnemonic_out != 0 && mnemonic_cap > 0u) {
+        (void)snprintf(mnemonic_out, mnemonic_cap, "%s", insn[0].mnemonic);
+    }
+    if (op_str_out != 0 && op_str_cap > 0u) {
+        (void)snprintf(op_str_out, op_str_cap, "%s", insn[0].op_str);
+    }
+    cs_free(insn, count);
+    return 1;
+}
+
 static void log_reg_mismatch(int idx, int cap_reg, mm_u8 mm_reg)
 {
     const char *cap_name = cs_reg_name(g_capstone.handle, cap_reg);
@@ -443,7 +491,11 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
             return (dec->kind == MM_OP_MOV_IMM || dec->kind == MM_OP_MOV_REG);
         case ARM_INS_MOVW: return dec->kind == MM_OP_MOVW;
         case ARM_INS_MOVT: return dec->kind == MM_OP_MOVT;
-        case ARM_INS_MVN: return (dec->kind == MM_OP_MVN_REG || dec->kind == MM_OP_MVN_IMM);
+        case ARM_INS_MVN:
+            if (dec->kind == MM_OP_MVN_REG || dec->kind == MM_OP_MVN_IMM) {
+                return MM_TRUE;
+            }
+            return (dec->kind == MM_OP_ORN_REG && dec->rn == 15u);
         case ARM_INS_ADD:
         case ARM_INS_ADDW:
             return (dec->kind == MM_OP_ADD_IMM || dec->kind == MM_OP_ADD_REG || dec->kind == MM_OP_ADD_SP_IMM);
@@ -551,7 +603,10 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_VCVTR:
             return (dec->kind == MM_OP_VCVTR_S32_F32 || dec->kind == MM_OP_VCVTR_U32_F32);
         case ARM_INS_VMOV:
-            return (dec->kind == MM_OP_VMOV_SR || dec->kind == MM_OP_VMOV_RS || dec->kind == MM_OP_VMOV_IMM);
+            return (dec->kind == MM_OP_VMOV_SR || dec->kind == MM_OP_VMOV_RS ||
+                    dec->kind == MM_OP_VMOV_SRR || dec->kind == MM_OP_VMOV_RSS ||
+                    dec->kind == MM_OP_VMOV_DRR || dec->kind == MM_OP_VMOV_RDD ||
+                    dec->kind == MM_OP_VMOV_IMM);
         case ARM_INS_VMRS: return dec->kind == MM_OP_VMRS;
         case ARM_INS_VMSR: return dec->kind == MM_OP_VMSR;
         case ARM_INS_VLDR: return dec->kind == MM_OP_VLDR;
@@ -616,6 +671,9 @@ static mm_bool cross_check_operands(const struct mm_fetch_result *fetch, const c
             if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
                 return MM_FALSE;
             }
+            if (arm->operands[1].type == ARM_OP_IMM) {
+                return dec->imm != 0u && arm->operands[1].imm == 0;
+            }
             return check_vfp_reg_operand(&arm->operands[1], 1, dec->rm);
         case ARM_INS_VCVT:
         case ARM_INS_VCVTR:
@@ -647,6 +705,60 @@ static mm_bool cross_check_operands(const struct mm_fetch_result *fetch, const c
                     return MM_FALSE;
                 }
                 return check_vfp_reg_operand(&arm->operands[1], 1, dec->rn);
+            }
+            if (dec->kind == MM_OP_VMOV_SRR) {
+                if (arm->op_count < 4u) {
+                    return MM_FALSE;
+                }
+                if (!check_vfp_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                    return MM_FALSE;
+                }
+                if (!check_vfp_reg_operand(&arm->operands[1], 1, dec->rn)) {
+                    return MM_FALSE;
+                }
+                if (!check_reg_operand(&arm->operands[2], 2, dec->rm)) {
+                    return MM_FALSE;
+                }
+                return check_reg_operand(&arm->operands[3], 3, dec->ra);
+            }
+            if (dec->kind == MM_OP_VMOV_RSS) {
+                if (arm->op_count < 4u) {
+                    return MM_FALSE;
+                }
+                if (!check_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                    return MM_FALSE;
+                }
+                if (!check_reg_operand(&arm->operands[1], 1, dec->rn)) {
+                    return MM_FALSE;
+                }
+                if (!check_vfp_reg_operand(&arm->operands[2], 2, dec->rm)) {
+                    return MM_FALSE;
+                }
+                return check_vfp_reg_operand(&arm->operands[3], 3, dec->ra);
+            }
+            if (dec->kind == MM_OP_VMOV_DRR) {
+                if (arm->op_count < 3u) {
+                    return MM_FALSE;
+                }
+                if (!check_vfp_d_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                    return MM_FALSE;
+                }
+                if (!check_reg_operand(&arm->operands[1], 1, dec->rm)) {
+                    return MM_FALSE;
+                }
+                return check_reg_operand(&arm->operands[2], 2, dec->ra);
+            }
+            if (dec->kind == MM_OP_VMOV_RDD) {
+                if (arm->op_count < 3u) {
+                    return MM_FALSE;
+                }
+                if (!check_reg_operand(&arm->operands[0], 0, dec->rd)) {
+                    return MM_FALSE;
+                }
+                if (!check_reg_operand(&arm->operands[1], 1, dec->rn)) {
+                    return MM_FALSE;
+                }
+                return check_vfp_d_reg_operand(&arm->operands[2], 2, dec->rm);
             }
             return MM_TRUE;
         case ARM_INS_VLDR:

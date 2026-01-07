@@ -712,7 +712,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  EXEC_RAISE_UNDEF();
                                              }
                                              a = fpu_u32_to_f32(cpu.s[d.rd]);
-                                             b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             if (d.imm != 0u) {
+                                                 b = 0.0f;
+                                             } else {
+                                                 b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                             }
                                              fpu_cmp_update_flags(&cpu, a, b);
                                              fpu_mark_active(&cpu);
                                              break;
@@ -845,6 +849,54 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                   fpu_mark_active(&cpu);
                                                   break;
                                               }
+                        case MM_OP_VMOV_SRR: {
+                                                 if (!fpu_check_or_fault(ctx)) {
+                                                     return MM_EXEC_CONTINUE;
+                                                 }
+                                                 if (d.rd >= 32u || d.rn >= 32u || d.rm >= 15u || d.ra >= 15u) {
+                                                     EXEC_RAISE_UNDEF();
+                                                 }
+                                                 cpu.s[d.rd] = cpu.r[d.rm];
+                                                 cpu.s[d.rn] = cpu.r[d.ra];
+                                                 fpu_mark_active(&cpu);
+                                                 break;
+                                             }
+                        case MM_OP_VMOV_RSS: {
+                                                 if (!fpu_check_or_fault(ctx)) {
+                                                     return MM_EXEC_CONTINUE;
+                                                 }
+                                                 if (d.rd >= 15u || d.rn >= 15u || d.rm >= 32u || d.ra >= 32u) {
+                                                     EXEC_RAISE_UNDEF();
+                                                 }
+                                                 cpu.r[d.rd] = cpu.s[d.rm];
+                                                 cpu.r[d.rn] = cpu.s[d.ra];
+                                                 fpu_mark_active(&cpu);
+                                                 break;
+                                             }
+                        case MM_OP_VMOV_DRR: {
+                                                 if (!fpu_check_or_fault(ctx)) {
+                                                     return MM_EXEC_CONTINUE;
+                                                 }
+                                                 if (d.rd >= 16u || d.rm >= 15u || d.ra >= 15u) {
+                                                     EXEC_RAISE_UNDEF();
+                                                 }
+                                                 cpu.s[d.rd * 2u] = cpu.r[d.rm];
+                                                 cpu.s[d.rd * 2u + 1u] = cpu.r[d.ra];
+                                                 fpu_mark_active(&cpu);
+                                                 break;
+                                             }
+                        case MM_OP_VMOV_RDD: {
+                                                 if (!fpu_check_or_fault(ctx)) {
+                                                     return MM_EXEC_CONTINUE;
+                                                 }
+                                                 if (d.rm >= 16u || d.rd >= 15u || d.rn >= 15u) {
+                                                     EXEC_RAISE_UNDEF();
+                                                 }
+                                                 cpu.r[d.rd] = cpu.s[d.rm * 2u];
+                                                 cpu.r[d.rn] = cpu.s[d.rm * 2u + 1u];
+                                                 fpu_mark_active(&cpu);
+                                                 break;
+                                             }
                         case MM_OP_VMRS: {
                                               if (!fpu_check_or_fault(ctx)) {
                                                   return MM_EXEC_CONTINUE;
@@ -963,38 +1015,78 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                               mm_bool u = (d.imm & 0x80000000u) != 0u;
                                               mm_bool w = (d.imm & 0x40000000u) != 0u;
                                               mm_bool p = (d.imm & 0x20000000u) != 0u;
+                                              mm_bool is_double = (d.imm & MM_VFP_LS_DOUBLE) != 0u;
                                               mm_bool load = (d.kind == MM_OP_VLDM);
                                               mm_u32 addr;
                                               mm_u32 ireg;
                                               if (!fpu_check_or_fault(ctx)) {
                                                   return MM_EXEC_CONTINUE;
                                               }
-                                              if (count == 0u || d.rd >= 32u || (d.rd + count) > 32u) {
+                                              if (count == 0u) {
                                                   EXEC_RAISE_UNDEF();
                                               }
-                                              if (u) {
-                                                  addr = p ? (base + 4u) : base;
+                                              if (is_double) {
+                                                  if (d.rd >= 16u || (d.rd + count) > 16u) {
+                                                      EXEC_RAISE_UNDEF();
+                                                  }
                                               } else {
-                                                  addr = p ? (base - (count * 4u)) : (base - ((count - 1u) * 4u));
+                                                  if (d.rd >= 32u || (d.rd + count) > 32u) {
+                                                      EXEC_RAISE_UNDEF();
+                                                  }
+                                              }
+                                              if (u) {
+                                                  addr = p ? (base + (is_double ? 8u : 4u)) : base;
+                                              } else {
+                                                  mm_u32 step = is_double ? 8u : 4u;
+                                                  addr = p ? (base - (count * step)) : (base - ((count - 1u) * step));
                                               }
                                               for (ireg = 0; ireg < count; ++ireg) {
-                                                  mm_u32 cur_addr = addr + (ireg * 4u);
+                                                  mm_u32 cur_addr = addr + (ireg * (is_double ? 8u : 4u));
                                                   if (load) {
-                                                      mm_u32 val = 0u;
-                                                      if (!mm_memmap_read(&map, cpu.sec_state, cur_addr, 4u, &val)) {
-                                                          if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr, MM_FALSE)) done = MM_TRUE;
-                                                          return MM_EXEC_CONTINUE;
+                                                      if (is_double) {
+                                                          mm_u32 lo = 0u;
+                                                          mm_u32 hi = 0u;
+                                                          if (!mm_memmap_read(&map, cpu.sec_state, cur_addr, 4u, &lo)) {
+                                                              if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr, MM_FALSE)) done = MM_TRUE;
+                                                              return MM_EXEC_CONTINUE;
+                                                          }
+                                                          if (!mm_memmap_read(&map, cpu.sec_state, cur_addr + 4u, 4u, &hi)) {
+                                                              if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr + 4u, MM_FALSE)) done = MM_TRUE;
+                                                              return MM_EXEC_CONTINUE;
+                                                          }
+                                                          cpu.s[(d.rd + ireg) * 2u] = lo;
+                                                          cpu.s[(d.rd + ireg) * 2u + 1u] = hi;
+                                                      } else {
+                                                          mm_u32 val = 0u;
+                                                          if (!mm_memmap_read(&map, cpu.sec_state, cur_addr, 4u, &val)) {
+                                                              if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr, MM_FALSE)) done = MM_TRUE;
+                                                              return MM_EXEC_CONTINUE;
+                                                          }
+                                                          cpu.s[d.rd + ireg] = val;
                                                       }
-                                                      cpu.s[d.rd + ireg] = val;
                                                   } else {
-                                                      if (!mm_memmap_write(&map, cpu.sec_state, cur_addr, 4u, cpu.s[d.rd + ireg])) {
-                                                          if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr, MM_FALSE)) done = MM_TRUE;
-                                                          return MM_EXEC_CONTINUE;
+                                                      if (is_double) {
+                                                          mm_u32 lo = cpu.s[(d.rd + ireg) * 2u];
+                                                          mm_u32 hi = cpu.s[(d.rd + ireg) * 2u + 1u];
+                                                          if (!mm_memmap_write(&map, cpu.sec_state, cur_addr, 4u, lo)) {
+                                                              if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr, MM_FALSE)) done = MM_TRUE;
+                                                              return MM_EXEC_CONTINUE;
+                                                          }
+                                                          if (!mm_memmap_write(&map, cpu.sec_state, cur_addr + 4u, 4u, hi)) {
+                                                              if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr + 4u, MM_FALSE)) done = MM_TRUE;
+                                                              return MM_EXEC_CONTINUE;
+                                                          }
+                                                      } else {
+                                                          if (!mm_memmap_write(&map, cpu.sec_state, cur_addr, 4u, cpu.s[d.rd + ireg])) {
+                                                              if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, cur_addr, MM_FALSE)) done = MM_TRUE;
+                                                              return MM_EXEC_CONTINUE;
+                                                          }
                                                       }
                                                   }
                                               }
                                               if (w) {
-                                                  mm_u32 new_base = u ? (base + (count * 4u)) : (base - (count * 4u));
+                                                  mm_u32 step = is_double ? 8u : 4u;
+                                                  mm_u32 new_base = u ? (base + (count * step)) : (base - (count * step));
                                                   if (d.rn == 13u) {
                                                       EXEC_SET_SP(new_base);
                                                   } else {
@@ -1519,7 +1611,13 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     rhs = cpu.r[d.rm];
                                                 }
                                                 res = lhs & rhs;
-                                                cpu.r[d.rd] = res;
+                                                if (d.rd == 15u) {
+                                                    if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
+                                                        done = MM_TRUE;
+                                                    }
+                                                } else {
+                                                    cpu.r[d.rd] = res;
+                                                }
                                                 if (setflags) {
                                                     cpu.xpsr &= ~(0xE0000000u);
                                                     if (res == 0u) cpu.xpsr |= (1u << 30);
@@ -1555,13 +1653,21 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     /* 16-bit EORS (register) */
                                                     rhs = cpu.r[d.rm];
                                                 }
-                                                cpu.r[d.rd] = lhs ^ rhs;
-                                                if (setflags) {
-                                                    mm_u32 res = cpu.r[d.rd];
-                                                    cpu.xpsr &= ~(0xE0000000u);
-                                                    if (res == 0u) cpu.xpsr |= (1u << 30);
-                                                    if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
-                                                    if (carry_out) cpu.xpsr |= (1u << 29);
+                                                {
+                                                    mm_u32 res = lhs ^ rhs;
+                                                    if (d.rd == 15u) {
+                                                        if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
+                                                            done = MM_TRUE;
+                                                        }
+                                                    } else {
+                                                        cpu.r[d.rd] = res;
+                                                    }
+                                                    if (setflags) {
+                                                        cpu.xpsr &= ~(0xE0000000u);
+                                                        if (res == 0u) cpu.xpsr |= (1u << 30);
+                                                        if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                                        if (carry_out) cpu.xpsr |= (1u << 29);
+                                                    }
                                                 }
                                             } break;
                         case MM_OP_TEQ_REG: {
@@ -2231,62 +2337,102 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_bool vflag;
                                                 /* Thumb SUB (immediate) updates flags (SUBS). */
                                                 mm_add_with_carry(cpu.r[d.rn], ~d.imm, MM_TRUE, &res, &cflag, &vflag);
-                                                cpu.r[d.rd] = res;
+                                                if (d.rd == 15u) {
+                                                    if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
+                                                        done = MM_TRUE;
+                                                    }
+                                                } else {
+                                                    cpu.r[d.rd] = res;
+                                                    if (d.rd == 13u) {
+                                                        EXEC_SET_SP(cpu.r[13]);
+                                                    }
+                                                }
                                                 cpu.xpsr &= ~(0xF0000000u);
                                                 if (res == 0u) cpu.xpsr |= (1u << 30);
                                                 if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
                                                 if (cflag) cpu.xpsr |= (1u << 29);
                                                 if (vflag) cpu.xpsr |= (1u << 28);
                                             } else {
-                                                cpu.r[d.rd] = cpu.r[d.rn] - d.imm;
-                                            }
-                                            if (d.rd == 13u) {
-                                                EXEC_SET_SP(cpu.r[13]);
+                                                mm_u32 res = cpu.r[d.rn] - d.imm;
+                                                if (d.rd == 15u) {
+                                                    if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
+                                                        done = MM_TRUE;
+                                                    }
+                                                } else {
+                                                    cpu.r[d.rd] = res;
+                                                    if (d.rd == 13u) {
+                                                        EXEC_SET_SP(cpu.r[13]);
+                                                    }
+                                                }
                                             }
                                         }
                                         break;
                         case MM_OP_SUB_IMM_NF:
-                                        cpu.r[d.rd] = cpu.r[d.rn] - d.imm;
-                                        if (d.rd == 13u) {
-                                            EXEC_SET_SP(cpu.r[13]);
+                                        {
+                                            mm_u32 res = cpu.r[d.rn] - d.imm;
+                                            if (d.rd == 15u) {
+                                                if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
+                                                    done = MM_TRUE;
+                                                }
+                                            } else {
+                                                cpu.r[d.rd] = res;
+                                                if (d.rd == 13u) {
+                                                    EXEC_SET_SP(cpu.r[13]);
+                                                }
+                                            }
                                         }
                                         break;
                         case MM_OP_SUB_REG:
                                         if ((d.raw & 0xfe000000u) == 0xea000000u) {
                                             mm_u32 rhs = shift_reg_operand(cpu.r[d.rm], d.imm, cpu.xpsr, NULL);
+                                            mm_u32 res;
                                             if ((d.raw & (1u << 20)) != 0u) {
-                                                mm_u32 res;
                                                 mm_bool cflag;
                                                 mm_bool vflag;
                                                 mm_add_with_carry(cpu.r[d.rn], ~rhs, MM_TRUE, &res, &cflag, &vflag);
-                                                cpu.r[d.rd] = res;
                                                 cpu.xpsr &= ~(0xF0000000u);
                                                 if (res == 0u) cpu.xpsr |= (1u << 30);
                                                 if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
                                                 if (cflag) cpu.xpsr |= (1u << 29);
                                                 if (vflag) cpu.xpsr |= (1u << 28);
                                             } else {
-                                                cpu.r[d.rd] = cpu.r[d.rn] - rhs;
+                                                res = cpu.r[d.rn] - rhs;
                                             }
-                                            if (d.rd == 13u) {
-                                                EXEC_SET_SP(cpu.r[13]);
+                                            if (d.rd == 15u) {
+                                                if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
+                                                    done = MM_TRUE;
+                                                }
+                                            } else {
+                                                cpu.r[d.rd] = res;
+                                                if (d.rd == 13u) {
+                                                    EXEC_SET_SP(cpu.r[13]);
+                                                }
                                             }
                                         } else {
                                             mm_bool setflags = (d.len == 2u) ? ((it_remaining <= 1u) ? MM_TRUE : MM_FALSE) : MM_FALSE;
+                                            mm_u32 res;
                                             if (setflags) {
-                                                mm_u32 res;
                                                 mm_bool cflag;
                                                 mm_bool vflag;
                                                 /* SUBS Rd,Rn,Rm (Thumb-1) updates flags. */
                                                 mm_add_with_carry(cpu.r[d.rn], ~cpu.r[d.rm], MM_TRUE, &res, &cflag, &vflag);
-                                                cpu.r[d.rd] = res;
                                                 cpu.xpsr &= ~(0xF0000000u);
                                                 if (res == 0u) cpu.xpsr |= (1u << 30);
                                                 if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
                                                 if (cflag) cpu.xpsr |= (1u << 29);
                                                 if (vflag) cpu.xpsr |= (1u << 28);
                                             } else {
-                                                cpu.r[d.rd] = cpu.r[d.rn] - cpu.r[d.rm];
+                                                res = cpu.r[d.rn] - cpu.r[d.rm];
+                                            }
+                                            if (d.rd == 15u) {
+                                                if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
+                                                    done = MM_TRUE;
+                                                }
+                                            } else {
+                                                cpu.r[d.rd] = res;
+                                                if (d.rd == 13u) {
+                                                    EXEC_SET_SP(cpu.r[13]);
+                                                }
                                             }
                                         }
                                         break;
@@ -2419,7 +2565,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_u32 res;
                                                 mm_bool cflag;
                                                 mm_bool vflag;
-                                                mm_add_with_carry(cpu.r[d.rn], cpu.r[d.rm], MM_FALSE, &res, &cflag, &vflag);
+                                                mm_bool reg_form = ((d.raw & 0xfe000000u) == 0xea000000u);
+                                                mm_u32 rhs = cpu.r[d.rm];
+                                                if (reg_form) {
+                                                    rhs = shift_reg_operand(cpu.r[d.rm], d.imm, cpu.xpsr, NULL);
+                                                }
+                                                mm_add_with_carry(cpu.r[d.rn], rhs, MM_FALSE, &res, &cflag, &vflag);
                                                 cpu.xpsr &= ~(0xF0000000u);
                                                 if (res == 0u) cpu.xpsr |= (1u << 30);
                                                 if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
