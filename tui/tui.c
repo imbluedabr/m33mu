@@ -37,6 +37,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <signal.h>
 #include "m33mu/cpu.h"
 #include "m33mu/gpio.h"
 #include "m33mu/spiflash.h"
@@ -70,6 +71,8 @@ typedef uint32_t uintattr_t;
 #define TUI_BG_NS    TUI_RGB(0x1E, 0x5A, 0xB5)
 
 static struct mm_tui *g_tui = 0;
+static mm_bool g_tui_sigint_saved = MM_FALSE;
+static struct sigaction g_tui_sigint_old;
 
 enum tui_color_slot {
     TUI_COLOR_WHITE = 0,
@@ -120,6 +123,26 @@ static int tui_color_index(uintattr_t rgb)
         case TUI_BG_RUN: return TUI_COLOR_RUN;
         case TUI_BG_NS: return TUI_COLOR_NS;
         default: return TUI_COLOR_WHITE;
+    }
+}
+
+static uintattr_t tui_color_rgb_from_slot(mm_u8 slot)
+{
+    switch (slot) {
+        case TUI_COLOR_WHITE: return TUI_FG_WHITE;
+        case TUI_COLOR_DIM: return TUI_FG_DIM;
+        case TUI_COLOR_GREY: return TUI_FG_GREY;
+        case TUI_COLOR_CYAN: return TUI_FG_CYAN;
+        case TUI_COLOR_RED: return TUI_FG_RED;
+        case TUI_COLOR_GREEN: return TUI_FG_GREEN;
+        case TUI_COLOR_MAGENTA: return TUI_FG_MAGENTA;
+        case TUI_COLOR_BLACK: return TUI_FG_BLACK;
+        case TUI_COLOR_MENU: return TUI_BG_MENU;
+        case TUI_COLOR_STATUS: return TUI_BG_STATUS;
+        case TUI_COLOR_STOP: return TUI_BG_STOP;
+        case TUI_COLOR_RUN: return TUI_BG_RUN;
+        case TUI_COLOR_NS: return TUI_BG_NS;
+        default: return TUI_FG_WHITE;
     }
 }
 
@@ -317,6 +340,9 @@ static void tui_push_serial_line(struct mm_tui_uart *uart)
         uart->line_head = (uart->line_head + 1u) % TUI_MAX_LINES;
     }
     memcpy(uart->lines[slot], uart->cur_line, uart->cur_len + 1u);
+    memcpy(uart->lines_fg[slot], uart->cur_fg, uart->cur_len);
+    memcpy(uart->lines_bg[slot], uart->cur_bg, uart->cur_len);
+    uart->line_len[slot] = uart->cur_len;
     uart->cur_len = 0;
 }
 
@@ -345,6 +371,20 @@ static void tui_clear_serial(struct mm_tui_uart *uart)
     uart->cur_len = 0;
     uart->cur_line[0] = '\0';
     uart->scroll_offset = 0;
+    uart->fg = (mm_u8)TUI_COLOR_WHITE;
+    uart->bg = (mm_u8)TUI_COLOR_BLACK;
+}
+
+static void tui_serial_emit(struct mm_tui_uart *uart, char c)
+{
+    size_t pos;
+    if (uart == 0) return;
+    if (uart->cur_len + 1u >= TUI_MAX_COLS) return;
+    pos = uart->cur_len;
+    uart->cur_line[pos] = c;
+    uart->cur_fg[pos] = uart->fg;
+    uart->cur_bg[pos] = uart->bg;
+    uart->cur_len = pos + 1u;
 }
 
 static void tui_serial_flush_escape(struct mm_tui_uart *uart)
@@ -358,11 +398,113 @@ static void tui_serial_flush_escape(struct mm_tui_uart *uart)
         } else if (c == '\r') {
             /* ignore */
         } else {
-            if (uart->cur_len + 1u < TUI_MAX_COLS) {
-                uart->cur_line[uart->cur_len++] = c;
+            tui_serial_emit(uart, c);
+        }
+    }
+}
+
+static mm_u8 tui_ansi_basic_color(int idx, mm_bool bright)
+{
+    switch (idx) {
+        case 0: return bright ? TUI_COLOR_GREY : TUI_COLOR_BLACK;
+        case 1: return TUI_COLOR_RED;
+        case 2: return TUI_COLOR_GREEN;
+        case 3: return bright ? TUI_COLOR_WHITE : TUI_COLOR_DIM;
+        case 4: return TUI_COLOR_CYAN;
+        case 5: return TUI_COLOR_MAGENTA;
+        case 6: return TUI_COLOR_CYAN;
+        case 7: return TUI_COLOR_WHITE;
+        default: return TUI_COLOR_WHITE;
+    }
+}
+
+static void tui_serial_apply_sgr(struct mm_tui_uart *uart, const char *params, size_t len)
+{
+    int codes[12];
+    int count = 0;
+    size_t i = 0;
+    if (uart == 0) return;
+    while (i < len && count < (int)(sizeof(codes) / sizeof(codes[0]))) {
+        int v = 0;
+        mm_bool have = MM_FALSE;
+        while (i < len && params[i] >= '0' && params[i] <= '9') {
+            v = (v * 10) + (params[i] - '0');
+            have = MM_TRUE;
+            ++i;
+        }
+        if (have) {
+            codes[count++] = v;
+        }
+        if (i < len && params[i] == ';') {
+            ++i;
+            continue;
+        }
+        if (i < len && params[i] != ';') {
+            ++i;
+        }
+    }
+    if (count == 0) {
+        codes[count++] = 0;
+    }
+    for (i = 0; i < (size_t)count; ++i) {
+        int code = codes[i];
+        if (code == 0) {
+            uart->fg = (mm_u8)TUI_COLOR_WHITE;
+            uart->bg = (mm_u8)TUI_COLOR_BLACK;
+        } else if (code == 39) {
+            uart->fg = (mm_u8)TUI_COLOR_WHITE;
+        } else if (code == 49) {
+            uart->bg = (mm_u8)TUI_COLOR_BLACK;
+        } else if (code >= 30 && code <= 37) {
+            uart->fg = tui_ansi_basic_color(code - 30, MM_FALSE);
+        } else if (code >= 90 && code <= 97) {
+            uart->fg = tui_ansi_basic_color(code - 90, MM_TRUE);
+        } else if (code >= 40 && code <= 47) {
+            uart->bg = tui_ansi_basic_color(code - 40, MM_FALSE);
+        } else if (code >= 100 && code <= 107) {
+            uart->bg = tui_ansi_basic_color(code - 100, MM_TRUE);
+        } else if (code == 38 || code == 48) {
+            if (i + 1u < (size_t)count) {
+                if (codes[i + 1] == 5 && (i + 2u) < (size_t)count) {
+                    i += 2u;
+                } else if (codes[i + 1] == 2 && (i + 4u) < (size_t)count) {
+                    i += 4u;
+                } else {
+                    i += 1u;
+                }
             }
         }
     }
+}
+
+static mm_bool tui_serial_handle_escape(struct mm_tui_uart *uart)
+{
+    size_t len;
+    char final;
+    if (uart == 0) return MM_FALSE;
+    if (uart->esc_len < 2u) return MM_FALSE;
+    if (uart->esc_buf[0] != '\x1b' || uart->esc_buf[1] != '[') return MM_FALSE;
+    len = (size_t)uart->esc_len;
+    final = uart->esc_buf[len - 1u];
+    if (final == 'J') {
+        if (len <= 3u || uart->esc_buf[2] == '2') {
+            tui_clear_serial(uart);
+            return MM_TRUE;
+        }
+        return MM_FALSE;
+    }
+    if (final == 'H' || final == 'f') {
+        return MM_TRUE;
+    }
+    if (final == 'm') {
+        if (len > 3u) {
+            tui_serial_apply_sgr(uart, &uart->esc_buf[2], len - 3u);
+        } else {
+            tui_serial_apply_sgr(uart, "", 0);
+        }
+        return MM_TRUE;
+    }
+    return MM_FALSE;
 }
 
 static void tui_append_serial_text(struct mm_tui_uart *uart, const char *buf, size_t len)
@@ -381,12 +523,7 @@ static void tui_append_serial_text(struct mm_tui_uart *uart, const char *buf, si
             }
             if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
                 uart->esc_buf[uart->esc_len] = '\0';
-                if (strcmp(uart->esc_buf, "\x1b[2J") == 0) {
-                    tui_clear_serial(uart);
-                } else if (strcmp(uart->esc_buf, "\x1b[H") == 0 ||
-                           strcmp(uart->esc_buf, "\x1b[1;1H") == 0) {
-                    /* ignore cursor home */
-                } else {
+                if (!tui_serial_handle_escape(uart)) {
                     tui_serial_flush_escape(uart);
                 }
                 uart->esc_len = 0;
@@ -405,9 +542,7 @@ static void tui_append_serial_text(struct mm_tui_uart *uart, const char *buf, si
         } else if (c == '\r') {
             /* ignore */
         } else {
-            if (uart->cur_len + 1u < TUI_MAX_COLS) {
-                uart->cur_line[uart->cur_len++] = c;
-            }
+            tui_serial_emit(uart, c);
         }
     }
 }
@@ -459,6 +594,68 @@ static void tui_draw_text(int x, int y, int max_x, uintattr_t fg, uintattr_t bg,
         tui_put_cell(cx, y, (uint32_t)text[i], tui_attr(fg), tui_attr(bg));
         ++cx;
         ++i;
+    }
+}
+
+static void tui_draw_serial_line(int x, int y, int max_x, const char *text,
+                                 const mm_u8 *fg, const mm_u8 *bg, size_t len)
+{
+    int cx = x;
+    size_t i;
+    for (i = 0; i < len && cx < max_x; ++i) {
+        uintattr_t fg_rgb = tui_color_rgb_from_slot(fg[i]);
+        uintattr_t bg_rgb = tui_color_rgb_from_slot(bg[i]);
+        tui_put_cell(cx, y, (uint32_t)text[i], tui_attr(fg_rgb), tui_attr(bg_rgb));
+        ++cx;
+    }
+}
+
+static void tui_draw_filled(int x0, int y0, int x1, int y1, uintattr_t fg, uintattr_t bg);
+
+static void tui_draw_quit_prompt(const struct mm_tui *tui, int w, int h)
+{
+    int box_w = 44;
+    int box_h = 7;
+    int x0;
+    int y0;
+    int i;
+    int x;
+    uintattr_t fg = TUI_FG_WHITE;
+    uintattr_t bg = TUI_BG_MENU;
+    uintattr_t sel_fg = TUI_FG_BLACK;
+    uintattr_t sel_bg = TUI_BG_STATUS;
+    int yes_x;
+    int no_x;
+    if (tui == 0) return;
+    if (box_w > w - 2) box_w = w - 2;
+    if (box_h > h - 2) box_h = h - 2;
+    if (box_w < 20 || box_h < 5) return;
+    x0 = (w - box_w) / 2;
+    y0 = (h - box_h) / 2;
+    tui_draw_filled(x0, y0, x0 + box_w - 1, y0 + box_h - 1, fg, bg);
+    for (x = x0 + 1; x < x0 + box_w - 1; ++x) {
+        tui_put_cell(x, y0, 0x2500, tui_attr(TUI_FG_DIM), tui_attr(bg));
+        tui_put_cell(x, y0 + box_h - 1, 0x2500, tui_attr(TUI_FG_DIM), tui_attr(bg));
+    }
+    for (i = y0 + 1; i < y0 + box_h - 1; ++i) {
+        tui_put_cell(x0, i, 0x2502, tui_attr(TUI_FG_DIM), tui_attr(bg));
+        tui_put_cell(x0 + box_w - 1, i, 0x2502, tui_attr(TUI_FG_DIM), tui_attr(bg));
+    }
+    tui_put_cell(x0, y0, 0x250c, tui_attr(TUI_FG_DIM), tui_attr(bg));
+    tui_put_cell(x0 + box_w - 1, y0, 0x2510, tui_attr(TUI_FG_DIM), tui_attr(bg));
+    tui_put_cell(x0, y0 + box_h - 1, 0x2514, tui_attr(TUI_FG_DIM), tui_attr(bg));
+    tui_put_cell(x0 + box_w - 1, y0 + box_h - 1, 0x2518, tui_attr(TUI_FG_DIM), tui_attr(bg));
+
+    tui_draw_text(x0 + 2, y0 + 2, x0 + box_w - 2, fg, bg,
+                  "Are you sure you want to quit m33mu?");
+    yes_x = x0 + (box_w / 2) - 9;
+    no_x = x0 + (box_w / 2) + 3;
+    if (tui->quit_choice) {
+        tui_draw_text(yes_x, y0 + 4, x0 + box_w - 2, sel_fg, sel_bg, "> Yes <");
+        tui_draw_text(no_x, y0 + 4, x0 + box_w - 2, fg, bg, "  No  ");
+    } else {
+        tui_draw_text(yes_x, y0 + 4, x0 + box_w - 2, fg, bg, "  Yes ");
+        tui_draw_text(no_x, y0 + 4, x0 + box_w - 2, sel_fg, sel_bg, "> No <");
     }
 }
 
@@ -577,37 +774,72 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
     if (tui == 0) return;
     (void)mod;
 
-    if (key == 27 || ch == 27) {
-        tui->want_quit = MM_TRUE;
-        tui->actions |= MM_TUI_ACTION_QUIT;
+    if (tui->quit_prompt) {
+        if (key == KEY_LEFT || key == KEY_RIGHT || ch == '\t') {
+            tui->quit_choice = (mm_u8)(tui->quit_choice ? 0u : 1u);
+            tui->input_dirty = MM_TRUE;
+        } else if (key == KEY_ENTER || ch == '\n' || ch == '\r') {
+            if (tui->quit_choice) {
+                tui->want_quit = MM_TRUE;
+                tui->actions |= MM_TUI_ACTION_QUIT;
+            } else {
+                tui->quit_prompt = MM_FALSE;
+                tui->input_dirty = MM_TRUE;
+            }
+        } else if (ch == 'y' || ch == 'Y') {
+            tui->quit_choice = 1u;
+            tui->want_quit = MM_TRUE;
+            tui->actions |= MM_TUI_ACTION_QUIT;
+        } else if (ch == 'n' || ch == 'N') {
+            tui->quit_choice = 0u;
+            tui->quit_prompt = MM_FALSE;
+            tui->input_dirty = MM_TRUE;
+        }
+        return;
+    }
+    if (ch == 0x18u) {
+        tui->quit_prompt = MM_TRUE;
+        tui->quit_choice = 0;
+        tui->input_dirty = MM_TRUE;
         return;
     }
     if (tui->window2_mode == MM_TUI_WIN2_UART) {
         struct mm_tui_uart *uart = tui_serial_current(tui);
         mm_u8 b = 0;
         mm_bool send = MM_FALSE;
+        const char *seq = 0;
+        size_t seq_len = 0;
         if (key == KEY_ENTER || ch == '\n' || ch == '\r') {
             b = '\r';
             send = MM_TRUE;
         } else if (key == KEY_BACKSPACE || ch == 0x7Fu || ch == 0x08u) {
             b = 0x7Fu;
             send = MM_TRUE;
+        } else if (key == KEY_UP) {
+            seq = "\x1b[A";
+            seq_len = 3u;
+        } else if (key == KEY_DOWN) {
+            seq = "\x1b[B";
+            seq_len = 3u;
+        } else if (key == KEY_RIGHT) {
+            seq = "\x1b[C";
+            seq_len = 3u;
+        } else if (key == KEY_LEFT) {
+            seq = "\x1b[D";
+            seq_len = 3u;
         } else if (ch != 0) {
             b = (mm_u8)ch;
             send = MM_TRUE;
+        }
+        if (seq != 0 && uart != 0 && uart->fd >= 0) {
+            ssize_t w = write(uart->fd, seq, seq_len);
+            (void)w;
+            return;
         }
         if (send && uart != 0 && uart->fd >= 0) {
             ssize_t w = write(uart->fd, &b, 1);
             (void)w;
         }
-    }
-    if (key == KEY_LEFT) {
-        tui->window2_mode = (mm_u8)((tui->window2_mode + 2u) % 3u);
-        return;
-    }
-    if (key == KEY_RIGHT) {
-        tui->window2_mode = (mm_u8)((tui->window2_mode + 1u) % 3u);
-        return;
     }
     if (key == KEY_PPAGE || key == KEY_NPAGE) {
         if (tui->window2_mode == MM_TUI_WIN2_UART) {
@@ -727,6 +959,7 @@ static void tui_draw(struct mm_tui *tui)
     if (w <= 0 || h <= 3) return;
     tui->width = w;
     tui->height = h;
+    tui_draw_filled(0, 0, w - 1, h - 1, TUI_FG_WHITE, TUI_BG_BLACK);
     menu_w = w / 5;
     if (menu_w < 12) menu_w = 12;
     if (menu_w > w - 8) menu_w = w / 5;
@@ -805,7 +1038,7 @@ static void tui_draw(struct mm_tui *tui)
         tui_draw_text(console_w + 2, 13, w - 1, step_fg, menu_bg, "CPU Reset (F8)");
     }
     tui_draw_text(console_w + 2, 17, w - 1, menu_fg, menu_bg, "GDB TUI (F9)");
-    tui_draw_text(console_w + 2, 19, w - 1, menu_fg, menu_bg, "Quit (Esc)");
+    tui_draw_text(console_w + 2, 19, w - 1, menu_fg, menu_bg, "Quit (Ctrl+X)");
 
     /* Control bar */
     {
@@ -1110,14 +1343,15 @@ static void tui_draw(struct mm_tui *tui)
                     size_t idx = start + (size_t)i;
                     if (idx < uart->line_count) {
                         size_t slot = (uart->line_head + idx) % TUI_MAX_LINES;
-                        tui_draw_text(split_x + 1, log_y + i, inner_x + inner_w - 1,
-                                      console_fg, console_bg, uart->lines[slot]);
+                        tui_draw_serial_line(split_x + 1, log_y + i, inner_x + inner_w - 1,
+                                             uart->lines[slot], uart->lines_fg[slot],
+                                             uart->lines_bg[slot], uart->line_len[slot]);
                     }
                 }
                 if (uart->cur_len > 0 && log_h > 0) {
                     uart->cur_line[uart->cur_len] = '\0';
-                    tui_draw_text(split_x + 1, log_y + log_h - 1, inner_x + inner_w - 1,
-                                  console_fg, console_bg, uart->cur_line);
+                    tui_draw_serial_line(split_x + 1, log_y + log_h - 1, inner_x + inner_w - 1,
+                                         uart->cur_line, uart->cur_fg, uart->cur_bg, uart->cur_len);
                 }
             }
         } else if (tui->window2_mode == MM_TUI_WIN2_PERIPH) {
@@ -1356,6 +1590,9 @@ static void tui_draw(struct mm_tui *tui)
         }
     }
 
+    if (tui->quit_prompt) {
+        tui_draw_quit_prompt(tui, w, h);
+    }
     refresh();
 }
 
@@ -1390,6 +1627,8 @@ mm_bool mm_tui_init(struct mm_tui *tui)
     tui->serial_count = 0;
     tui->serial_selected = 0;
     tui->window2_page_lines = 0;
+    tui->quit_prompt = MM_FALSE;
+    tui->quit_choice = 0;
     for (i = 0; i < TUI_MAX_UARTS; ++i) {
         tui->serials[i].fd = -1;
     }
@@ -1648,6 +1887,8 @@ void mm_tui_close_devices(struct mm_tui *tui)
         uart->line_head = 0;
         uart->cur_len = 0;
         uart->cur_line[0] = '\0';
+        uart->fg = (mm_u8)TUI_COLOR_WHITE;
+        uart->bg = (mm_u8)TUI_COLOR_BLACK;
     }
     tui->serial_count = 0;
     tui->serial_selected = 0;
@@ -1679,10 +1920,18 @@ static void *tui_thread_main(void *arg)
         }
         return 0;
     }
-    cbreak();
+    raw();
     noecho();
     keypad(stdscr, TRUE);
     curs_set(0);
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = SIG_IGN;
+        if (sigaction(SIGINT, &sa, &g_tui_sigint_old) == 0) {
+            g_tui_sigint_saved = MM_TRUE;
+        }
+    }
     tui_init_colors();
     erase();
     refresh();
@@ -1704,6 +1953,10 @@ static void *tui_thread_main(void *arg)
         }
         if (tty != NULL) {
             fclose(tty);
+        }
+        if (g_tui_sigint_saved) {
+            (void)sigaction(SIGINT, &g_tui_sigint_old, NULL);
+            g_tui_sigint_saved = MM_FALSE;
         }
         tui->active = MM_FALSE;
     }
@@ -1775,6 +2028,8 @@ void mm_tui_attach_uart(const char *label, const char *path)
     uart = &g_tui->serials[g_tui->serial_count];
     memset(uart, 0, sizeof(*uart));
     uart->fd = fd;
+    uart->fg = (mm_u8)TUI_COLOR_WHITE;
+    uart->bg = (mm_u8)TUI_COLOR_BLACK;
     if (label != 0 && label[0] != '\0') {
         snprintf(uart->label, sizeof(uart->label), "%s", label);
     } else {

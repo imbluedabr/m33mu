@@ -36,10 +36,17 @@ struct mm_tui_uart {
     char label[32];
     char path[128];
     char lines[TUI_MAX_LINES][TUI_MAX_COLS];
+    size_t line_len[TUI_MAX_LINES];
+    mm_u8 lines_fg[TUI_MAX_LINES][TUI_MAX_COLS];
+    mm_u8 lines_bg[TUI_MAX_LINES][TUI_MAX_COLS];
     size_t line_count;
     size_t line_head;
     char cur_line[TUI_MAX_COLS];
+    mm_u8 cur_fg[TUI_MAX_COLS];
+    mm_u8 cur_bg[TUI_MAX_COLS];
     size_t cur_len;
+    mm_u8 fg;
+    mm_u8 bg;
     char esc_buf[16];
     mm_u8 esc_len;
     mm_bool esc_active;
@@ -126,6 +133,8 @@ struct mm_tui {
     int window2_page_lines;
     int width;
     int height;
+    mm_bool quit_prompt;
+    mm_u8 quit_choice;
 };
 
 enum mm_tui_action {

@@ -482,6 +482,7 @@ static void launch_gdb_tui(const struct mm_tui *tui)
               "-e", "/bin/sh", "-c", cmd, (char *)0);
         _exit(127);
     }
+    return;
 }
 
 #ifdef M33MU_HAS_LIBDW
@@ -958,7 +959,7 @@ static mm_bool handle_tui(struct mm_tui *tui,
             printf("Starting GDB server on port %d...\n", gdb_port);
             if (mm_gdb_stub_start(gdb, gdb_port)) {
                 *opt_gdb = MM_TRUE;
-                launch_gdb_tui(tui);
+                (void)launch_gdb_tui(tui);
                 printf("Waiting for GDB connection...\n");
                 if (mm_gdb_stub_wait_client(gdb)) {
                     const char *exec_path = (gdb_symbols != 0) ? gdb_symbols : tui->image0_path;
@@ -3083,7 +3084,7 @@ int main(int argc, char **argv)
     mm_u8 *flash;
     mm_u8 *ram;
     struct mm_gdb_stub gdb;
-    struct mm_tui tui;
+    static struct mm_tui tui;
     struct mm_flash_persist persist;
     mm_bool tui_active = MM_FALSE;
     int rc = 0;
