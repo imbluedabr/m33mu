@@ -148,19 +148,13 @@ Options:
 
 ## Environment variables (optional)
 - `CAPSTONE_PC=<hex>`: limit Capstone cross-check logging to a specific PC (hex).
-- `M33MU_PC_TRACE=<start:end>`: trace instruction fetch/execute over a PC range (hex).
-- `M33MU_PC_TRACE_MEM=<start:end>`: like `M33MU_PC_TRACE`, but includes memory addresses.
 - `M33MU_STRCMP_TRACE=<start:end>`: trace strcmp-like loops; auto-seeds entry to range start.
 - `M33MU_STRCMP_ENTRY=<hex>`: override the entry PC for strcmp tracing.
 - `M33MU_MEMWATCH=<addr:size>`: watch a memory range (hex address + size).
 - `M33MU_NVIC_TRACE=1`: trace NVIC state changes.
 - `M33MU_SYSTICK_TRACE=1`: trace SysTick register access and tick behavior.
-- `M33MU_TIMER_TRACE=1`: trace RP2350 timer/alarm activity.
 - `M33MU_SLEEP_TRACE=1`: trace WFE/WFI sleep and wake decisions.
-- `M33MU_FLASH_TRACE=1`: trace flash MMIO activity.
 - `M33MU_PROT_TRACE=1..3`: print SAU/MPU attribution decisions; higher levels include region scans.
-- `M33MU_DUMP_PSP_FRAME=1`: dump 8-word stacked frames during EXC_RETURN unstack.
-- `M33MU_TZ_BOOT_TRACE=1`: trace security-state transitions during TZ boot/hand-off.
 
 ## Screenshots for TUI mode
 

@@ -4531,7 +4531,7 @@ handle_pending:
                     }
 
                     if (opt_dump) {
-                        printf("[DUMP] PC=0x%08lx len=%u opcode=0x%08lx kind=%d r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx sp=0x%08lx\n",
+                        printf("[DUMP] PC=0x%08lx len=%u opcode=0x%08lx kind=%d r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx sp=0x%08lx {clocks:%llu}\n",
                                 (unsigned long)(f.pc_fetch | 1u),
                                 (unsigned)d.len,
                                 (unsigned long)d.raw,
@@ -4540,7 +4540,8 @@ handle_pending:
                                 (unsigned long)cpu.r[1],
                                 (unsigned long)cpu.r[2],
                                 (unsigned long)cpu.r[3],
-                                (unsigned long)mm_cpu_get_active_sp(&cpu));
+                                (unsigned long)mm_cpu_get_active_sp(&cpu),
+                                (unsigned long long)cycle_total);
                     }
                     if (!execute_it && d.kind != MM_OP_IT) {
                         if (it_remaining > 0u) {
