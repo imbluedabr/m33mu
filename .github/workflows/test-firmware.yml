@@ -24,6 +24,8 @@ jobs:
         run: cmake --build build --target firmware-build
       - name: Run STM32H5 firmware test (SPI peripherals selection)
         run: build/m33mu tests/firmware/test-stm32h563/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --uart-stdout --expect-bkpt 0x7f --timeout 60
+      - name: Run STM32H5 dual-bank firmware test
+        run: build/m33mu tests/firmware/test-stm32h563-dualbank/app.bin --dualbank --expect-bkpt 0x7f --timeout 60 --uart-stdout
 
       - name: Run STM32U5 firmware test (SPI peripherals selection)
         run: build/m33mu  tests/firmware/test-stm32u585/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu stm32u585

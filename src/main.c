@@ -3115,6 +3115,7 @@ int main(int argc, char **argv)
     mm_bool opt_meminfo = MM_FALSE;
     mm_bool opt_record = MM_FALSE;
     mm_bool opt_call_trace = MM_FALSE;
+    mm_bool opt_dualbank = MM_FALSE;
     const char *gdb_symbols = 0;
     const char *gdb_symbols_list[32];
     size_t gdb_symbols_count = 0;
@@ -3261,6 +3262,8 @@ int main(int argc, char **argv)
             opt_uart_stdout = MM_TRUE;
         } else if (strcmp(argv[i], "--quit-on-faults") == 0) {
             opt_quit_on_faults = MM_TRUE;
+        } else if (strcmp(argv[i], "--dualbank") == 0) {
+            opt_dualbank = MM_TRUE;
         } else if (strcmp(argv[i], "--meminfo") == 0) {
             opt_meminfo = MM_TRUE;
         } else if (strcmp(argv[i], "--record") == 0) {
@@ -3433,7 +3436,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_USE_LIBCAPSTONE
                         "[--capstone] [--capstone-verbose] "
 #endif
-                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--call-trace] [--fault-clock N] [--no-tz] [--gdb-symbols <elf>] "
+                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--call-trace] [--dualbank] [--fault-clock N] [--no-tz] [--gdb-symbols <elf>] "
                         "[--expect-bkpt 0xNN] [--timeout seconds] "
                         "[--boot-offset=0xN] "
                         "[--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]] "
@@ -3481,6 +3484,9 @@ int main(int argc, char **argv)
         }
         fprintf(stderr, "\n");
         return 1;
+    }
+    if (opt_dualbank) {
+        cfg.flags |= MM_TARGET_FLAG_DUALBANK;
     }
     if (opt_boot_offset && (boot_offset + 8u > cfg.flash_size_s)) {
         fprintf(stderr, "boot offset 0x%08lx out of bounds (flash size 0x%08lx)\n",

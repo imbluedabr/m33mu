@@ -138,6 +138,7 @@ Options:
 - `--capstone-verbose`: include operand cross-check details in Capstone logs.
 - `--uart-stdout`: route UART output to stdout instead of a PTY device.
 - `--quit-on-faults`: stop execution after the first fault is raised.
+- `--dualbank`: enable dual-bank flash mode for STM32 targets (allows runtime bank swap).
 - `--meminfo`: emit `[MEMINFO]` logs for SAU/MPU layout and register writes.
 - `--no-tz`: force non-secure boot and disable TrustZone protections for the session.
 - `--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]`: attach a SPI flash image.

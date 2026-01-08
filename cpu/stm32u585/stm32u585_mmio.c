@@ -289,6 +289,7 @@ extern void mm_system_request_reset(void);
 #define FLASH_SECCR    0x02cu
 #define FLASH_NSCCR    0x030u
 #define FLASH_SECCCR   0x034u
+#define FLASH_OPTR     0x040u
 
 #define FLASH_KEY1 0x45670123u
 #define FLASH_KEY2 0xCDEF89ABu
@@ -307,6 +308,8 @@ extern void mm_system_request_reset(void);
 #define FLASH_SECTOR_COUNT 128u
 #define FLASH_BANK_COUNT   2u
 #define FLASH_CR_BKSEL     (1u << 31)
+#define FLASH_OPTR_SWAP_BANK (1u << 20)
+#define FLASH_OPTR_DUALBANK (1u << 21)
 
 struct rcc_state {
     mm_u32 regs[RCC_SIZE / 4];
@@ -360,6 +363,8 @@ struct flash_state {
     mm_u32 flags;
     mm_u8 ns_key_stage;
     mm_u8 sec_key_stage;
+    mm_bool dualbank_enabled;
+    mm_bool swap_active;
 };
 
 struct gpio_state {
@@ -390,6 +395,7 @@ static void rcc_update_ready(struct rcc_state *r);
 static void rcc_update_sysclk(struct rcc_state *r);
 static void pwr_update_vos(struct pwr_state *p);
 static void mpcbb_init_defaults(void);
+static void flash_sync_option_regs(struct flash_state *f);
 
 static struct rcc_state rcc;
 static struct pwr_state pwr;
@@ -609,6 +615,8 @@ static mm_bool stm32u585_gpio_bank_info(void *opaque, int bank, char *name_out, 
 void mm_stm32u585_mmio_reset(void)
 {
     size_t i;
+    mm_u32 optr_swap = flash_ctl.regs[FLASH_OPTR / 4u] & FLASH_OPTR_SWAP_BANK;
+    mm_bool dualbank = flash_ctl.dualbank_enabled;
     memset(&rcc, 0, sizeof(rcc));
     memset(&pwr, 0, sizeof(pwr));
     memset(&tzsc_s, 0, sizeof(tzsc_s));
@@ -634,6 +642,8 @@ void mm_stm32u585_mmio_reset(void)
     memset(&iwdg, 0, sizeof(iwdg));
     memset(&wwdg, 0, sizeof(wwdg));
     memset(&flash_ctl, 0, sizeof(flash_ctl));
+    flash_ctl.dualbank_enabled = dualbank;
+    flash_ctl.swap_active = (optr_swap != 0u) ? MM_TRUE : MM_FALSE;
     mpcbb_init_defaults();
     memset(&gpdma1, 0, sizeof(gpdma1));
     for (i = 0; i < sizeof(gpio) / sizeof(gpio[0]); ++i) {
@@ -668,6 +678,7 @@ void mm_stm32u585_mmio_reset(void)
     flash_ctl.regs[FLASH_ACR / 4] = 0x00000013u;
     flash_ctl.regs[FLASH_NSCR / 4] = 0x00000001u;
     flash_ctl.regs[FLASH_SECCR / 4] = 0x00000001u;
+    flash_sync_option_regs(&flash_ctl);
 }
 
 mm_u32 *mm_stm32u585_tzsc_regs(void)
@@ -914,9 +925,74 @@ static void rng_fill(struct rng_state *r)
     }
 }
 
+static mm_u32 flash_bank_count(const struct flash_state *f)
+{
+    if (f == 0) {
+        return 1u;
+    }
+    return f->dualbank_enabled ? FLASH_BANK_COUNT : 1u;
+}
+
+static void flash_apply_bank_swap(struct flash_state *f)
+{
+    mm_u32 bank_size;
+    mm_u32 i;
+    if (f == 0 || f->flash == 0 || f->flash_size == 0u) {
+        return;
+    }
+    if ((f->flash_size % 2u) != 0u) {
+        return;
+    }
+    bank_size = f->flash_size / 2u;
+    for (i = 0; i < bank_size; ++i) {
+        mm_u8 tmp = f->flash[i];
+        f->flash[i] = f->flash[i + bank_size];
+        f->flash[i + bank_size] = tmp;
+    }
+    if (f->persist != 0 && f->persist->enabled) {
+        mm_flash_persist_flush((struct mm_flash_persist *)f->persist, 0u, f->flash_size);
+    }
+}
+
+static void flash_set_swap_state(struct flash_state *f, mm_bool swap_active)
+{
+    if (f == 0) {
+        return;
+    }
+    if (!f->dualbank_enabled) {
+        f->swap_active = MM_FALSE;
+        return;
+    }
+    if (f->swap_active == swap_active) {
+        return;
+    }
+    f->swap_active = swap_active;
+    flash_apply_bank_swap(f);
+}
+
+static void flash_sync_option_regs(struct flash_state *f)
+{
+    mm_u32 val;
+    if (f == 0) {
+        return;
+    }
+    if (!f->dualbank_enabled) {
+        f->swap_active = MM_FALSE;
+    }
+    val = f->regs[FLASH_OPTR / 4u];
+    val &= ~(FLASH_OPTR_SWAP_BANK | FLASH_OPTR_DUALBANK);
+    if (f->swap_active) {
+        val |= FLASH_OPTR_SWAP_BANK;
+    }
+    if (f->dualbank_enabled) {
+        val |= FLASH_OPTR_DUALBANK;
+    }
+    f->regs[FLASH_OPTR / 4u] = val;
+}
+
 static mm_u32 flash_sector_size(void)
 {
-    mm_u32 banks = FLASH_BANK_COUNT;
+    mm_u32 banks = flash_bank_count(&flash_ctl);
     if (flash_ctl.flash_size == 0u) {
         return 0u;
     }
@@ -978,6 +1054,7 @@ static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
     mm_u32 sector_size = flash_sector_size();
     mm_u32 bank_size = 0;
     mm_u32 bank_offset = 0;
+    mm_u32 bank_count = flash_bank_count(&flash_ctl);
     mm_u32 start = 0;
     mm_u32 length = 0;
     if (flash_ctl.flash == 0 || flash_ctl.flash_size == 0 || sector_size == 0) {
@@ -989,10 +1066,14 @@ static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
     } else if ((cr & FLASH_CR_SER) != 0u) {
         mm_u32 snb = (cr & FLASH_CR_SNB_MASK) >> FLASH_CR_SNB_SHIFT;
         start = snb * sector_size;
-        bank_size = flash_ctl.flash_size / FLASH_BANK_COUNT;
-        if (FLASH_BANK_COUNT != 0u && bank_size != 0u && (cr & FLASH_CR_BKSEL) != 0u) {
-            bank_offset = bank_size;
-            start += bank_offset;
+        if (bank_count != 0u) {
+            bank_size = flash_ctl.flash_size / bank_count;
+        }
+        if (bank_count > 1u && bank_size != 0u) {
+            if ((cr & FLASH_CR_BKSEL) != 0u) {
+                bank_offset = bank_size;
+                start += bank_offset;
+            }
         }
         if (start >= flash_ctl.flash_size) {
             return;
@@ -1499,6 +1580,21 @@ static mm_bool flash_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
 
     if (offset == FLASH_NSKEYR || offset == FLASH_SECKEYR) {
         flash_handle_key(offset, value);
+        return MM_TRUE;
+    }
+
+    if (offset == FLASH_OPTR) {
+        mm_u32 new_val = value;
+        if (!f->dualbank_enabled) {
+            new_val &= ~FLASH_OPTR_SWAP_BANK;
+        }
+        if (f->dualbank_enabled) {
+            new_val |= FLASH_OPTR_DUALBANK;
+        } else {
+            new_val &= ~FLASH_OPTR_DUALBANK;
+        }
+        f->regs[FLASH_OPTR / 4u] = new_val;
+        flash_set_swap_state(f, (new_val & FLASH_OPTR_SWAP_BANK) != 0u);
         return MM_TRUE;
     }
 
@@ -2261,6 +2357,8 @@ void mm_stm32u585_flash_bind(struct mm_memmap *map,
     flash_ctl.flags = flags;
     flash_ctl.base_s = map->flash_base_s;
     flash_ctl.base_ns = map->flash_base_ns;
+    flash_ctl.dualbank_enabled = (flags & MM_TARGET_FLAG_DUALBANK) != 0u;
+    flash_sync_option_regs(&flash_ctl);
     mm_memmap_set_flash_writer(map, flash_write_cb, &flash_ctl);
 }
 

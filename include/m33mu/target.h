@@ -83,5 +83,6 @@ struct mm_target_cfg {
 
 #define MM_TARGET_FLAG_NVM_WRITEONCE (1u << 0)
 #define MM_TARGET_FLAG_FPU (1u << 1)
+#define MM_TARGET_FLAG_DUALBANK (1u << 2)
 
 #endif /* M33MU_TARGET_H */
