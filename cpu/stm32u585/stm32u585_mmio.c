@@ -296,6 +296,7 @@ extern void mm_system_request_reset(void);
 
 #define FLASH_FLAG_BSY (1u << 0)
 #define FLASH_FLAG_EOP (1u << 16)
+#define FLASH_FLAG_PGSERR (1u << 18)
 
 #define FLASH_CR_LOCK (1u << 0)
 #define FLASH_CR_PG   (1u << 1)
@@ -305,7 +306,7 @@ extern void mm_system_request_reset(void);
 #define FLASH_CR_SNB_SHIFT 6
 #define FLASH_CR_SNB_MASK (0x7fu << FLASH_CR_SNB_SHIFT)
 
-#define FLASH_SECTOR_COUNT 128u
+#define FLASH_SECTOR_COUNT 256u
 #define FLASH_BANK_COUNT   2u
 #define FLASH_CR_BKSEL     (1u << 31)
 #define FLASH_OPTR_SWAP_BANK (1u << 20)
@@ -960,6 +961,9 @@ static void flash_set_swap_state(struct flash_state *f, mm_bool swap_active)
         return;
     }
     if (!f->dualbank_enabled) {
+        if (f->swap_active) {
+            flash_apply_bank_swap(f);
+        }
         f->swap_active = MM_FALSE;
         return;
     }
@@ -1111,9 +1115,9 @@ static mm_bool flash_write_cb(void *opaque, enum mm_sec_state sec, mm_u32 addr, 
     mm_u32 offset;
     mm_u32 cr_off;
     mm_u32 sr_off;
-    mm_u32 sector_size;
-    mm_u32 sector_base;
     mm_u32 i;
+    mm_bool erase_mode;
+    mm_bool erase_value;
     (void)opaque;
 
     if (flash_ctl.flash == 0 || flash_ctl.flash_size == 0) {
@@ -1147,29 +1151,37 @@ static mm_bool flash_write_cb(void *opaque, enum mm_sec_state sec, mm_u32 addr, 
         return MM_TRUE;
     }
 
-    sector_size = flash_sector_size();
-    if ((flash_ctl.flags & MM_TARGET_FLAG_NVM_WRITEONCE) != 0u && sector_size != 0u) {
-        sector_base = (offset / sector_size) * sector_size;
-        for (i = 0; i < sector_size; ++i) {
-            if (sector_base + i >= flash_ctl.flash_size) {
-                break;
-            }
-            if (flash_ctl.flash[sector_base + i] != 0xFFu) {
+    erase_mode = ((flash_ctl.regs[cr_off / 4u] & FLASH_CR_SER) != 0u) ? MM_TRUE : MM_FALSE;
+    erase_value = MM_FALSE;
+    if (erase_mode) {
+        if (size_bytes == 4u) {
+            erase_value = (value == 0xFFFFFFFFu) ? MM_TRUE : MM_FALSE;
+        } else if (size_bytes == 2u) {
+            erase_value = ((value & 0xFFFFu) == 0xFFFFu) ? MM_TRUE : MM_FALSE;
+        } else if (size_bytes == 1u) {
+            erase_value = ((value & 0xFFu) == 0xFFu) ? MM_TRUE : MM_FALSE;
+        }
+    }
+
+    if ((flash_ctl.flags & MM_TARGET_FLAG_NVM_WRITEONCE) != 0u && !(erase_mode && erase_value)) {
+        for (i = 0; i < size_bytes; ++i) {
+            if (flash_ctl.flash[offset + i] != 0xFFu) {
+                flash_ctl.regs[sr_off / 4u] |= FLASH_FLAG_PGSERR;
                 return MM_TRUE;
             }
         }
     }
 
     if (size_bytes == 4u) {
-        flash_ctl.flash[offset] = (mm_u8)(value & 0xFFu);
-        flash_ctl.flash[offset + 1u] = (mm_u8)((value >> 8) & 0xFFu);
-        flash_ctl.flash[offset + 2u] = (mm_u8)((value >> 16) & 0xFFu);
-        flash_ctl.flash[offset + 3u] = (mm_u8)((value >> 24) & 0xFFu);
+        flash_ctl.flash[offset] &= (mm_u8)(value & 0xFFu);
+        flash_ctl.flash[offset + 1u] &= (mm_u8)((value >> 8) & 0xFFu);
+        flash_ctl.flash[offset + 2u] &= (mm_u8)((value >> 16) & 0xFFu);
+        flash_ctl.flash[offset + 3u] &= (mm_u8)((value >> 24) & 0xFFu);
     } else if (size_bytes == 2u) {
-        flash_ctl.flash[offset] = (mm_u8)(value & 0xFFu);
-        flash_ctl.flash[offset + 1u] = (mm_u8)((value >> 8) & 0xFFu);
+        flash_ctl.flash[offset] &= (mm_u8)(value & 0xFFu);
+        flash_ctl.flash[offset + 1u] &= (mm_u8)((value >> 8) & 0xFFu);
     } else if (size_bytes == 1u) {
-        flash_ctl.flash[offset] = (mm_u8)(value & 0xFFu);
+        flash_ctl.flash[offset] &= (mm_u8)(value & 0xFFu);
     } else {
         return MM_FALSE;
     }
