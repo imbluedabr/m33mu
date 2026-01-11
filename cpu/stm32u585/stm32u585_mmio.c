@@ -1070,14 +1070,14 @@ static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
     } else if ((cr & FLASH_CR_SER) != 0u) {
         mm_u32 snb = (cr & FLASH_CR_SNB_MASK) >> FLASH_CR_SNB_SHIFT;
         start = snb * sector_size;
-        if (bank_count != 0u) {
+        if (FLASH_BANK_COUNT > 1u && flash_ctl.flash_size >= FLASH_BANK_COUNT) {
+            bank_size = flash_ctl.flash_size / FLASH_BANK_COUNT;
+        } else if (bank_count != 0u) {
             bank_size = flash_ctl.flash_size / bank_count;
         }
-        if (bank_count > 1u && bank_size != 0u) {
-            if ((cr & FLASH_CR_BKSEL) != 0u) {
-                bank_offset = bank_size;
-                start += bank_offset;
-            }
+        if (bank_size != 0u && (cr & FLASH_CR_BKSEL) != 0u) {
+            bank_offset = bank_size;
+            start += bank_offset;
         }
         if (start >= flash_ctl.flash_size) {
             return;

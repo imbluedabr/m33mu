@@ -28,6 +28,7 @@ struct mm_flash_persist_range {
     const char *path;
     mm_u32 offset;
     mm_u32 length;
+    int fd;
 };
 
 struct mm_flash_persist {

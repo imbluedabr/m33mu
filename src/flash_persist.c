@@ -19,9 +19,28 @@
  *
  */
 
+#define _POSIX_C_SOURCE 200809L
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "m33mu/flash_persist.h"
+
+static void persist_close(struct mm_flash_persist *persist)
+{
+    int i;
+    if (persist == 0 || !persist->enabled) {
+        return;
+    }
+    for (i = 0; i < persist->count; ++i) {
+        if (persist->ranges[i].fd >= 0) {
+            close(persist->ranges[i].fd);
+            persist->ranges[i].fd = -1;
+        }
+    }
+}
 
 static void sort_indices(mm_u32 *idx, const mm_u32 *offsets, int count)
 {
@@ -53,6 +72,7 @@ void mm_flash_persist_build(struct mm_flash_persist *persist,
     if (persist == 0) {
         return;
     }
+    persist_close(persist);
     memset(persist, 0, sizeof(*persist));
     if (flash == 0 || paths == 0 || offsets == 0 || count <= 0) {
         return;
@@ -70,6 +90,7 @@ void mm_flash_persist_build(struct mm_flash_persist *persist,
         int next = (i + 1 < count) ? (int)idx[i + 1] : -1;
         mm_u32 start = offsets[cur];
         mm_u32 end = (next >= 0) ? offsets[next] : flash_size;
+        int fd = -1;
         if (end < start) {
             end = start;
         }
@@ -79,7 +100,65 @@ void mm_flash_persist_build(struct mm_flash_persist *persist,
         persist->ranges[i].path = paths[cur];
         persist->ranges[i].offset = start;
         persist->ranges[i].length = end - start;
+        persist->ranges[i].fd = -1;
+        if (persist->ranges[i].path != 0) {
+            struct stat st;
+            mm_u32 cur_size = 0u;
+            fd = open(persist->ranges[i].path, O_RDWR | O_CREAT, 0666);
+            if (fd < 0) {
+                fprintf(stderr, "persist: failed to open %s: %s\n",
+                        persist->ranges[i].path, strerror(errno));
+                continue;
+            }
+            if (fstat(fd, &st) == 0) {
+                if (st.st_size > 0) {
+                    if ((unsigned long)st.st_size > (unsigned long)flash_size) {
+                        if (ftruncate(fd, (off_t)flash_size) != 0) {
+                            fprintf(stderr, "persist: failed to truncate %s\n",
+                                    persist->ranges[i].path);
+                        }
+                        cur_size = flash_size;
+                    } else {
+                        cur_size = (mm_u32)st.st_size;
+                    }
+                }
+            }
+            if (cur_size < flash_size) {
+                mm_u8 ff[4096];
+                mm_u32 remaining = flash_size - cur_size;
+                mm_u32 chunk;
+                memset(ff, 0xFF, sizeof(ff));
+                if (lseek(fd, (off_t)cur_size, SEEK_SET) < 0) {
+                    fprintf(stderr, "persist: failed to seek %s\n",
+                            persist->ranges[i].path);
+                } else {
+                    while (remaining > 0u) {
+                        chunk = (remaining > (mm_u32)sizeof(ff)) ? (mm_u32)sizeof(ff) : remaining;
+                        if (write(fd, ff, (size_t)chunk) != (ssize_t)chunk) {
+                            fprintf(stderr, "persist: short extend write for %s\n",
+                                    persist->ranges[i].path);
+                            break;
+                        }
+                        remaining -= chunk;
+                    }
+                }
+            }
+            persist->ranges[i].fd = fd;
+        }
     }
+}
+
+static mm_bool persist_write_all(int fd, const mm_u8 *buf, mm_u32 size)
+{
+    mm_u32 off = 0u;
+    while (off < size) {
+        ssize_t n = write(fd, buf + off, (size_t)(size - off));
+        if (n <= 0) {
+            return MM_FALSE;
+        }
+        off += (mm_u32)n;
+    }
+    return MM_TRUE;
 }
 
 void mm_flash_persist_flush(struct mm_flash_persist *persist, mm_u32 addr, mm_u32 size)
@@ -96,22 +175,24 @@ void mm_flash_persist_flush(struct mm_flash_persist *persist, mm_u32 addr, mm_u3
         mm_u32 end = start + persist->ranges[i].length;
         mm_u32 a0 = addr;
         mm_u32 a1 = addr + size;
+        mm_u32 w_start;
+        mm_u32 w_end;
         if (a1 <= start || a0 >= end) {
             continue;
         }
-        if (persist->ranges[i].path != 0) {
-            FILE *f = fopen(persist->ranges[i].path, "wb");
-            if (f == 0) {
-                fprintf(stderr, "persist: failed to open %s\n", persist->ranges[i].path);
+        if (persist->ranges[i].fd < 0) {
+            continue;
+        }
+        w_start = (a0 > start) ? a0 : start;
+        w_end = (a1 < end) ? a1 : end;
+        if (w_end > w_start) {
+            if (lseek(persist->ranges[i].fd, (off_t)w_start, SEEK_SET) < 0) {
+                fprintf(stderr, "persist: failed to seek %s\n", persist->ranges[i].path);
                 continue;
             }
-            if (persist->ranges[i].length > 0) {
-                size_t n = fwrite(persist->flash + start, 1u, (size_t)persist->ranges[i].length, f);
-                if (n != (size_t)persist->ranges[i].length) {
-                    fprintf(stderr, "persist: short write for %s\n", persist->ranges[i].path);
-                }
+            if (!persist_write_all(persist->ranges[i].fd, persist->flash + w_start, w_end - w_start)) {
+                fprintf(stderr, "persist: short write for %s\n", persist->ranges[i].path);
             }
-            fclose(f);
         }
     }
 }
