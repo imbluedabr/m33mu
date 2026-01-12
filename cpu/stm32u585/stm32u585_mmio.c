@@ -140,6 +140,11 @@ extern void mm_system_request_reset(void);
 #define OTG_FS_SEC_BASE 0x52040000u
 #define OTG_FS_SIZE     0x1000u
 
+/* ICACHE base addresses (secure / non-secure aliases) */
+#define ICACHE_BASE     0x40030400u
+#define ICACHE_SEC_BASE 0x50030400u
+#define ICACHE_SIZE     0x400u
+
 /* UCPD1 register offsets (subset) */
 #define UCPD_CFGR1 0x000u
 #define UCPD_CR    0x00Cu
@@ -281,8 +286,8 @@ extern void mm_system_request_reset(void);
 
 /* FLASH register offsets */
 #define FLASH_ACR      0x000u
-#define FLASH_NSKEYR   0x004u
-#define FLASH_SECKEYR  0x008u
+#define FLASH_NSKEYR   0x008u
+#define FLASH_SECKEYR  0x00cu
 #define FLASH_NSSR     0x020u
 #define FLASH_SECSR    0x024u
 #define FLASH_NSCR     0x028u
@@ -294,17 +299,19 @@ extern void mm_system_request_reset(void);
 #define FLASH_KEY1 0x45670123u
 #define FLASH_KEY2 0xCDEF89ABu
 
-#define FLASH_FLAG_BSY (1u << 0)
-#define FLASH_FLAG_EOP (1u << 16)
-#define FLASH_FLAG_PGSERR (1u << 18)
+#define FLASH_FLAG_BSY (1u << 16)
+#define FLASH_FLAG_EOP (1u << 0)
+#define FLASH_FLAG_PGSERR (1u << 7)
 
-#define FLASH_CR_LOCK (1u << 0)
-#define FLASH_CR_PG   (1u << 1)
-#define FLASH_CR_SER  (1u << 2)
-#define FLASH_CR_BER  (1u << 3)
-#define FLASH_CR_STRT (1u << 5)
-#define FLASH_CR_SNB_SHIFT 6
-#define FLASH_CR_SNB_MASK (0x7fu << FLASH_CR_SNB_SHIFT)
+#define FLASH_CR_LOCK (1u << 31)
+#define FLASH_CR_PG   (1u << 0)
+#define FLASH_CR_PER  (1u << 1)
+#define FLASH_CR_MER1 (1u << 2)
+#define FLASH_CR_BKER (1u << 11)
+#define FLASH_CR_MER2 (1u << 15)
+#define FLASH_CR_STRT (1u << 16)
+#define FLASH_CR_PNB_SHIFT 3
+#define FLASH_CR_PNB_MASK (0xffu << FLASH_CR_PNB_SHIFT)
 
 #define FLASH_SECTOR_COUNT 256u
 #define FLASH_BANK_COUNT   2u
@@ -410,6 +417,7 @@ static struct simple_blk tzic2_s;
 static struct simple_blk tzic2_ns;
 static struct simple_blk crs;
 static struct simple_blk crs_sec;
+static struct simple_blk icache;
 static struct ucpd_state ucpd1_state;
 static struct ucpd_state ucpd1_state_sec;
 static struct otg_state otg_fs;
@@ -677,8 +685,8 @@ void mm_stm32u585_mmio_reset(void)
 
     /* FLASH reset values */
     flash_ctl.regs[FLASH_ACR / 4] = 0x00000013u;
-    flash_ctl.regs[FLASH_NSCR / 4] = 0x00000001u;
-    flash_ctl.regs[FLASH_SECCR / 4] = 0x00000001u;
+    flash_ctl.regs[FLASH_NSCR / 4] = FLASH_CR_LOCK;
+    flash_ctl.regs[FLASH_SECCR / 4] = FLASH_CR_LOCK;
     flash_sync_option_regs(&flash_ctl);
 }
 
@@ -1064,18 +1072,26 @@ static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
     if (flash_ctl.flash == 0 || flash_ctl.flash_size == 0 || sector_size == 0) {
         return;
     }
-    if ((cr & FLASH_CR_BER) != 0u) {
-        start = 0;
-        length = flash_ctl.flash_size;
-    } else if ((cr & FLASH_CR_SER) != 0u) {
-        mm_u32 snb = (cr & FLASH_CR_SNB_MASK) >> FLASH_CR_SNB_SHIFT;
-        start = snb * sector_size;
-        if (FLASH_BANK_COUNT > 1u && flash_ctl.flash_size >= FLASH_BANK_COUNT) {
-            bank_size = flash_ctl.flash_size / FLASH_BANK_COUNT;
-        } else if (bank_count != 0u) {
-            bank_size = flash_ctl.flash_size / bank_count;
+    if (FLASH_BANK_COUNT > 1u && flash_ctl.flash_size >= FLASH_BANK_COUNT) {
+        bank_size = flash_ctl.flash_size / FLASH_BANK_COUNT;
+    } else if (bank_count != 0u) {
+        bank_size = flash_ctl.flash_size / bank_count;
+    }
+
+    if ((cr & (FLASH_CR_MER1 | FLASH_CR_MER2)) != 0u) {
+        if ((cr & FLASH_CR_MER1) != 0u) {
+            start = 0u;
+            length = (bank_size != 0u) ? bank_size : flash_ctl.flash_size;
+        } else if ((cr & FLASH_CR_MER2) != 0u && bank_size != 0u) {
+            start = bank_size;
+            length = bank_size;
+        } else {
+            return;
         }
-        if (bank_size != 0u && (cr & FLASH_CR_BKSEL) != 0u) {
+    } else if ((cr & FLASH_CR_PER) != 0u) {
+        mm_u32 pnb = (cr & FLASH_CR_PNB_MASK) >> FLASH_CR_PNB_SHIFT;
+        start = pnb * sector_size;
+        if (bank_size != 0u && (cr & FLASH_CR_BKER) != 0u) {
             bank_offset = bank_size;
             start += bank_offset;
         }
@@ -1091,12 +1107,12 @@ static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
     }
     if (flash_trace_enabled()) {
         const char *sec = (cr_off == FLASH_SECCR) ? "S" : "NS";
-        const char *mode = (cr & FLASH_CR_BER) ? "BER" : "SER";
-        mm_u32 snb = (cr & FLASH_CR_SNB_MASK) >> FLASH_CR_SNB_SHIFT;
-        printf("[FLASH_ERASE] %s mode=%s snb=%lu start=0x%08lx len=0x%08lx\n",
+        const char *mode = (cr & (FLASH_CR_MER1 | FLASH_CR_MER2)) ? "MER" : "PER";
+        mm_u32 pnb = (cr & FLASH_CR_PNB_MASK) >> FLASH_CR_PNB_SHIFT;
+        printf("[FLASH_ERASE] %s mode=%s pnb=%lu start=0x%08lx len=0x%08lx\n",
                sec,
                mode,
-               (unsigned long)snb,
+               (unsigned long)pnb,
                (unsigned long)start,
                (unsigned long)length);
     }
@@ -1151,7 +1167,8 @@ static mm_bool flash_write_cb(void *opaque, enum mm_sec_state sec, mm_u32 addr, 
         return MM_TRUE;
     }
 
-    erase_mode = ((flash_ctl.regs[cr_off / 4u] & FLASH_CR_SER) != 0u) ? MM_TRUE : MM_FALSE;
+    erase_mode = ((flash_ctl.regs[cr_off / 4u] &
+                   (FLASH_CR_PER | FLASH_CR_MER1 | FLASH_CR_MER2)) != 0u) ? MM_TRUE : MM_FALSE;
     erase_value = MM_FALSE;
     if (erase_mode) {
         if (size_bytes == 4u) {
@@ -1207,10 +1224,10 @@ static void rcc_update_ready(struct rcc_state *r)
 {
     mm_u32 cr = r->regs[0]; /* offset 0x0 */
     /* Mirror RDY bits to match ON bits (immediate ready). */
-    /* HSIRDY bit1 follows HSION bit0 */
-    if ((cr & (1u << 0)) != 0u) cr |= (1u << 1); else cr &= ~(1u << 1);
-    /* CSIRDY bit9 follows CSION bit8 */
-    if ((cr & (1u << 8)) != 0u) cr |= (1u << 9); else cr &= ~(1u << 9);
+    /* MSIRDY bit2 follows MSISON bit0 */
+    if ((cr & (1u << 0)) != 0u) cr |= (1u << 2); else cr &= ~(1u << 2);
+    /* HSIRDY bit10 follows HSION bit8 */
+    if ((cr & (1u << 8)) != 0u) cr |= (1u << 10); else cr &= ~(1u << 10);
     /* HSI48RDY bit13 follows HSI48ON bit12 */
     if ((cr & (1u << 12)) != 0u) cr |= (1u << 13); else cr &= ~(1u << 13);
     /* HSERDY bit17 follows HSEON bit16 */
@@ -1238,7 +1255,8 @@ static mm_u64 rcc_pll1_p_clk(const struct rcc_state *r)
     mm_u32 plldivr = r->regs[RCC_PLL1DIVR / 4];
     mm_u32 src = pllcfgr & 0x3u;
     mm_u64 fin = 0;
-    mm_u32 divm = ((pllcfgr >> 8) & 0x3fu) + 1u;
+    /* STM32U5 PLL1M is 4 bits at [11:8]; MBOOST uses [13:12]. */
+    mm_u32 divm = ((pllcfgr >> 8) & 0x0fu) + 1u;
     mm_u32 n = (plldivr & 0x1ffu) + 1u;
     mm_u32 p = ((plldivr >> 9) & 0x7fu) + 1u;
 
@@ -1261,13 +1279,14 @@ static mm_u64 rcc_pll1_r_clk(const struct rcc_state *r)
     mm_u32 plldivr = r->regs[RCC_PLL1DIVR / 4];
     mm_u32 src = pllcfgr & 0x3u;
     mm_u64 fin = 0;
-    mm_u32 divm = ((pllcfgr >> 8) & 0x3fu) + 1u;
+    /* STM32U5 PLL1M is 4 bits at [11:8]; MBOOST uses [13:12]. */
+    mm_u32 divm = ((pllcfgr >> 8) & 0x0fu) + 1u;
     mm_u32 n = (plldivr & 0x1ffu) + 1u;
     mm_u32 rdiv = ((plldivr >> 25) & 0x7fu) + 1u;
 
-    if (src == 0u) fin = rcc_msi_hz(r); /* MSI */
-    else if (src == 1u) fin = 64000000ull; /* HSI */
-    else if (src == 2u) fin = 4000000ull; /* CSI */
+    /* STM32U5 PLL source: 0=none, 1=MSI, 2=HSI, 3=HSE. */
+    if (src == 1u) fin = rcc_msi_hz(r);
+    else if (src == 2u) fin = 64000000ull; /* HSI */
     else if (src == 3u) fin = 8000000ull; /* HSE */
     else fin = 0;
 
@@ -1285,6 +1304,11 @@ static void rcc_update_sysclk(struct rcc_state *r)
     mm_u32 hpre = cfgr2 & 0xfu;
     mm_u64 sys = 0;
     mm_u32 div = 1u;
+    static int rcc_trace = -1;
+    static mm_u32 last_cfgr1 = 0xffffffffu;
+    static mm_u32 last_cfgr2 = 0xffffffffu;
+    static mm_u32 last_pllcfgr = 0xffffffffu;
+    static mm_u32 last_plldivr = 0xffffffffu;
 
     if (sw == 0u) sys = 64000000ull;
     else if (sw == 1u) sys = 4000000ull;
@@ -1311,6 +1335,40 @@ static void rcc_update_sysclk(struct rcc_state *r)
         if (r->cpu_hz == 0) r->cpu_hz = 1;
     }
     r->regs[RCC_CFGR1 / 4] = (r->regs[RCC_CFGR1 / 4] & ~(0x7u << 3)) | (sw << 3);
+
+    if (rcc_trace < 0) {
+        const char *v = getenv("M33MU_RCC_TRACE");
+        rcc_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
+    if (rcc_trace && (cfgr1 != last_cfgr1 || cfgr2 != last_cfgr2 ||
+                      r->regs[RCC_PLL1CFGR / 4] != last_pllcfgr ||
+                      r->regs[RCC_PLL1DIVR / 4] != last_plldivr)) {
+        last_cfgr1 = cfgr1;
+        last_cfgr2 = cfgr2;
+        last_pllcfgr = r->regs[RCC_PLL1CFGR / 4];
+        last_plldivr = r->regs[RCC_PLL1DIVR / 4];
+        {
+            mm_u32 dbg_src = last_pllcfgr & 0x3u;
+            mm_u32 dbg_divm = ((last_pllcfgr >> 8) & 0x0fu) + 1u;
+            mm_u32 dbg_n = (last_plldivr & 0x1ffu) + 1u;
+            mm_u32 dbg_rdiv = ((last_plldivr >> 25) & 0x7fu) + 1u;
+            mm_u64 dbg_fin = 0;
+            if (dbg_src == 1u) dbg_fin = rcc_msi_hz(r);
+            else if (dbg_src == 2u) dbg_fin = 64000000ull;
+            else if (dbg_src == 3u) dbg_fin = 8000000ull;
+            printf("[RCC] CFGR1=0x%08lx CFGR2=0x%08lx PLL1CFGR=0x%08lx PLL1DIVR=0x%08lx src=%lu divm=%lu n=%lu r=%lu fin=%llu cpu_hz=%llu\n",
+                   (unsigned long)cfgr1,
+                   (unsigned long)cfgr2,
+                   (unsigned long)last_pllcfgr,
+                   (unsigned long)last_plldivr,
+                   (unsigned long)dbg_src,
+                   (unsigned long)dbg_divm,
+                   (unsigned long)dbg_n,
+                   (unsigned long)dbg_rdiv,
+                   (unsigned long long)dbg_fin,
+                   (unsigned long long)r->cpu_hz);
+        }
+    }
 }
 
 static mm_bool rcc_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
@@ -1347,7 +1405,13 @@ static void pwr_update_vos(struct pwr_state *p)
     mm_u32 vosr = p->regs[PWR_VOSR / 4];
     mm_u32 vos = (vosr >> 16) & 0x3u;
     mm_u32 svmsr = p->regs[PWR_SVMSR / 4];
+    mm_bool boost = (vosr & (1u << 18)) != 0u;
     vosr |= (1u << 15); /* VOSRDY set */
+    if (boost) {
+        vosr |= (1u << 14); /* BOOSTRDY set */
+    } else {
+        vosr &= ~(1u << 14);
+    }
     svmsr &= ~((0x3u << 16) | (1u << 15));
     svmsr |= (vos << 16);      /* ACTVOS mirrors VOS */
     svmsr |= (1u << 15);       /* ACTVOSRDY set */
@@ -1607,6 +1671,12 @@ static mm_bool flash_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
         }
         f->regs[FLASH_OPTR / 4u] = new_val;
         flash_set_swap_state(f, (new_val & FLASH_OPTR_SWAP_BANK) != 0u);
+        return MM_TRUE;
+    }
+
+    if (offset == FLASH_NSSR || offset == FLASH_SECSR) {
+        /* Writing 1 clears status flags. */
+        f->regs[offset / 4u] &= ~value;
         return MM_TRUE;
     }
 
@@ -2064,8 +2134,8 @@ mm_bool mm_stm32u585_register_mmio(struct mmio_bus *bus)
     rng.regs[RNG_CR_OFFSET / 4] = 0x00871f00u;
     rng.regs[RNG_HTCR_OFFSET / 4] = 0x000072acu;
     flash_ctl.regs[FLASH_ACR / 4] = 0x00000013u;
-    flash_ctl.regs[FLASH_NSCR / 4] = 0x00000001u;
-    flash_ctl.regs[FLASH_SECCR / 4] = 0x00000001u;
+    flash_ctl.regs[FLASH_NSCR / 4] = FLASH_CR_LOCK;
+    flash_ctl.regs[FLASH_SECCR / 4] = FLASH_CR_LOCK;
     iwdg.regs[IWDG_RLR / 4] = 0x00000FFFu;
     iwdg.regs[IWDG_WINR / 4] = 0x00000FFFu;
     wwdg.regs[WWDG_CR / 4] = 0x0000007Fu;
@@ -2188,6 +2258,16 @@ mm_bool mm_stm32u585_register_mmio(struct mmio_bus *bus)
     /* GTZC2 TZIC non-secure alias */
     reg.base = GTZC2_TZIC_NS_BASE;
     reg.opaque = &tzic2_ns;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* ICACHE (non-secure and secure aliases) */
+    reg.base = ICACHE_BASE;
+    reg.size = ICACHE_SIZE;
+    reg.opaque = &icache;
+    reg.read = simple_blk_read;
+    reg.write = simple_blk_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = ICACHE_SEC_BASE;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     /* MPCBB1..4 (non-secure and secure aliases) */
