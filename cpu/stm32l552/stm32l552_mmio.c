@@ -49,6 +49,7 @@ extern void mm_system_request_reset(void);
 #define RCC_CR       0x000u
 #define RCC_CFGR     0x008u
 #define RCC_PLLCFGR  0x00cu
+#define RCC_CRRCR    0x098u
 
 /* PWR base (system domain) */
 #define PWR_BASE     0x40007000u
@@ -258,8 +259,8 @@ extern void mm_system_request_reset(void);
 
 /* FLASH register offsets */
 #define FLASH_ACR      0x000u
-#define FLASH_NSKEYR   0x004u
-#define FLASH_SECKEYR  0x008u
+#define FLASH_NSKEYR   0x008u
+#define FLASH_SECKEYR  0x00cu
 #define FLASH_NSSR     0x020u
 #define FLASH_SECSR    0x024u
 #define FLASH_NSCR     0x028u
@@ -271,19 +272,22 @@ extern void mm_system_request_reset(void);
 #define FLASH_KEY1 0x45670123u
 #define FLASH_KEY2 0xCDEF89ABu
 
-#define FLASH_FLAG_BSY (1u << 0)
-#define FLASH_FLAG_EOP (1u << 16)
-#define FLASH_FLAG_PGSERR (1u << 18)
+#define FLASH_FLAG_EOP    (1u << 0)
+#define FLASH_FLAG_PGSERR (1u << 7)
+#define FLASH_FLAG_BSY    (1u << 16)
 
-#define FLASH_CR_LOCK (1u << 0)
-#define FLASH_CR_PG   (1u << 1)
-#define FLASH_CR_SER  (1u << 2)
-#define FLASH_CR_BER  (1u << 3)
-#define FLASH_CR_STRT (1u << 5)
-#define FLASH_CR_SNB_SHIFT 6
-#define FLASH_CR_SNB_MASK (0x7fu << FLASH_CR_SNB_SHIFT)
+#define FLASH_CR_PG        (1u << 0)
+#define FLASH_CR_PER       (1u << 1)
+#define FLASH_CR_MER1      (1u << 2)
+#define FLASH_CR_PNB_SHIFT 3
+#define FLASH_CR_PNB_MASK  (0x7fu << FLASH_CR_PNB_SHIFT)
+#define FLASH_CR_BKER      (1u << 11)
+#define FLASH_CR_MER2      (1u << 15)
+#define FLASH_CR_STRT      (1u << 16)
+#define FLASH_CR_LOCK      (1u << 31)
 
-#define FLASH_SECTOR_COUNT 128u
+#define FLASH_SECTOR_COUNT_SINGLE 128u
+#define FLASH_SECTOR_COUNT_DUAL   128u
 #define FLASH_BANK_COUNT   2u
 #define FLASH_CR_BKSEL     (1u << 31)
 #define FLASH_OPTR_SWAP_BANK (1u << 20)
@@ -626,8 +630,8 @@ void mm_stm32l552_mmio_reset(void)
 
     /* FLASH reset values */
     flash_ctl.regs[FLASH_ACR / 4] = 0x00000013u;
-    flash_ctl.regs[FLASH_NSCR / 4] = 0x00000001u;
-    flash_ctl.regs[FLASH_SECCR / 4] = 0x00000001u;
+    flash_ctl.regs[FLASH_NSCR / 4] = FLASH_CR_LOCK;
+    flash_ctl.regs[FLASH_SECCR / 4] = FLASH_CR_LOCK;
     flash_sync_option_regs(&flash_ctl);
 
     mm_stm32l552_usb_reset();
@@ -909,14 +913,16 @@ static void flash_sync_option_regs(struct flash_state *f)
 static mm_u32 flash_sector_size(void)
 {
     mm_u32 banks = flash_bank_count(&flash_ctl);
+    mm_u32 sector_count = flash_ctl.dualbank_enabled ? FLASH_SECTOR_COUNT_DUAL
+                                                     : FLASH_SECTOR_COUNT_SINGLE;
     if (flash_ctl.flash_size == 0u) {
         return 0u;
     }
     if (banks == 0u || (flash_ctl.flash_size % banks) != 0u) {
         banks = 1u;
     }
-    return (FLASH_SECTOR_COUNT == 0u) ? 0u
-        : ((flash_ctl.flash_size / banks) / FLASH_SECTOR_COUNT);
+    return (sector_count == 0u) ? 0u
+        : ((flash_ctl.flash_size / banks) / sector_count);
 }
 
 static void flash_set_busy(mm_u32 reg_offset, mm_bool busy)
@@ -976,18 +982,31 @@ static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
     if (flash_ctl.flash == 0 || flash_ctl.flash_size == 0 || sector_size == 0) {
         return;
     }
-    if ((cr & FLASH_CR_BER) != 0u) {
-        start = 0;
-        length = flash_ctl.flash_size;
-    } else if ((cr & FLASH_CR_SER) != 0u) {
-        mm_u32 snb = (cr & FLASH_CR_SNB_MASK) >> FLASH_CR_SNB_SHIFT;
-        start = snb * sector_size;
+    if ((cr & FLASH_CR_MER1) != 0u || (cr & FLASH_CR_MER2) != 0u) {
         if (FLASH_BANK_COUNT > 1u && flash_ctl.flash_size >= FLASH_BANK_COUNT) {
             bank_size = flash_ctl.flash_size / FLASH_BANK_COUNT;
         } else if (bank_count != 0u) {
             bank_size = flash_ctl.flash_size / bank_count;
         }
-        if (bank_size != 0u && (cr & FLASH_CR_BKSEL) != 0u) {
+        if (bank_size == 0u) {
+            start = 0;
+            length = flash_ctl.flash_size;
+        } else if ((cr & FLASH_CR_MER2) != 0u) {
+            start = bank_size;
+            length = bank_size;
+        } else {
+            start = 0;
+            length = bank_size;
+        }
+    } else if ((cr & FLASH_CR_PER) != 0u) {
+        mm_u32 pnb = (cr & FLASH_CR_PNB_MASK) >> FLASH_CR_PNB_SHIFT;
+        start = pnb * sector_size;
+        if (FLASH_BANK_COUNT > 1u && flash_ctl.flash_size >= FLASH_BANK_COUNT) {
+            bank_size = flash_ctl.flash_size / FLASH_BANK_COUNT;
+        } else if (bank_count != 0u) {
+            bank_size = flash_ctl.flash_size / bank_count;
+        }
+        if (bank_size != 0u && (cr & FLASH_CR_BKER) != 0u) {
             bank_offset = bank_size;
             start += bank_offset;
         }
@@ -1003,12 +1022,13 @@ static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
     }
     if (flash_trace_enabled()) {
         const char *sec = (cr_off == FLASH_SECCR) ? "S" : "NS";
-        const char *mode = (cr & FLASH_CR_BER) ? "BER" : "SER";
-        mm_u32 snb = (cr & FLASH_CR_SNB_MASK) >> FLASH_CR_SNB_SHIFT;
-        printf("[FLASH_ERASE] %s mode=%s snb=%lu start=0x%08lx len=0x%08lx\n",
+        const char *mode = (cr & (FLASH_CR_MER1 | FLASH_CR_MER2)) ? "MER" : "PER";
+        mm_u32 pnb = (cr & FLASH_CR_PNB_MASK) >> FLASH_CR_PNB_SHIFT;
+        printf("[FLASH_ERASE] %s mode=%s cr=0x%08lx pnb=%lu start=0x%08lx len=0x%08lx\n",
                sec,
                mode,
-               (unsigned long)snb,
+               (unsigned long)cr,
+               (unsigned long)pnb,
                (unsigned long)start,
                (unsigned long)length);
     }
@@ -1063,7 +1083,7 @@ static mm_bool flash_write_cb(void *opaque, enum mm_sec_state sec, mm_u32 addr, 
         return MM_TRUE;
     }
 
-    erase_mode = ((flash_ctl.regs[cr_off / 4u] & FLASH_CR_SER) != 0u) ? MM_TRUE : MM_FALSE;
+    erase_mode = ((flash_ctl.regs[cr_off / 4u] & FLASH_CR_PER) != 0u) ? MM_TRUE : MM_FALSE;
     erase_value = MM_FALSE;
     if (erase_mode) {
         if (size_bytes == 4u) {
@@ -1118,6 +1138,7 @@ static mm_bool rcc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
 static void rcc_update_ready(struct rcc_state *r)
 {
     mm_u32 cr = r->regs[0]; /* offset 0x0 */
+    mm_u32 crrcr = r->regs[RCC_CRRCR / 4u];
     /* Mirror RDY bits to match ON bits (immediate ready). */
     /* MSIRDY bit1 follows MSION bit0 */
     if ((cr & (1u << 0)) != 0u) cr |= (1u << 1); else cr &= ~(1u << 1);
@@ -1128,6 +1149,10 @@ static void rcc_update_ready(struct rcc_state *r)
     /* PLLRDY bit25 follows PLLON bit24 */
     if ((cr & (1u << 24)) != 0u) cr |= (1u << 25); else cr &= ~(1u << 25);
     r->regs[0] = cr;
+
+    /* HSI48RDY bit1 follows HSI48ON bit0 (RCC_CRRCR) */
+    if ((crrcr & (1u << 0)) != 0u) crrcr |= (1u << 1); else crrcr &= ~(1u << 1);
+    r->regs[RCC_CRRCR / 4u] = crrcr;
 }
 
 static mm_u64 rcc_msi_hz(const struct rcc_state *r)
@@ -1216,11 +1241,24 @@ static void rcc_update_sysclk(struct rcc_state *r)
 static mm_bool rcc_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
     struct rcc_state *r = (struct rcc_state *)opaque;
+    static int rcc_trace = -1;
     if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
     if ((offset + size_bytes) > RCC_SIZE) return MM_FALSE;
+    if (rcc_trace < 0) {
+        const char *v = getenv("M33MU_RCC_TRACE");
+        rcc_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
     memcpy((mm_u8 *)r->regs + offset, &value, size_bytes);
     if (offset == RCC_CR) {
         rcc_update_ready(r);
+    }
+    if (offset == RCC_CRRCR) {
+        rcc_update_ready(r);
+        if (rcc_trace) {
+            printf("[RCC_CRRCR] write=0x%08lx read=0x%08lx\n",
+                   (unsigned long)value,
+                   (unsigned long)r->regs[RCC_CRRCR / 4u]);
+        }
     }
     if (offset == RCC_CFGR || offset == RCC_PLLCFGR || offset == RCC_CR) {
         rcc_update_sysclk(r);
@@ -1468,6 +1506,9 @@ static mm_bool flash_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
     if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
     if ((offset + size_bytes) > FLASH_SIZE) return MM_FALSE;
     memcpy(value_out, (mm_u8 *)f->regs + offset, size_bytes);
+    if (flash_trace_enabled() && offset == FLASH_OPTR && size_bytes == 4) {
+        printf("[FLASH_OPTR] read=0x%08lx\n", (unsigned long)*value_out);
+    }
     return MM_TRUE;
 }
 
@@ -1512,6 +1553,10 @@ static mm_bool flash_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
         sr_off = (offset == FLASH_NSCR) ? FLASH_NSSR : FLASH_SECSR;
         if (!flash_is_unlocked(cr_off) && (value & FLASH_CR_LOCK) == 0u) {
             return MM_TRUE;
+        }
+        if (flash_trace_enabled() && size_bytes == 4) {
+            const char *sec = (offset == FLASH_SECCR) ? "S" : "NS";
+            printf("[FLASH_CR] %s write=0x%08lx\n", sec, (unsigned long)value);
         }
         memcpy((mm_u8 *)f->regs + offset, &value, size_bytes);
         if ((value & FLASH_CR_LOCK) != 0u) {
