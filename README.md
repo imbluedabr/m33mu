@@ -24,6 +24,7 @@ Released under AGPLv3. See `LICENSE` file.
 
 These are the current valid `--cpu` option values:
 
+- stm32h533
 - stm32h563 (default)
 - stm32u585
 - stm32l552

@@ -3447,6 +3447,11 @@ int main(int argc, char **argv)
 #endif
                         "<image.bin[:offset]|image.elf|image.hex> [more images...]\n",
                 argv[0]);
+        fprintf(stderr, "supported CPUs:");
+        for (size_t i = 0; i < mm_cpu_count(); ++i) {
+            fprintf(stderr, " %s", mm_cpu_name_at(i));
+        }
+        fprintf(stderr, "\n");
         return 1;
     }
 
