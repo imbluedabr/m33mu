@@ -431,11 +431,26 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
     addr_sec = MM_SECURE;
     attr = MM_SAU_SECURE;
     {
-        mpcbb_hit = mpcbb_attr_for_addr(ctx, addr, &attr, &addr_sec);
-        if (!mpcbb_hit && ctx->scs != 0) {
-            attr = mm_sau_attr_for_addr(ctx->scs, addr);
-            addr_sec = (attr == MM_SAU_NONSECURE) ? MM_NONSECURE : MM_SECURE;
+        enum mm_sau_attr sau_attr = MM_SAU_SECURE;
+        enum mm_sau_attr mpc_attr = MM_SAU_SECURE;
+        enum mm_sec_state mpc_addr_sec = MM_SECURE;
+
+        if (ctx->scs != 0) {
+            sau_attr = mm_sau_attr_for_addr(ctx->scs, addr);
         }
+        mpcbb_hit = mpcbb_attr_for_addr(ctx, addr, &mpc_attr, &mpc_addr_sec);
+        if (mpcbb_hit) {
+            /* For SRAM on STM32H5, MPCBB (IDAU) and SAU both apply.
+             * Treat the most restrictive attribution as effective. */
+            if (mpc_attr == MM_SAU_SECURE) {
+                attr = MM_SAU_SECURE;
+            } else {
+                attr = sau_attr;
+            }
+        } else {
+            attr = sau_attr;
+        }
+        addr_sec = (attr == MM_SAU_NONSECURE) ? MM_NONSECURE : MM_SECURE;
         if (sec == MM_NONSECURE) {
             if (attr == MM_SAU_SECURE) {
                 memfault_reason(ctx, type, sec, addr, "secure-attr", attr, addr_sec, mpcbb_hit);
