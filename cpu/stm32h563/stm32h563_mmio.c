@@ -72,6 +72,9 @@ extern void mm_system_request_reset(void);
 #define SBS_BASE     0x44000400u
 #define SBS_SEC_BASE 0x54000400u
 #define SBS_SIZE     0x400u
+/* BSEC base (system domain) */
+#define BSEC_BASE    0x46009000u
+#define BSEC_SIZE    0x400u
 
 /* FLASH controller base */
 #define FLASH_BASE   0x40022000u
@@ -322,6 +325,14 @@ extern void mm_system_request_reset(void);
 #define FLASH_CR_BKSEL     (1u << 31)
 #define FLASH_OPTSR_SWAP_BANK (1u << 31)
 
+#define BSEC_UID0_OFFSET 0x014u
+#define BSEC_UID1_OFFSET 0x018u
+#define BSEC_UID2_OFFSET 0x01Cu
+
+#define BSEC_UID0_VALUE 0xB5EC0001u
+#define BSEC_UID1_VALUE 0xB5EC0002u
+#define BSEC_UID2_VALUE 0xB5EC0003u
+
 struct rcc_state {
     mm_u32 regs[RCC_SIZE / 4];
     mm_u64 cpu_hz;
@@ -413,6 +424,7 @@ static struct simple_blk tzic_ns;
 static struct simple_blk sbs;
 static struct simple_blk sbs_sec;
 static struct simple_blk tamp;
+static struct simple_blk bsec;
 static struct simple_blk ucpd1;
 static struct simple_blk ucpd1_sec;
 static struct simple_blk crs;
@@ -605,6 +617,7 @@ void mm_stm32h563_mmio_reset(void)
     memset(&sbs, 0, sizeof(sbs));
     memset(&sbs_sec, 0, sizeof(sbs_sec));
     memset(&tamp, 0, sizeof(tamp));
+    memset(&bsec, 0, sizeof(bsec));
     memset(&ucpd1, 0, sizeof(ucpd1));
     memset(&ucpd1_sec, 0, sizeof(ucpd1_sec));
     memset(&ucpd1_state, 0, sizeof(ucpd1_state));
@@ -649,6 +662,9 @@ void mm_stm32h563_mmio_reset(void)
     wwdg.regs[WWDG_CFR / 4u] = 0x0000007Fu;
     wwdg.counter = 0x7Fu;
     exti.regs[EXTI_IMR1 / 4u] = 0xFFFE0000u;
+    bsec.regs[BSEC_UID0_OFFSET / 4u] = BSEC_UID0_VALUE;
+    bsec.regs[BSEC_UID1_OFFSET / 4u] = BSEC_UID1_VALUE;
+    bsec.regs[BSEC_UID2_OFFSET / 4u] = BSEC_UID2_VALUE;
     /* Power ready flags. */
     pwr_update_vos(&pwr);
 
@@ -1968,6 +1984,7 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     memset(&tzsc_ns, 0, sizeof(tzsc_ns));
     memset(&tzic_s, 0, sizeof(tzic_s));
     memset(&tzic_ns, 0, sizeof(tzic_ns));
+    memset(&bsec, 0, sizeof(bsec));
     memset(&rng, 0, sizeof(rng));
     memset(&hash_accel, 0, sizeof(hash_accel));
     memset(&aes_accel, 0, sizeof(aes_accel));
@@ -2047,6 +2064,9 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     wwdg.regs[WWDG_CFR / 4] = 0x0000007Fu;
     wwdg.counter = 0x7Fu;
     exti.regs[EXTI_IMR1 / 4u] = 0xFFFE0000u;
+    bsec.regs[BSEC_UID0_OFFSET / 4u] = BSEC_UID0_VALUE;
+    bsec.regs[BSEC_UID1_OFFSET / 4u] = BSEC_UID1_VALUE;
+    bsec.regs[BSEC_UID2_OFFSET / 4u] = BSEC_UID2_VALUE;
 
     /* RCC */
     reg.base = RCC_BASE;
@@ -2091,6 +2111,14 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     /* SBS secure alias */
     reg.base = SBS_SEC_BASE;
     reg.opaque = &sbs_sec;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* BSEC */
+    reg.base = BSEC_BASE;
+    reg.size = BSEC_SIZE;
+    reg.opaque = &bsec;
+    reg.read = simple_blk_read;
+    reg.write = simple_blk_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     /* UCPD1 */
