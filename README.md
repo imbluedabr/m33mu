@@ -30,6 +30,7 @@ These are the current valid `--cpu` option values:
 - stm32l552
 - mcxw71c
 - nrf5340
+- nrf54lm20
 - rp2350
 
 
