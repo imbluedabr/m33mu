@@ -1,0 +1,21 @@
+#ifndef M33MU_NRF54LM20_MMIO_H
+#define M33MU_NRF54LM20_MMIO_H
+
+#include "m33mu/mmio.h"
+#include "m33mu/nvic.h"
+
+struct mm_memmap;
+struct mm_flash_persist;
+
+mm_bool mm_nrf54lm20_register_mmio(struct mmio_bus *bus);
+void mm_nrf54lm20_flash_bind(struct mm_memmap *map,
+                             mm_u8 *flash,
+                             mm_u32 flash_size,
+                             const struct mm_flash_persist *persist,
+                             mm_u32 flags);
+mm_u64 mm_nrf54lm20_cpu_hz(void);
+void mm_nrf54lm20_mmio_reset(void);
+void mm_nrf54lm20_mmio_set_nvic(struct mm_nvic *nvic);
+void mm_nrf54lm20_grtc_tick(mm_u64 cycles);
+
+#endif /* M33MU_NRF54LM20_MMIO_H */

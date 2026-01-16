@@ -33,5 +33,7 @@ jobs:
         run: build/m33mu  tests/firmware/test-stm32l552/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu stm32l552
       - name: Run nRF5340 firmware test (SPI flash read/write)
         run: build/m33mu  tests/firmware/test-nrf5340/app.bin --spiflash:SPI0:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu nrf5340
+      - name: Run nRF54LM20 firmware test
+        run: build/m33mu  tests/firmware/test-nrf54lm20/app.bin --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu nrf54lm20
       - name: Run STM32H5 firmware test (Floating point instructions)
         run: build/m33mu tests/firmware/test-fpu-instructions/app.bin --uart-stdout --expect-bkpt 0x7f --timeout 60

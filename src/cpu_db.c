@@ -52,6 +52,10 @@
 #include "nrf5340/nrf5340_timers.h"
 #include "nrf5340/nrf5340_uart_spi.h"
 #include "nrf5340/cpu_config.h"
+#include "nrf54lm20/nrf54lm20_mmio.h"
+#include "nrf54lm20/nrf54lm20_timers.h"
+#include "nrf54lm20/nrf54lm20_uart_spi.h"
+#include "nrf54lm20/cpu_config.h"
 #include "rp2350/rp2350_mmio.h"
 #include "rp2350/rp2350_uart_spi.h"
 #include "rp2350/rp2350_timers.h"
@@ -271,6 +275,41 @@ static const struct mm_cpu_entry cpu_table[] = {
             NRF5340_TIMER_INIT,
             NRF5340_TIMER_RESET,
             NRF5340_TIMER_TICK
+        }
+    },
+    {
+        "nrf54lm20",
+        {
+            NRF54LM20_FLASH_BASE_S,
+            NRF54LM20_FLASH_SIZE,
+            NRF54LM20_FLASH_BASE_NS,
+            NRF54LM20_FLASH_SIZE,
+            NRF54LM20_RAM_BASE_S,
+            NRF54LM20_RAM_SIZE,
+            NRF54LM20_RAM_BASE_NS,
+            NRF54LM20_RAM_SIZE,
+            1,
+            NRF54LM20_RAM_REGIONS,
+            NRF54LM20_RAM_REGION_COUNT,
+            NRF54LM20_MPCBB_BLOCK_SIZE,
+            0,
+            NRF54LM20_FLAGS,
+            NRF54LM20_SOC_RESET,
+            NRF54LM20_SOC_REGISTER,
+            NRF54LM20_FLASH_BIND,
+            NRF54LM20_CLOCK_GET_HZ,
+            NRF54LM20_USART_INIT,
+            NRF54LM20_USART_RESET,
+            NRF54LM20_USART_POLL,
+            NRF54LM20_SPI_INIT,
+            NRF54LM20_SPI_RESET,
+            NRF54LM20_SPI_POLL,
+            0,
+            0,
+            0,
+            NRF54LM20_TIMER_INIT,
+            NRF54LM20_TIMER_RESET,
+            NRF54LM20_TIMER_TICK
         }
     },
     {
