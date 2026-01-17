@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #include <string.h>
+#include <stdlib.h>
 #include "rp2350/rp2350_bootrom.h"
 #include "rp2350/rp2350_mmio.h"
 
@@ -40,6 +41,12 @@
 #define RP2350_ROM_UNIMPL_ADDR 0x00000360u
 #define RP2350_ROM_REBOOT_ADDR 0x000003a0u
 #define RP2350_ROM_GET_PARTITION_TABLE_INFO_ADDR 0x000003c0u
+#define RP2350_ROM_GET_SYS_INFO_ADDR 0x000003e0u
+#define RP2350_ROM_OTP_ACCESS_ADDR 0x00000400u
+#define RP2350_ROM_LOAD_PARTITION_TABLE_ADDR 0x00000420u
+#define RP2350_ROM_PICK_AB_PARTITION_ADDR 0x00000440u
+#define RP2350_ROM_CHAIN_IMAGE_ADDR 0x00000460u
+#define RP2350_ROM_GET_B_PARTITION_ADDR 0x00000480u
 
 #define ROM_TABLE_CODE(c1, c2) ((mm_u32)(c1) | ((mm_u32)(c2) << 8))
 #define ROM_FUNC_FLASH_ENTER_CMD_XIP  ROM_TABLE_CODE('C', 'X')
@@ -60,6 +67,12 @@
 #define ROM_FUNC_FLASH_OP             ROM_TABLE_CODE('F', 'O')
 #define ROM_FUNC_REBOOT               ROM_TABLE_CODE('R', 'B')
 #define ROM_FUNC_GET_PARTITION_TABLE_INFO ROM_TABLE_CODE('G', 'P')
+#define ROM_FUNC_GET_SYS_INFO         ROM_TABLE_CODE('G', 'S')
+#define ROM_FUNC_OTP_ACCESS           ROM_TABLE_CODE('O', 'A')
+#define ROM_FUNC_LOAD_PARTITION_TABLE ROM_TABLE_CODE('L', 'P')
+#define ROM_FUNC_PICK_AB_PARTITION    ROM_TABLE_CODE('A', 'B')
+#define ROM_FUNC_CHAIN_IMAGE          ROM_TABLE_CODE('C', 'I')
+#define ROM_FUNC_GET_B_PARTITION      ROM_TABLE_CODE('G', 'B')
 #define ROM_DATA_FLASH_DEVINFO16_PTR  ROM_TABLE_CODE('F', 'D')
 #define ROM_DATA_PARTITION_TABLE_PTR  ROM_TABLE_CODE('P', 'T')
 
@@ -113,6 +126,10 @@
 #define RP2350_BOOTROM_ERROR_PRECONDITION_NOT_MET ((mm_u32)0u - 14u)
 #define RP2350_BOOTROM_ERROR_NOT_FOUND ((mm_u32)0u - 17u)
 
+#define RP2350_SYS_INFO_BOOT_INFO 0x0040u
+
+#define RP2350_OTP_CMD_WRITE_BITS 0x00010000u
+
 extern void mm_system_request_reset_boot(int mode);
 
 static mm_u32 rp2350_bootrom_lookup(mm_u32 code, mm_u32 mask)
@@ -145,6 +162,12 @@ static mm_u32 rp2350_bootrom_lookup(mm_u32 code, mm_u32 mask)
     case ROM_FUNC_FLASH_OP: return RP2350_ROM_FLASH_OP_ADDR | 1u;
     case ROM_FUNC_REBOOT: return RP2350_ROM_REBOOT_ADDR | 1u;
     case ROM_FUNC_GET_PARTITION_TABLE_INFO: return RP2350_ROM_GET_PARTITION_TABLE_INFO_ADDR | 1u;
+    case ROM_FUNC_GET_SYS_INFO: return RP2350_ROM_GET_SYS_INFO_ADDR | 1u;
+    case ROM_FUNC_OTP_ACCESS: return RP2350_ROM_OTP_ACCESS_ADDR | 1u;
+    case ROM_FUNC_LOAD_PARTITION_TABLE: return RP2350_ROM_LOAD_PARTITION_TABLE_ADDR | 1u;
+    case ROM_FUNC_PICK_AB_PARTITION: return RP2350_ROM_PICK_AB_PARTITION_ADDR | 1u;
+    case ROM_FUNC_CHAIN_IMAGE: return RP2350_ROM_CHAIN_IMAGE_ADDR | 1u;
+    case ROM_FUNC_GET_B_PARTITION: return RP2350_ROM_GET_B_PARTITION_ADDR | 1u;
     default:
         break;
     }
@@ -453,6 +476,92 @@ static mm_u32 rp2350_partition_table_info(struct mm_memmap *map,
     return write_idx;
 }
 
+static mm_u32 rp2350_sys_info(struct mm_memmap *map,
+                              enum mm_sec_state sec,
+                              mm_u32 out_addr,
+                              mm_u32 out_words,
+                              mm_u32 flags)
+{
+    const struct rp2350_boot_info *info = mm_rp2350_boot_info_get();
+    if (map == 0) return RP2350_BOOTROM_ERROR_INVALID_ARG;
+    if ((out_addr & 3u) != 0u) return RP2350_BOOTROM_ERROR_BAD_ALIGNMENT;
+    if (flags != RP2350_SYS_INFO_BOOT_INFO) return RP2350_BOOTROM_ERROR_INVALID_ARG;
+    if (out_words < 5u) return RP2350_BOOTROM_ERROR_BUFFER_TOO_SMALL;
+
+    (void)mm_memmap_write(map, sec, out_addr + 0u, 4u, RP2350_SYS_INFO_BOOT_INFO);
+    (void)mm_memmap_write(map, sec, out_addr + 4u, 4u, (info != 0) ? info->boot_word : 0u);
+    (void)mm_memmap_write(map, sec, out_addr + 8u, 4u, (info != 0) ? info->boot_diagnostic : 0u);
+    (void)mm_memmap_write(map, sec, out_addr + 12u, 4u, (info != 0) ? info->reboot_params[0] : 0u);
+    (void)mm_memmap_write(map, sec, out_addr + 16u, 4u, (info != 0) ? info->reboot_params[1] : 0u);
+    return 5u;
+}
+
+static mm_u32 rp2350_otp_access(struct mm_cpu *cpu,
+                                struct mm_memmap *map,
+                                mm_u32 buf_addr,
+                                mm_u32 len,
+                                mm_u32 flags)
+{
+    mm_u8 *buf;
+    mm_u32 rc;
+    mm_u32 i;
+    mm_bool write = (flags & RP2350_OTP_CMD_WRITE_BITS) != 0u;
+    if (cpu == 0 || map == 0 || len == 0u) return RP2350_BOOTROM_ERROR_INVALID_ARG;
+    buf = (mm_u8 *)malloc(len);
+    if (buf == 0) return RP2350_BOOTROM_ERROR_INVALID_ARG;
+    if (write) {
+        for (i = 0; i < len; ++i) {
+            if (!mm_memmap_read8(map, cpu->sec_state, buf_addr + i, &buf[i])) {
+                free(buf);
+                return RP2350_BOOTROM_ERROR_INVALID_ADDRESS;
+            }
+        }
+    } else {
+        memset(buf, 0, len);
+    }
+    rc = mm_rp2350_otp_access(cpu->sec_state, flags, buf, len);
+    if (rc == 0u && !write) {
+        for (i = 0; i < len; ++i) {
+            if (!mm_memmap_write8(map, cpu->sec_state, buf_addr + i, buf[i])) {
+                rc = RP2350_BOOTROM_ERROR_INVALID_ADDRESS;
+                break;
+            }
+        }
+    }
+    free(buf);
+    return rc;
+}
+
+static mm_u32 rp2350_load_partition_table(mm_u32 workarea_addr, mm_u32 workarea_size, mm_u32 force_reload)
+{
+    struct rp2350_partition_table *pt = mm_rp2350_partition_table_get_mut();
+    (void)workarea_addr;
+    (void)workarea_size;
+    (void)force_reload;
+    if (pt != 0) {
+        pt->loaded = 1u;
+    }
+    return RP2350_BOOTROM_OK;
+}
+
+static mm_u32 rp2350_pick_ab_partition(mm_u32 partition_a_num)
+{
+    return partition_a_num;
+}
+
+static mm_u32 rp2350_get_b_partition(mm_u32 partition_a_num)
+{
+    return partition_a_num;
+}
+
+static mm_u32 rp2350_chain_image(mm_u32 image_base, mm_u32 image_size)
+{
+    (void)image_base;
+    (void)image_size;
+    mm_system_request_reset_boot(1);
+    return RP2350_BOOTROM_OK;
+}
+
 mm_bool mm_rp2350_bootrom_handle(struct mm_cpu *cpu, struct mm_memmap *map)
 {
     mm_u32 pc;
@@ -527,6 +636,30 @@ mm_bool mm_rp2350_bootrom_handle(struct mm_cpu *cpu, struct mm_memmap *map)
         return MM_TRUE;
     case RP2350_ROM_GET_PARTITION_TABLE_INFO_ADDR:
         cpu->r[0] = rp2350_partition_table_info(map, cpu->sec_state, cpu->r[0], cpu->r[1], cpu->r[2]);
+        rp2350_bootrom_return(cpu);
+        return MM_TRUE;
+    case RP2350_ROM_GET_SYS_INFO_ADDR:
+        cpu->r[0] = rp2350_sys_info(map, cpu->sec_state, cpu->r[0], cpu->r[1], cpu->r[2]);
+        rp2350_bootrom_return(cpu);
+        return MM_TRUE;
+    case RP2350_ROM_OTP_ACCESS_ADDR:
+        cpu->r[0] = rp2350_otp_access(cpu, map, cpu->r[0], cpu->r[1], cpu->r[2]);
+        rp2350_bootrom_return(cpu);
+        return MM_TRUE;
+    case RP2350_ROM_LOAD_PARTITION_TABLE_ADDR:
+        cpu->r[0] = rp2350_load_partition_table(cpu->r[0], cpu->r[1], cpu->r[2]);
+        rp2350_bootrom_return(cpu);
+        return MM_TRUE;
+    case RP2350_ROM_PICK_AB_PARTITION_ADDR:
+        cpu->r[0] = rp2350_pick_ab_partition(cpu->r[2]);
+        rp2350_bootrom_return(cpu);
+        return MM_TRUE;
+    case RP2350_ROM_GET_B_PARTITION_ADDR:
+        cpu->r[0] = rp2350_get_b_partition(cpu->r[0]);
+        rp2350_bootrom_return(cpu);
+        return MM_TRUE;
+    case RP2350_ROM_CHAIN_IMAGE_ADDR:
+        cpu->r[0] = rp2350_chain_image(cpu->r[2], cpu->r[3]);
         rp2350_bootrom_return(cpu);
         return MM_TRUE;
     case RP2350_ROM_UNIMPL_ADDR:

@@ -39,6 +39,12 @@ struct rp2350_partition_table {
     struct rp2350_resident_partition partitions[RP2350_PARTITION_TABLE_MAX_PARTITIONS];
 };
 
+struct rp2350_boot_info {
+    mm_u32 boot_word;
+    mm_u32 boot_diagnostic;
+    mm_u32 reboot_params[2];
+};
+
 mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus);
 void mm_rp2350_mmio_reset(void);
 void mm_rp2350_flash_bind(struct mm_memmap *map,
@@ -66,6 +72,20 @@ mm_u32 mm_rp2350_flash_size(void);
 mm_u32 mm_rp2350_partition_table_addr(void);
 const struct rp2350_partition_table *mm_rp2350_partition_table_get(void);
 struct rp2350_partition_table *mm_rp2350_partition_table_get_mut(void);
+void mm_rp2350_otp_init(const char *target_name);
+mm_u32 mm_rp2350_otp_access(enum mm_sec_state sec,
+                            mm_u32 flags,
+                            mm_u8 *data,
+                            mm_u32 len);
+const struct rp2350_boot_info *mm_rp2350_boot_info_get(void);
+void mm_rp2350_boot_info_reset(void);
+void mm_rp2350_set_boot_info(mm_i8 diagnostic_partition,
+                             mm_u8 boot_type,
+                             mm_i8 partition,
+                             mm_u8 tbyb_info,
+                             mm_u32 boot_diagnostic,
+                             mm_u32 reboot_param0,
+                             mm_u32 reboot_param1);
 void mm_rp2350_set_active_core(mm_u32 core_id);
 void mm_rp2350_bind_multicore(struct mm_cpu *core0,
                               struct mm_cpu *core1,

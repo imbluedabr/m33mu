@@ -34,6 +34,7 @@ void mm_stm32h563_flash_bind(struct mm_memmap *map,
                              mm_u32 flash_size,
                              const struct mm_flash_persist *persist,
                              mm_u32 flags);
+void mm_stm32h563_otp_init(const char *target_name);
 mm_u64 mm_stm32h563_cpu_hz(void);
 mm_u32 *mm_stm32h563_rcc_regs(void);
 mm_u32 *mm_stm32h563_tzsc_regs(void);

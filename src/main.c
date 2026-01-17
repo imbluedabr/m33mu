@@ -40,6 +40,8 @@
 #include "m33mu/core_sys.h"
 #include "m33mu/trace.h"
 #include "rp2350/rp2350_mmio.h"
+#include "stm32h533/stm32h533_mmio.h"
+#include "stm32h563/stm32h563_mmio.h"
 #include "m33mu/mem_prot.h"
 #include "m33mu/vector.h"
 #include "m33mu/exc_return.h"
@@ -74,6 +76,24 @@
 #define UFSR_DIVBYZERO (1u << 25)
 #define UFSR_STKOF (1u << 20)
 
+#define BOOT_TYPE_NORMAL 0u
+#define BOOT_TYPE_BOOTSEL 2u
+#define BOOT_TYPE_RAM_IMAGE 3u
+#define BOOT_TYPE_FLASH_UPDATE 4u
+#define BOOT_TYPE_CHAINED_FLAG 0x80u
+
+#define BOOT_PARTITION_NONE ((mm_i8)-1)
+
+#define BOOT_DIAGNOSTIC_HAS_PARTITION_TABLE 0x10u
+#define BOOT_DIAGNOSTIC_CONSIDERED 0x20u
+#define BOOT_DIAGNOSTIC_CHOSEN 0x40u
+#define BOOT_DIAGNOSTIC_IMAGE_LAUNCHED 0x4000u
+
+#define PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_LSB 0u
+#define PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_BITS 0x00001fffu
+#define PICOBIN_PARTITION_LOCATION_LAST_SECTOR_LSB 13u
+#define PICOBIN_PARTITION_LOCATION_LAST_SECTOR_BITS 0x03ffe000u
+#define PICOBIN_PARTITION_PERMISSION_NSBOOT_W_BITS 0x80000000u
 /* UF2 format constants (subset). */
 #define UF2_MAGIC_START0 0x0A324655u
 #define UF2_MAGIC_START1 0x9E5D5157u
@@ -1548,6 +1568,32 @@ static mm_bool uf2_family_allowed_rp2350(mm_u32 family_id, mm_bool ram_target)
             family_id == UF2_FAMILY_ID_RP2350_RISCV) ? MM_TRUE : MM_FALSE;
 }
 
+static mm_bool uf2_flash_addr_allowed(const struct rp2350_partition_table *pt, mm_u32 addr)
+{
+    mm_u32 count;
+    mm_u32 i;
+    if (pt == 0 || pt->loaded == 0u) {
+        return MM_TRUE;
+    }
+    count = (pt->permission_partition_count != 0u) ? pt->permission_partition_count : pt->partition_count;
+    if (count > RP2350_PARTITION_TABLE_MAX_PARTITIONS) {
+        count = RP2350_PARTITION_TABLE_MAX_PARTITIONS;
+    }
+    for (i = 0; i < count; ++i) {
+        mm_u32 loc = pt->partitions[i].permissions_and_location;
+        mm_u32 first = (loc & PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_BITS) >>
+                       PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_LSB;
+        mm_u32 last = (loc & PICOBIN_PARTITION_LOCATION_LAST_SECTOR_BITS) >>
+                      PICOBIN_PARTITION_LOCATION_LAST_SECTOR_LSB;
+        mm_u32 start = 0x10000000u + first * 4096u;
+        mm_u32 end = 0x10000000u + (last + 1u) * 4096u;
+        if (addr >= start && addr < end) {
+            return (pt->partitions[i].permissions_and_flags & PICOBIN_PARTITION_PERMISSION_NSBOOT_W_BITS) != 0u;
+        }
+    }
+    return (pt->unpartitioned_space_permissions_and_flags & PICOBIN_PARTITION_PERMISSION_NSBOOT_W_BITS) != 0u;
+}
+
 static mm_bool uf2_should_ignore_block(const mm_u8 *block)
 {
     mm_u32 flags = uf2_u32(block + 8);
@@ -1666,6 +1712,7 @@ static int load_uf2(const char *path,
         enum mm_load_target target;
         mm_u8 *dst;
         mm_bool ram_target;
+        const struct rp2350_partition_table *pt;
 
         if (!uf2_block_valid(block, rp2350)) {
             continue;
@@ -1688,6 +1735,13 @@ static int load_uf2(const char *path,
             if (!uf2_family_allowed_rp2350(expected_family, ram_target)) {
                 fclose(f);
                 return -1;
+            }
+            if (!ram_target) {
+                pt = mm_rp2350_partition_table_get();
+                if (!uf2_flash_addr_allowed(pt, target_addr)) {
+                    fclose(f);
+                    return -1;
+                }
             }
         }
         if (!map_target_offset(cfg, targets, target_addr, &target, &off)) {
@@ -3924,6 +3978,13 @@ int main(int argc, char **argv)
     if (opt_dualbank) {
         cfg.flags |= MM_TARGET_FLAG_DUALBANK;
     }
+    if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+        mm_rp2350_otp_init(cpu_name);
+    } else if (cpu_name != 0 && strcmp(cpu_name, "stm32h563") == 0) {
+        mm_stm32h563_otp_init(cpu_name);
+    } else if (cpu_name != 0 && strcmp(cpu_name, "stm32h533") == 0) {
+        mm_stm32h533_otp_init(cpu_name);
+    }
 
     if (image_count > 0 && boot_mode != MM_BOOT_RAM) {
         int ii;
@@ -4256,6 +4317,24 @@ int main(int argc, char **argv)
                 }
                 map.ram.length = cfg_total_ram(&cfg);
             }
+            if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                const struct rp2350_partition_table *pt = mm_rp2350_partition_table_get();
+                mm_u32 diag = BOOT_DIAGNOSTIC_CONSIDERED | BOOT_DIAGNOSTIC_CHOSEN | BOOT_DIAGNOSTIC_IMAGE_LAUNCHED;
+                mm_u8 boot_type = BOOT_TYPE_NORMAL;
+                if (boot_mode_local == MM_BOOT_RAM) {
+                    boot_type = BOOT_TYPE_RAM_IMAGE;
+                }
+                if (pt != 0 && pt->loaded && pt->partition_count > 0u) {
+                    diag |= BOOT_DIAGNOSTIC_HAS_PARTITION_TABLE;
+                }
+                mm_rp2350_set_boot_info(BOOT_PARTITION_NONE,
+                                        boot_type,
+                                        BOOT_PARTITION_NONE,
+                                        0u,
+                                        diag,
+                                        0u,
+                                        0u);
+            }
             if (!mm_target_register_mmio(&cfg, &map.mmio)) {
                 fprintf(stderr, "Failed to register MMIO for CPU %s\n", (cpu_name != 0) ? cpu_name : "unknown");
                 rc = 1;
@@ -4305,6 +4384,11 @@ int main(int argc, char **argv)
             mm_memmap_set_interceptor(&map, prot_mux_interceptor, 0);
             mm_prot_add_region(&prot, cfg.flash_base_s, cfg.flash_size_s, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
             mm_prot_add_region(&prot, cfg.flash_base_ns, cfg.flash_size_ns, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
+            if (cpu_name != 0 &&
+                (strcmp(cpu_name, "stm32h563") == 0 || strcmp(cpu_name, "stm32h533") == 0)) {
+                mm_prot_add_region(&prot, 0x0CFFF000u, 0x800u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                mm_prot_add_region(&prot, 0x08FFF000u, 0x800u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+            }
             if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
                 mm_prot_add_region(&prot, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
                 mm_prot_add_region(&prot, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);

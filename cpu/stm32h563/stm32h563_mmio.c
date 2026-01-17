@@ -37,6 +37,7 @@
 #include "stm32h563/stm32h563_eth.h"
 #include "m33mu/memmap.h"
 #include "m33mu/flash_persist.h"
+#include "m33mu/otp.h"
 #include "m33mu/gpio.h"
 #include "stm32_crypto.h"
 
@@ -80,6 +81,12 @@ extern void mm_system_request_reset(void);
 #define FLASH_BASE   0x40022000u
 #define FLASH_SEC_BASE 0x50022000u
 #define FLASH_SIZE   0x400u
+
+#define FLASH_OTP_BASE_NS 0x08FFF000u
+#define FLASH_OTP_BASE_S  0x0CFFF000u
+#define FLASH_OTP_SIZE    0x800u
+#define FLASH_OTP_BLOCK_SIZE 64u
+#define FLASH_OTP_BLOCK_COUNT 32u
 
 /* GTZC TZSC/TZIC (secure / non-secure aliases) */
 #define GTZC_TZSC_S_BASE 0x50032400u
@@ -304,6 +311,8 @@ extern void mm_system_request_reset(void);
 #define FLASH_SECCCR   0x034u
 #define FLASH_OPTSR_CUR 0x050u
 #define FLASH_OPTSR_PRG 0x054u
+#define FLASH_OTPBLR_CUR 0x090u
+#define FLASH_OTPBLR_PRG 0x094u
 
 #define FLASH_KEY1 0x45670123u
 #define FLASH_KEY2 0xCDEF89ABu
@@ -444,6 +453,7 @@ static struct exti_state exti;
 static struct iwdg_state iwdg;
 static struct wwdg_state wwdg;
 static struct flash_state flash_ctl;
+static struct mm_otp otp_state;
 static struct gpio_state gpio[9]; /* A..I */
 static struct gpdma_state gpdma1;
 static struct gpdma_state gpdma2;
@@ -678,6 +688,9 @@ void mm_stm32h563_mmio_reset(void)
     flash_ctl.regs[FLASH_ACR / 4] = 0x00000013u;
     flash_ctl.regs[FLASH_NSCR / 4] = 0x00000001u;
     flash_ctl.regs[FLASH_SECCR / 4] = 0x00000001u;
+    if ((mm_otp_flags(&otp_state) & MM_OTP_FLAG_FINAL_LOCK) != 0u) {
+        flash_ctl.regs[FLASH_OTPBLR_CUR / 4u] = 0xFFFFFFFFu;
+    }
     flash_sync_option_regs(&flash_ctl);
 }
 
@@ -1189,6 +1202,59 @@ static mm_bool flash_write_cb(void *opaque, enum mm_sec_state sec, mm_u32 addr, 
     return MM_TRUE;
 }
 
+static mm_bool otp_block_locked(mm_u32 offset)
+{
+    mm_u32 block = offset / FLASH_OTP_BLOCK_SIZE;
+    if (block >= FLASH_OTP_BLOCK_COUNT) return MM_TRUE;
+    if ((flash_ctl.regs[FLASH_OTPBLR_CUR / 4u] & (1u << block)) != 0u) {
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static mm_bool otp_mem_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    mm_u8 buf[4];
+    (void)opaque;
+    if (value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if (offset + size_bytes > FLASH_OTP_SIZE) return MM_FALSE;
+    if (!mm_otp_read(&otp_state, offset, buf, size_bytes)) return MM_FALSE;
+    *value_out = 0u;
+    if (size_bytes >= 1u) *value_out |= buf[0];
+    if (size_bytes >= 2u) *value_out |= (mm_u32)buf[1] << 8;
+    if (size_bytes >= 3u) *value_out |= (mm_u32)buf[2] << 16;
+    if (size_bytes >= 4u) *value_out |= (mm_u32)buf[3] << 24;
+    return MM_TRUE;
+}
+
+static mm_bool otp_mem_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    mm_u8 buf[4];
+    enum mm_sec_state sec = mmio_active_sec();
+    mm_u32 cr_off = (sec == MM_SECURE) ? FLASH_SECCR : FLASH_NSCR;
+    mm_u32 sr_off = (sec == MM_SECURE) ? FLASH_SECSR : FLASH_NSSR;
+    (void)opaque;
+    if (size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if (offset + size_bytes > FLASH_OTP_SIZE) return MM_FALSE;
+    if (!flash_is_unlocked(cr_off) || (flash_ctl.regs[cr_off / 4u] & FLASH_CR_PG) == 0u) {
+        flash_ctl.regs[sr_off / 4u] |= FLASH_FLAG_PGSERR;
+        return MM_TRUE;
+    }
+    if (otp_block_locked(offset)) {
+        flash_ctl.regs[sr_off / 4u] |= FLASH_FLAG_PGSERR;
+        return MM_TRUE;
+    }
+    buf[0] = (mm_u8)(value & 0xffu);
+    buf[1] = (mm_u8)((value >> 8) & 0xffu);
+    buf[2] = (mm_u8)((value >> 16) & 0xffu);
+    buf[3] = (mm_u8)((value >> 24) & 0xffu);
+    if (!mm_otp_write(&otp_state, offset, buf, size_bytes)) {
+        flash_ctl.regs[sr_off / 4u] |= FLASH_FLAG_PGSERR;
+        return MM_TRUE;
+    }
+    return MM_TRUE;
+}
+
 /* Reset bits currently unused (could clear state if asserted). */
 
 static mm_bool rcc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
@@ -1600,6 +1666,21 @@ static mm_bool flash_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
             f->regs[FLASH_OPTSR_CUR / 4u] = (f->regs[FLASH_OPTSR_CUR / 4u] & ~FLASH_OPTSR_SWAP_BANK) | (new_val & FLASH_OPTSR_SWAP_BANK);
         }
         flash_set_swap_state(f, (new_val & FLASH_OPTSR_SWAP_BANK) != 0u);
+        return MM_TRUE;
+    }
+
+    if (offset == FLASH_OTPBLR_CUR) {
+        return MM_TRUE;
+    }
+    if (offset == FLASH_OTPBLR_PRG) {
+        mm_u32 cur = f->regs[FLASH_OTPBLR_CUR / 4u];
+        mm_u32 set_bits = value & ~cur;
+        cur |= set_bits;
+        f->regs[FLASH_OTPBLR_CUR / 4u] = cur;
+        f->regs[FLASH_OTPBLR_PRG / 4u] = value;
+        if (cur == 0xFFFFFFFFu) {
+            (void)mm_otp_set_flags(&otp_state, MM_OTP_FLAG_FINAL_LOCK);
+        }
         return MM_TRUE;
     }
 
@@ -2156,6 +2237,16 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     reg.base = FLASH_SEC_BASE;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
+    /* FLASH OTP memory (non-secure and secure aliases) */
+    reg.base = FLASH_OTP_BASE_NS;
+    reg.size = FLASH_OTP_SIZE;
+    reg.opaque = 0;
+    reg.read = otp_mem_read;
+    reg.write = otp_mem_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = FLASH_OTP_BASE_S;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
     /* GTZC TZSC secure */
     reg.base = GTZC_TZSC_S_BASE;
     reg.size = GTZC_TZSC_SIZE;
@@ -2392,6 +2483,11 @@ void mm_stm32h563_flash_bind(struct mm_memmap *map,
     flash_ctl.dualbank_enabled = (flags & MM_TARGET_FLAG_DUALBANK) != 0u;
     flash_sync_option_regs(&flash_ctl);
     mm_memmap_set_flash_writer(map, flash_write_cb, &flash_ctl);
+}
+
+void mm_stm32h563_otp_init(const char *target_name)
+{
+    mm_otp_init(&otp_state, target_name, FLASH_OTP_SIZE);
 }
 
 void mm_stm32h563_rng_set_nvic(struct mm_nvic *nvic)

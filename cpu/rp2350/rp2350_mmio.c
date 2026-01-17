@@ -10,6 +10,9 @@
 #include "rp2350/rp2350_coproc.h"
 #include "rp2350/rp2350_bootrom.h"
 #include "m33mu/gpio.h"
+#include "m33mu/otp.h"
+
+extern void mm_system_request_reset(void);
 
 #define RESETS_BASE   0x40020000u
 #define RESETS_SIZE   0x1000u
@@ -107,6 +110,19 @@
 #define RP2350_PICOBIN_PARTITION_PERMISSION_NSBOOT_R_BITS 0x40000000u
 #define RP2350_PICOBIN_PARTITION_PERMISSION_NSBOOT_W_BITS 0x80000000u
 #define RP2350_PICOBIN_PARTITION_PERMISSIONS_BITS 0xfc000000u
+
+#define RP2350_OTP_CMD_ROW_BITS 0x0000ffffu
+#define RP2350_OTP_CMD_WRITE_BITS 0x00010000u
+#define RP2350_OTP_CMD_ECC_BITS 0x00020000u
+
+#define RP2350_BOOTROM_ERROR_NOT_PERMITTED ((mm_u32)0u - 4u)
+#define RP2350_BOOTROM_ERROR_INVALID_ARG ((mm_u32)0u - 5u)
+#define RP2350_BOOTROM_ERROR_BAD_ALIGNMENT ((mm_u32)0u - 11u)
+#define RP2350_BOOTROM_ERROR_UNSUPPORTED_MODIFICATION ((mm_u32)0u - 18u)
+
+#define RP2350_OTP_ROW_COUNT 0x800u
+#define RP2350_OTP_ROW_BYTES 32u
+#define RP2350_OTP_SW_LOCK_COUNT 64u
 #define HSTX_FIFO_STAT 0x000u
 #define HSTX_FIFO_FIFO 0x004u
 #define HSTX_FIFO_STAT_LEVEL_MASK 0x000000ffu
@@ -233,6 +249,10 @@
 #define USB_DPRAM_SIZE 0x1000u
 #define DMA_BASE 0x50000000u
 #define DMA_SIZE 0x1000u
+#define WATCHDOG_BASE 0x400d8000u
+#define WATCHDOG_SIZE 0x1000u
+#define OTP_BASE 0x40120000u
+#define OTP_SIZE 0x1000u
 #define MMIO_ALIAS_SIZE 0x4000u
 
 #define DMA_CH0_READ_ADDR 0x000u
@@ -258,6 +278,13 @@
 #define DMA_CTRL_INCR_WRITE_BIT 6u
 #define DMA_CTRL_BUSY_BIT 26u
 #define DMA_CTRL_BUSY (1u << DMA_CTRL_BUSY_BIT)
+
+#define WATCHDOG_CTRL 0x000u
+#define WATCHDOG_LOAD 0x004u
+#define WATCHDOG_REASON 0x008u
+#define WATCHDOG_CTRL_TRIGGER_BIT 31u
+#define WATCHDOG_REASON_TIMER (1u << 0)
+#define WATCHDOG_REASON_FORCE (1u << 1)
 
 struct reset_state {
     mm_u32 regs[RESETS_SIZE / 4u];
@@ -341,11 +368,18 @@ static struct bank_regs hstx_ctrl;
 static struct bank_regs xip_ctrl;
 static struct bank_regs xip_aux;
 static struct bank_regs qmi_regs;
+static struct bank_regs watchdog;
 static struct bank_regs bootram;
 static struct bank_regs ticks;
 static struct rp2350_hstx_fifo hstx_fifo;
 static struct rp2350_qmi_fifo qmi_rx;
 static struct rp2350_qmi_fifo qmi_tx;
+static struct {
+    mm_u32 sw_lock[RP2350_OTP_SW_LOCK_COUNT];
+    struct mm_otp otp;
+} otp_state;
+static struct rp2350_boot_info rp2350_boot_info;
+static mm_u32 rp2350_watchdog_reason_pending = 0u;
 static struct {
     mm_u32 read_addr;
     mm_u32 write_addr;
@@ -429,6 +463,30 @@ static void rp2350_partition_table_init(void)
     pt->unpartitioned_space_permissions_and_flags =
         RP2350_PICOBIN_PARTITION_PERMISSION_NSBOOT_R_BITS |
         RP2350_PICOBIN_PARTITION_PERMISSION_NSBOOT_W_BITS;
+}
+
+void mm_rp2350_boot_info_reset(void)
+{
+    memset(&rp2350_boot_info, 0, sizeof(rp2350_boot_info));
+}
+
+void mm_rp2350_set_boot_info(mm_i8 diagnostic_partition,
+                             mm_u8 boot_type,
+                             mm_i8 partition,
+                             mm_u8 tbyb_info,
+                             mm_u32 boot_diagnostic,
+                             mm_u32 reboot_param0,
+                             mm_u32 reboot_param1)
+{
+    mm_u32 boot_word = 0u;
+    boot_word |= (mm_u32)(mm_u8)diagnostic_partition;
+    boot_word |= ((mm_u32)boot_type) << 8;
+    boot_word |= ((mm_u32)(mm_u8)partition) << 16;
+    boot_word |= ((mm_u32)tbyb_info) << 24;
+    rp2350_boot_info.boot_word = boot_word;
+    rp2350_boot_info.boot_diagnostic = boot_diagnostic;
+    rp2350_boot_info.reboot_params[0] = reboot_param0;
+    rp2350_boot_info.reboot_params[1] = reboot_param1;
 }
 
 static mm_u32 rp2350_flash_devinfo_value(mm_u32 flash_size)
@@ -1006,6 +1064,68 @@ static mm_bool bootram_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_
     }
     b->regs[offset / 4u] = value;
     return MM_TRUE;
+}
+
+static mm_bool otp_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    mm_u32 idx;
+    (void)opaque;
+    if (value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > OTP_SIZE) return MM_FALSE;
+    idx = offset / 4u;
+    if (idx < RP2350_OTP_SW_LOCK_COUNT) {
+        *value_out = read_slice(otp_state.sw_lock[idx], offset & 3u, size_bytes);
+        return MM_TRUE;
+    }
+    *value_out = 0u;
+    return MM_TRUE;
+}
+
+static mm_bool otp_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    mm_u32 idx;
+    (void)opaque;
+    if (size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > OTP_SIZE) return MM_FALSE;
+    idx = offset / 4u;
+    if (idx < RP2350_OTP_SW_LOCK_COUNT) {
+        mm_u32 reg = otp_state.sw_lock[idx];
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        otp_state.sw_lock[idx] |= reg;
+        return MM_TRUE;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool watchdog_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    if (b == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > WATCHDOG_SIZE) return MM_FALSE;
+    return bank_read(b, offset, size_bytes, value_out);
+}
+
+static mm_bool watchdog_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    mm_u32 reg;
+    if (b == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > WATCHDOG_SIZE) return MM_FALSE;
+    if (offset == WATCHDOG_REASON) {
+        return MM_TRUE;
+    }
+    if (offset == WATCHDOG_CTRL) {
+        reg = b->regs[offset / 4u];
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        if ((reg & (1u << WATCHDOG_CTRL_TRIGGER_BIT)) != 0u) {
+            rp2350_watchdog_reason_pending = WATCHDOG_REASON_FORCE;
+            mm_system_request_reset();
+            reg &= ~(1u << WATCHDOG_CTRL_TRIGGER_BIT);
+        }
+        b->regs[offset / 4u] = reg;
+        return MM_TRUE;
+    }
+    return bank_write(b, offset, size_bytes, value);
 }
 
 static void pll_update_status(struct bank_regs *pll)
@@ -2193,6 +2313,20 @@ mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus)
     reg.write = ticks_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = WATCHDOG_BASE;
+    reg.opaque = &watchdog;
+    reg.read = watchdog_read;
+    reg.write = watchdog_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = OTP_SIZE;
+    reg.base = OTP_BASE;
+    reg.opaque = 0;
+    reg.read = otp_read;
+    reg.write = otp_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
     if (!mm_rp2350_usb_register_mmio(bus)) return MM_FALSE;
 
     mm_gpio_bank_set_reader(rp2350_gpio_bank_read, 0);
@@ -2223,7 +2357,12 @@ void mm_rp2350_mmio_reset(void)
     memset(&xip_aux, 0, sizeof(xip_aux));
     memset(&qmi_regs, 0, sizeof(qmi_regs));
     memset(&dma_ch0, 0, sizeof(dma_ch0));
+    memset(&watchdog, 0, sizeof(watchdog));
     memset(&bootram, 0, sizeof(bootram));
+    memset(otp_state.sw_lock, 0, sizeof(otp_state.sw_lock));
+    mm_rp2350_boot_info_reset();
+    watchdog.regs[WATCHDOG_REASON / 4u] = rp2350_watchdog_reason_pending;
+    rp2350_watchdog_reason_pending = 0u;
     bootram.regs[0] = BOOTRAM_BOOT2_STUB_WORD;
     bootram.regs[BOOTRAM_FLASH_DEVINFO_OFFSET / 4u] = rp2350_flash_devinfo_value(rp2350_flash.flash_size);
     bootram.regs[BOOTRAM_BOOTLOCK_STAT / 4u] = 0xffu;
@@ -2549,6 +2688,118 @@ mm_bool mm_rp2350_flash_erase_all(void)
     return MM_TRUE;
 }
 
+mm_u32 mm_rp2350_otp_access(enum mm_sec_state sec,
+                            mm_u32 flags,
+                            mm_u8 *data,
+                            mm_u32 len)
+{
+    mm_u32 row = flags & RP2350_OTP_CMD_ROW_BITS;
+    mm_u32 page = row / 0x40u;
+    mm_bool write = (flags & RP2350_OTP_CMD_WRITE_BITS) != 0u;
+    mm_bool ecc = (flags & RP2350_OTP_CMD_ECC_BITS) != 0u;
+    mm_u8 *row_data;
+    mm_u8 *otp_data;
+    mm_u32 i;
+    mm_u32 lock = 0u;
+    mm_u32 lock_mode = 0u;
+    mm_bool row_empty = MM_FALSE;
+
+    if (data == 0 || len == 0u) return RP2350_BOOTROM_ERROR_INVALID_ARG;
+    if (row >= RP2350_OTP_ROW_COUNT) return RP2350_BOOTROM_ERROR_INVALID_ARG;
+    if (page < RP2350_OTP_SW_LOCK_COUNT) {
+        lock = otp_state.sw_lock[page];
+        if (sec == MM_SECURE) {
+            lock_mode = lock & 0x3u;
+        } else {
+            lock_mode = (lock >> 2) & 0x3u;
+        }
+        if (lock_mode == 3u) {
+            return RP2350_BOOTROM_ERROR_NOT_PERMITTED;
+        }
+        if (write && lock_mode != 0u) {
+            return RP2350_BOOTROM_ERROR_NOT_PERMITTED;
+        }
+    }
+    otp_data = mm_otp_data(&otp_state.otp);
+    if (otp_data == 0) return RP2350_BOOTROM_ERROR_INVALID_ARG;
+    row_data = otp_data + (row * RP2350_OTP_ROW_BYTES);
+    row_empty = MM_TRUE;
+    for (i = 0; i < RP2350_OTP_ROW_BYTES; ++i) {
+        if (row_data[i] != 0xffu) {
+            row_empty = MM_FALSE;
+            break;
+        }
+    }
+    if (ecc) {
+        if ((len & 1u) != 0u) return RP2350_BOOTROM_ERROR_BAD_ALIGNMENT;
+        if (len > RP2350_OTP_ROW_BYTES) return RP2350_BOOTROM_ERROR_INVALID_ARG;
+        if (write) {
+            mm_u8 tmp[RP2350_OTP_ROW_BYTES];
+            for (i = 0; i < len; ++i) {
+                tmp[i] = (mm_u8)(~data[i]);
+            }
+            if (!mm_otp_write(&otp_state.otp, row * RP2350_OTP_ROW_BYTES, tmp, len)) {
+                return RP2350_BOOTROM_ERROR_UNSUPPORTED_MODIFICATION;
+            }
+            return 0u;
+        }
+        if (row_empty) {
+            memset(data, 0, len);
+            return 0u;
+        }
+        if (!mm_otp_read(&otp_state.otp, row * RP2350_OTP_ROW_BYTES, data, len)) {
+            return RP2350_BOOTROM_ERROR_INVALID_ARG;
+        }
+        for (i = 0; i < len; ++i) {
+            data[i] = (mm_u8)(~data[i]);
+        }
+        return 0u;
+    }
+
+    if ((len & 3u) != 0u) return RP2350_BOOTROM_ERROR_BAD_ALIGNMENT;
+    if ((len / 4u) * 3u > RP2350_OTP_ROW_BYTES) return RP2350_BOOTROM_ERROR_INVALID_ARG;
+    if (write) {
+        mm_u32 word_count = len / 4u;
+        for (i = 0; i < word_count; ++i) {
+            mm_u32 base = i * 4u;
+            mm_u32 store = i * 3u;
+            mm_u8 b0 = data[base + 0u];
+            mm_u8 b1 = data[base + 1u];
+            mm_u8 b2 = data[base + 2u];
+            mm_u8 tmp[3];
+            tmp[0] = (mm_u8)(~b0);
+            tmp[1] = (mm_u8)(~b1);
+            tmp[2] = (mm_u8)(~b2);
+            if (!mm_otp_write(&otp_state.otp, (row * RP2350_OTP_ROW_BYTES) + store, tmp, 3u)) {
+                return RP2350_BOOTROM_ERROR_UNSUPPORTED_MODIFICATION;
+            }
+        }
+        return 0u;
+    }
+
+    {
+        mm_u32 word_count = len / 4u;
+        if (row_empty) {
+            memset(data, 0, len);
+        } else {
+            for (i = 0; i < word_count; ++i) {
+                mm_u32 base = i * 4u;
+                mm_u32 store = i * 3u;
+                data[base + 0u] = (mm_u8)(~row_data[store + 0u]);
+                data[base + 1u] = (mm_u8)(~row_data[store + 1u]);
+                data[base + 2u] = (mm_u8)(~row_data[store + 2u]);
+                data[base + 3u] = 0u;
+            }
+        }
+    }
+    return 0u;
+}
+
+void mm_rp2350_otp_init(const char *target_name)
+{
+    mm_otp_init(&otp_state.otp, target_name, RP2350_OTP_ROW_COUNT * RP2350_OTP_ROW_BYTES);
+}
+
 mm_u32 mm_rp2350_flash_size(void)
 {
     return rp2350_flash.flash_size;
@@ -2567,6 +2818,11 @@ const struct rp2350_partition_table *mm_rp2350_partition_table_get(void)
 struct rp2350_partition_table *mm_rp2350_partition_table_get_mut(void)
 {
     return rp2350_partition_table_ptr();
+}
+
+const struct rp2350_boot_info *mm_rp2350_boot_info_get(void)
+{
+    return &rp2350_boot_info;
 }
 
 void mm_rp2350_set_active_core(mm_u32 core_id)
