@@ -23,3 +23,8 @@ void __attribute__((weak)) mm_system_request_reset(void)
 {
     /* Tests link without main.c; provide a weak stub for SCS reset requests. */
 }
+
+void __attribute__((weak)) mm_system_request_reset_boot(int mode)
+{
+    (void)mode;
+}

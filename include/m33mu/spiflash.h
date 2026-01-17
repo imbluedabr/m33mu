@@ -40,6 +40,7 @@ void mm_spiflash_register_mmap_regions(struct mmio_bus *bus);
 void mm_spiflash_register_prot_regions(struct mm_prot_ctx *prot);
 size_t mm_spiflash_count(void);
 mm_bool mm_spiflash_get_info(size_t index, struct mm_spiflash_info *out);
+mm_bool mm_spiflash_get_storage(size_t index, mm_u8 **data_out, size_t *size_out);
 
 struct mm_spiflash;
 struct mm_spiflash *mm_spiflash_get_for_bus(int bus);

@@ -43,10 +43,15 @@
 #define XIP_QMI_SIZE  0x1000u
 #define XIP_AUX_BASE  0x50500000u
 #define XIP_AUX_SIZE  0x1000u
+#define XIP_MAINT_BASE 0x18000000u
+#define XIP_MAINT_SIZE 0x04000000u
 #define HSTX_FIFO_BASE 0x50600000u
 #define HSTX_FIFO_SIZE 0x1000u
 #define BOOTRAM_BASE  0x400e0000u
 #define BOOTRAM_SIZE  0x1000u
+#define BOOTRAM_FLASH_DEVINFO_OFFSET 0x200u
+#define BOOTRAM_PARTITION_TABLE_OFFSET 0x0f60u
+#define BOOTRAM_BOOT2_STUB_WORD 0x00004770u
 #define TICKS_BASE 0x40108000u
 #define TICKS_SIZE 0x1000u
 #define ACCESS_CTRL_BASE 0x40060000u
@@ -87,6 +92,21 @@
 
 #define HSTX_CTRL_CSR 0x000u
 
+#define XIP_STAT 0x008u
+#define XIP_STAT_FIFO_FULL  (1u << 2)
+#define XIP_STAT_FIFO_EMPTY (1u << 1)
+#define XIP_STREAM_ADDR 0x014u
+#define XIP_STREAM_CTR  0x018u
+#define XIP_STREAM_FIFO 0x01cu
+
+#define RP2350_FLASH_SECTOR_SIZE 4096u
+#define RP2350_PICOBIN_PARTITION_PERMISSION_S_R_BITS 0x04000000u
+#define RP2350_PICOBIN_PARTITION_PERMISSION_S_W_BITS 0x08000000u
+#define RP2350_PICOBIN_PARTITION_PERMISSION_NS_R_BITS 0x10000000u
+#define RP2350_PICOBIN_PARTITION_PERMISSION_NS_W_BITS 0x20000000u
+#define RP2350_PICOBIN_PARTITION_PERMISSION_NSBOOT_R_BITS 0x40000000u
+#define RP2350_PICOBIN_PARTITION_PERMISSION_NSBOOT_W_BITS 0x80000000u
+#define RP2350_PICOBIN_PARTITION_PERMISSIONS_BITS 0xfc000000u
 #define HSTX_FIFO_STAT 0x000u
 #define HSTX_FIFO_FIFO 0x004u
 #define HSTX_FIFO_STAT_LEVEL_MASK 0x000000ffu
@@ -211,7 +231,33 @@
 #define USB_SIZE  0x1000u
 #define USB_DPRAM_BASE 0x50100000u
 #define USB_DPRAM_SIZE 0x1000u
+#define DMA_BASE 0x50000000u
+#define DMA_SIZE 0x1000u
 #define MMIO_ALIAS_SIZE 0x4000u
+
+#define DMA_CH0_READ_ADDR 0x000u
+#define DMA_CH0_WRITE_ADDR 0x004u
+#define DMA_CH0_TRANS_COUNT 0x008u
+#define DMA_CH0_CTRL_TRIG 0x00cu
+#define DMA_CH0_AL1_CTRL 0x010u
+#define DMA_CH0_AL1_READ_ADDR 0x014u
+#define DMA_CH0_AL1_WRITE_ADDR 0x018u
+#define DMA_CH0_AL1_TRANS_COUNT_TRIG 0x01cu
+#define DMA_CH0_AL2_CTRL 0x020u
+#define DMA_CH0_AL2_TRANS_COUNT 0x024u
+#define DMA_CH0_AL2_READ_ADDR 0x028u
+#define DMA_CH0_AL2_WRITE_ADDR_TRIG 0x02cu
+#define DMA_CH0_AL3_CTRL 0x030u
+#define DMA_CH0_AL3_WRITE_ADDR 0x034u
+#define DMA_CH0_AL3_TRANS_COUNT 0x038u
+#define DMA_CH0_AL3_READ_ADDR_TRIG 0x03cu
+
+#define DMA_CTRL_EN_BIT 0u
+#define DMA_CTRL_DATA_SIZE_SHIFT 2u
+#define DMA_CTRL_INCR_READ_BIT 4u
+#define DMA_CTRL_INCR_WRITE_BIT 6u
+#define DMA_CTRL_BUSY_BIT 26u
+#define DMA_CTRL_BUSY (1u << DMA_CTRL_BUSY_BIT)
 
 struct reset_state {
     mm_u32 regs[RESETS_SIZE / 4u];
@@ -301,6 +347,12 @@ static struct rp2350_hstx_fifo hstx_fifo;
 static struct rp2350_qmi_fifo qmi_rx;
 static struct rp2350_qmi_fifo qmi_tx;
 static struct {
+    mm_u32 read_addr;
+    mm_u32 write_addr;
+    mm_u32 transfer_count;
+    mm_u32 ctrl;
+} dma_ch0;
+static struct {
     mm_u32 lock;
     mm_u32 force_core_ns;
     mm_u32 gpio_mask0;
@@ -357,6 +409,41 @@ static struct {
     mm_u32 flash_size;
     const struct mm_flash_persist *persist;
 } rp2350_flash;
+
+static struct rp2350_partition_table *rp2350_partition_table_ptr(void)
+{
+    return (struct rp2350_partition_table *)&bootram.regs[BOOTRAM_PARTITION_TABLE_OFFSET / 4u];
+}
+
+static const struct rp2350_partition_table *rp2350_partition_table_ptr_const(void)
+{
+    return (const struct rp2350_partition_table *)&bootram.regs[BOOTRAM_PARTITION_TABLE_OFFSET / 4u];
+}
+
+static void rp2350_partition_table_init(void)
+{
+    struct rp2350_partition_table *pt = rp2350_partition_table_ptr();
+    if (pt == 0) return;
+    memset(pt, 0, sizeof(*pt));
+    pt->loaded = 1u;
+    pt->unpartitioned_space_permissions_and_flags =
+        RP2350_PICOBIN_PARTITION_PERMISSION_NSBOOT_R_BITS |
+        RP2350_PICOBIN_PARTITION_PERMISSION_NSBOOT_W_BITS;
+}
+
+static mm_u32 rp2350_flash_devinfo_value(mm_u32 flash_size)
+{
+    mm_u32 size_k;
+    mm_u32 val = 0u;
+    if (flash_size < 8192u) return 0u;
+    size_k = flash_size / 8192u;
+    while (size_k > 0u && val < 0x1fu) {
+        size_k >>= 1u;
+        val++;
+    }
+    if (val > 0x0fu) val = 0x0fu;
+    return (val << 8) & 0x00000f00u;
+}
 
 static mm_u32 read_slice(mm_u32 reg, mm_u32 offset_in_reg, mm_u32 size_bytes);
 static mm_bool bank_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out);
@@ -867,11 +954,9 @@ static mm_bool bootram_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u
     mm_u32 lock_mask;
     if (b == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
     if ((offset + size_bytes) > BOOTRAM_SIZE) return MM_FALSE;
-    if (size_bytes != 4u) {
-        return bank_read(b, offset, size_bytes, value_out);
-    }
     if (offset == BOOTRAM_BOOTLOCK_STAT) {
-        *value_out = b->regs[offset / 4u] & 0xffu;
+        mm_u32 v = b->regs[offset / 4u] & 0xffu;
+        *value_out = read_slice(v, offset & 3u, size_bytes);
         return MM_TRUE;
     }
     if (offset >= BOOTRAM_BOOTLOCK0 && offset <= BOOTRAM_BOOTLOCK7) {
@@ -879,11 +964,14 @@ static mm_bool bootram_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u
         lock_mask = 1u << lock_idx;
         if ((b->regs[BOOTRAM_BOOTLOCK_STAT / 4u] & lock_mask) != 0u) {
             b->regs[BOOTRAM_BOOTLOCK_STAT / 4u] &= ~lock_mask;
-            *value_out = lock_mask;
+            *value_out = read_slice(lock_mask, offset & 3u, size_bytes);
         } else {
             *value_out = 0u;
         }
         return MM_TRUE;
+    }
+    if (size_bytes != 4u) {
+        return bank_read(b, offset, size_bytes, value_out);
     }
     *value_out = b->regs[offset / 4u];
     return MM_TRUE;
@@ -896,15 +984,14 @@ static mm_bool bootram_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_
     mm_u32 lock_mask;
     if (b == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
     if ((offset + size_bytes) > BOOTRAM_SIZE) return MM_FALSE;
-    if (size_bytes != 4u) {
-        return bank_write(b, offset, size_bytes, value);
-    }
     if (offset == BOOTRAM_WRITE_ONCE0 || offset == BOOTRAM_WRITE_ONCE1) {
         b->regs[offset / 4u] |= value;
         return MM_TRUE;
     }
     if (offset == BOOTRAM_BOOTLOCK_STAT) {
-        b->regs[offset / 4u] = value & 0xffu;
+        mm_u32 reg = b->regs[offset / 4u] & 0xffu;
+        reg = apply_write(reg, offset & 3u, size_bytes, value) & 0xffu;
+        b->regs[offset / 4u] = reg;
         return MM_TRUE;
     }
     if (offset >= BOOTRAM_BOOTLOCK0 && offset <= BOOTRAM_BOOTLOCK7) {
@@ -913,6 +1000,9 @@ static mm_bool bootram_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_
         b->regs[BOOTRAM_BOOTLOCK_STAT / 4u] |= lock_mask;
         b->regs[offset / 4u] = 0u;
         return MM_TRUE;
+    }
+    if (size_bytes != 4u) {
+        return bank_write(b, offset, size_bytes, value);
     }
     b->regs[offset / 4u] = value;
     return MM_TRUE;
@@ -1562,13 +1652,204 @@ static mm_bool qmi_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     return bank_write(&qmi_regs, offset, size_bytes, value);
 }
 
+static mm_u32 xip_stream_read_word(void)
+{
+    struct mm_memmap *map = mm_memmap_current();
+    mm_u32 addr = xip_ctrl.regs[XIP_STREAM_ADDR / 4u];
+    mm_u32 remaining = xip_ctrl.regs[XIP_STREAM_CTR / 4u];
+    mm_u32 value = 0u;
+    if (remaining == 0u) return 0u;
+    if (map != 0) {
+        (void)mm_memmap_read(map, MM_NONSECURE, addr, 4u, &value);
+    }
+    xip_ctrl.regs[XIP_STREAM_ADDR / 4u] = addr + 4u;
+    xip_ctrl.regs[XIP_STREAM_CTR / 4u] = remaining - 1u;
+    return value;
+}
+
+static mm_bool xip_ctrl_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    mm_u32 stat;
+    if (b == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > XIP_CTRL_SIZE) return MM_FALSE;
+    if (offset == XIP_STAT) {
+        stat = 0u;
+        if (xip_ctrl.regs[XIP_STREAM_CTR / 4u] == 0u) {
+            stat |= XIP_STAT_FIFO_EMPTY;
+        }
+        *value_out = read_slice(stat, offset & 3u, size_bytes);
+        return MM_TRUE;
+    }
+    if (offset == XIP_STREAM_FIFO) {
+        mm_u32 data = xip_stream_read_word();
+        *value_out = read_slice(data, offset & 3u, size_bytes);
+        return MM_TRUE;
+    }
+    return bank_read(b, offset, size_bytes, value_out);
+}
+
+static mm_bool xip_ctrl_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    mm_u32 reg;
+    if (b == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > XIP_CTRL_SIZE) return MM_FALSE;
+    if (offset == XIP_STREAM_ADDR || offset == XIP_STREAM_CTR) {
+        reg = b->regs[offset / 4u];
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        b->regs[offset / 4u] = reg;
+        return MM_TRUE;
+    }
+    return bank_write(b, offset, size_bytes, value);
+}
+
+static void dma_do_transfer(void)
+{
+    struct mm_memmap *map = mm_memmap_current();
+    mm_u32 count = dma_ch0.transfer_count & 0x0fffffffu;
+    mm_u32 data_size = (dma_ch0.ctrl >> DMA_CTRL_DATA_SIZE_SHIFT) & 0x3u;
+    mm_u32 step = (data_size == 0u) ? 1u : (data_size == 1u) ? 2u : 4u;
+    mm_u32 read_addr = dma_ch0.read_addr;
+    mm_u32 write_addr = dma_ch0.write_addr;
+    mm_bool incr_read = ((dma_ch0.ctrl >> DMA_CTRL_INCR_READ_BIT) & 1u) != 0u;
+    mm_bool incr_write = ((dma_ch0.ctrl >> DMA_CTRL_INCR_WRITE_BIT) & 1u) != 0u;
+    mm_u32 i;
+    mm_u32 value = 0u;
+
+    dma_ch0.ctrl |= DMA_CTRL_BUSY;
+    if (map != 0) {
+        for (i = 0; i < count; ++i) {
+            value = 0u;
+            (void)mm_memmap_read(map, MM_NONSECURE, read_addr, step, &value);
+            (void)mm_memmap_write(map, MM_NONSECURE, write_addr, step, value);
+            if (incr_read) read_addr += step;
+            if (incr_write) write_addr += step;
+        }
+    }
+    dma_ch0.read_addr = read_addr;
+    dma_ch0.write_addr = write_addr;
+    dma_ch0.transfer_count &= 0xf0000000u;
+    dma_ch0.ctrl &= ~(DMA_CTRL_BUSY | (1u << DMA_CTRL_EN_BIT));
+}
+
+static void dma_start_if_enabled(void)
+{
+    if ((dma_ch0.ctrl & (1u << DMA_CTRL_EN_BIT)) != 0u) {
+        dma_do_transfer();
+    }
+}
+
+static mm_bool dma_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    (void)opaque;
+    if (value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if (offset >= DMA_SIZE) return MM_FALSE;
+    switch (offset) {
+    case DMA_CH0_READ_ADDR:
+        *value_out = read_slice(dma_ch0.read_addr, offset & 3u, size_bytes);
+        return MM_TRUE;
+    case DMA_CH0_WRITE_ADDR:
+        *value_out = read_slice(dma_ch0.write_addr, offset & 3u, size_bytes);
+        return MM_TRUE;
+    case DMA_CH0_TRANS_COUNT:
+        *value_out = read_slice(dma_ch0.transfer_count, offset & 3u, size_bytes);
+        return MM_TRUE;
+    case DMA_CH0_CTRL_TRIG:
+    case DMA_CH0_AL1_CTRL:
+    case DMA_CH0_AL2_CTRL:
+    case DMA_CH0_AL3_CTRL:
+        *value_out = read_slice(dma_ch0.ctrl, offset & 3u, size_bytes);
+        return MM_TRUE;
+    case DMA_CH0_AL1_READ_ADDR:
+    case DMA_CH0_AL2_READ_ADDR:
+    case DMA_CH0_AL3_READ_ADDR_TRIG:
+        *value_out = read_slice(dma_ch0.read_addr, offset & 3u, size_bytes);
+        return MM_TRUE;
+    case DMA_CH0_AL1_WRITE_ADDR:
+    case DMA_CH0_AL2_WRITE_ADDR_TRIG:
+    case DMA_CH0_AL3_WRITE_ADDR:
+        *value_out = read_slice(dma_ch0.write_addr, offset & 3u, size_bytes);
+        return MM_TRUE;
+    case DMA_CH0_AL1_TRANS_COUNT_TRIG:
+    case DMA_CH0_AL2_TRANS_COUNT:
+    case DMA_CH0_AL3_TRANS_COUNT:
+        *value_out = read_slice(dma_ch0.transfer_count, offset & 3u, size_bytes);
+        return MM_TRUE;
+    default:
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+}
+
+static mm_bool dma_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    mm_u32 reg;
+    (void)opaque;
+    if (size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if (offset >= DMA_SIZE) return MM_FALSE;
+    switch (offset) {
+    case DMA_CH0_READ_ADDR:
+    case DMA_CH0_AL1_READ_ADDR:
+    case DMA_CH0_AL2_READ_ADDR:
+        reg = dma_ch0.read_addr;
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        dma_ch0.read_addr = reg;
+        return MM_TRUE;
+    case DMA_CH0_WRITE_ADDR:
+    case DMA_CH0_AL1_WRITE_ADDR:
+    case DMA_CH0_AL3_WRITE_ADDR:
+        reg = dma_ch0.write_addr;
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        dma_ch0.write_addr = reg;
+        return MM_TRUE;
+    case DMA_CH0_TRANS_COUNT:
+    case DMA_CH0_AL2_TRANS_COUNT:
+    case DMA_CH0_AL3_TRANS_COUNT:
+        reg = dma_ch0.transfer_count;
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        dma_ch0.transfer_count = reg;
+        return MM_TRUE;
+    case DMA_CH0_CTRL_TRIG:
+    case DMA_CH0_AL1_CTRL:
+    case DMA_CH0_AL2_CTRL:
+    case DMA_CH0_AL3_CTRL:
+        reg = dma_ch0.ctrl;
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        dma_ch0.ctrl = reg;
+        dma_start_if_enabled();
+        return MM_TRUE;
+    case DMA_CH0_AL1_TRANS_COUNT_TRIG:
+        reg = dma_ch0.transfer_count;
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        dma_ch0.transfer_count = reg;
+        dma_start_if_enabled();
+        return MM_TRUE;
+    case DMA_CH0_AL2_WRITE_ADDR_TRIG:
+        reg = dma_ch0.write_addr;
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        dma_ch0.write_addr = reg;
+        dma_start_if_enabled();
+        return MM_TRUE;
+    case DMA_CH0_AL3_READ_ADDR_TRIG:
+        reg = dma_ch0.read_addr;
+        reg = apply_write(reg, offset & 3u, size_bytes, value);
+        dma_ch0.read_addr = reg;
+        dma_start_if_enabled();
+        return MM_TRUE;
+    default:
+        return MM_TRUE;
+    }
+}
+
 static mm_bool xip_aux_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
     struct bank_regs *b = (struct bank_regs *)opaque;
     if (b == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
     if ((offset + size_bytes) > XIP_AUX_SIZE) return MM_FALSE;
     if (offset == 0x000u) {
-        *value_out = 0u;
+        mm_u32 data = xip_stream_read_word();
+        *value_out = read_slice(data, offset & 3u, size_bytes);
         return MM_TRUE;
     }
     if (offset == 0x004u) {
@@ -1593,6 +1874,24 @@ static mm_bool xip_aux_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_
         return MM_TRUE;
     }
     return bank_write(b, offset, size_bytes, value);
+}
+
+static mm_bool xip_maint_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    (void)opaque;
+    (void)offset;
+    if (value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    *value_out = 0u;
+    return MM_TRUE;
+}
+
+static mm_bool xip_maint_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    (void)opaque;
+    (void)offset;
+    (void)value;
+    if (size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    return MM_TRUE;
 }
 
 static mm_bool xosc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
@@ -1840,8 +2139,8 @@ mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus)
     reg.size = MMIO_ALIAS_SIZE;
     reg.base = XIP_CTRL_BASE;
     reg.opaque = &xip_ctrl;
-    reg.read = bank_read;
-    reg.write = bank_write;
+    reg.read = xip_ctrl_read;
+    reg.write = xip_ctrl_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     reg.size = MMIO_ALIAS_SIZE;
@@ -1856,6 +2155,21 @@ mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus)
     reg.opaque = &xip_aux;
     reg.read = xip_aux_read;
     reg.write = xip_aux_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    memset(&reg, 0, sizeof(reg));
+    reg.size = XIP_MAINT_SIZE;
+    reg.base = XIP_MAINT_BASE;
+    reg.opaque = 0;
+    reg.read = xip_maint_read;
+    reg.write = xip_maint_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = DMA_SIZE;
+    reg.base = DMA_BASE;
+    reg.opaque = 0;
+    reg.read = dma_read;
+    reg.write = dma_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     reg.size = HSTX_FIFO_SIZE;
@@ -1908,8 +2222,12 @@ void mm_rp2350_mmio_reset(void)
     memset(&xip_ctrl, 0, sizeof(xip_ctrl));
     memset(&xip_aux, 0, sizeof(xip_aux));
     memset(&qmi_regs, 0, sizeof(qmi_regs));
+    memset(&dma_ch0, 0, sizeof(dma_ch0));
     memset(&bootram, 0, sizeof(bootram));
+    bootram.regs[0] = BOOTRAM_BOOT2_STUB_WORD;
+    bootram.regs[BOOTRAM_FLASH_DEVINFO_OFFSET / 4u] = rp2350_flash_devinfo_value(rp2350_flash.flash_size);
     bootram.regs[BOOTRAM_BOOTLOCK_STAT / 4u] = 0xffu;
+    rp2350_partition_table_init();
     memset(&ticks, 0, sizeof(ticks));
     mm_rp2350_usb_reset();
     mm_rp2350_coproc_reset();
@@ -2166,6 +2484,8 @@ void mm_rp2350_flash_bind(struct mm_memmap *map,
     rp2350_flash.flash = flash;
     rp2350_flash.flash_size = flash_size;
     rp2350_flash.persist = persist;
+    bootram.regs[BOOTRAM_FLASH_DEVINFO_OFFSET / 4u] = rp2350_flash_devinfo_value(flash_size);
+    rp2350_partition_table_init();
 }
 
 mm_u64 mm_rp2350_cpu_hz(void)
@@ -2217,6 +2537,36 @@ mm_bool mm_rp2350_flash_program(struct mm_memmap *map,
         mm_flash_persist_flush((struct mm_flash_persist *)rp2350_flash.persist, flash_offs, count);
     }
     return MM_TRUE;
+}
+
+mm_bool mm_rp2350_flash_erase_all(void)
+{
+    if (rp2350_flash.flash == 0 || rp2350_flash.flash_size == 0) return MM_FALSE;
+    memset(rp2350_flash.flash, 0xff, rp2350_flash.flash_size);
+    if (rp2350_flash.persist != 0 && rp2350_flash.persist->enabled) {
+        mm_flash_persist_flush((struct mm_flash_persist *)rp2350_flash.persist, 0u, rp2350_flash.flash_size);
+    }
+    return MM_TRUE;
+}
+
+mm_u32 mm_rp2350_flash_size(void)
+{
+    return rp2350_flash.flash_size;
+}
+
+mm_u32 mm_rp2350_partition_table_addr(void)
+{
+    return BOOTRAM_BASE + BOOTRAM_PARTITION_TABLE_OFFSET;
+}
+
+const struct rp2350_partition_table *mm_rp2350_partition_table_get(void)
+{
+    return rp2350_partition_table_ptr_const();
+}
+
+struct rp2350_partition_table *mm_rp2350_partition_table_get_mut(void)
+{
+    return rp2350_partition_table_ptr();
 }
 
 void mm_rp2350_set_active_core(mm_u32 core_id)

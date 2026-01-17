@@ -666,6 +666,18 @@ mm_bool mm_spiflash_get_info(size_t index, struct mm_spiflash_info *out)
     return MM_TRUE;
 }
 
+mm_bool mm_spiflash_get_storage(size_t index, mm_u8 **data_out, size_t *size_out)
+{
+    const struct mm_spiflash *flash;
+    if (data_out == 0 || size_out == 0 || index >= g_spiflash_count) {
+        return MM_FALSE;
+    }
+    flash = &g_spiflash[index];
+    *data_out = flash->data;
+    *size_out = flash->size;
+    return MM_TRUE;
+}
+
 void mm_spiflash_register_mmap_regions(struct mmio_bus *bus)
 {
     size_t i;

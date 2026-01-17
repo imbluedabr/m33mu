@@ -74,6 +74,27 @@
 #define UFSR_DIVBYZERO (1u << 25)
 #define UFSR_STKOF (1u << 20)
 
+/* UF2 format constants (subset). */
+#define UF2_MAGIC_START0 0x0A324655u
+#define UF2_MAGIC_START1 0x9E5D5157u
+#define UF2_MAGIC_END    0x0AB16F30u
+#define UF2_FLAG_NOT_MAIN_FLASH          0x00000001u
+#define UF2_FLAG_FILE_CONTAINER          0x00001000u
+#define UF2_FLAG_FAMILY_ID_PRESENT       0x00002000u
+#define UF2_FLAG_MD5_PRESENT             0x00004000u
+#define UF2_FLAG_EXTENSION_FLAGS_PRESENT 0x00008000u
+#define UF2_EXTENSION_RP2_IGNORE_BLOCK   0x9957e304u
+
+#define UF2_PAYLOAD_SIZE 256u
+#define UF2_BLOCK_SIZE 512u
+
+#define UF2_FAMILY_ID_RP2040       0xe48bff56u
+#define UF2_FAMILY_ID_ABSOLUTE     0xe48bff57u
+#define UF2_FAMILY_ID_DATA         0xe48bff58u
+#define UF2_FAMILY_ID_RP2350_ARM_S 0xe48bff59u
+#define UF2_FAMILY_ID_RP2350_RISCV 0xe48bff5au
+#define UF2_FAMILY_ID_RP2350_ARM_NS 0xe48bff5bu
+
 /* BusFault Status Register (BFSR) bits within CFSR. */
 #define BFSR_IBUSERR   (1u << 8)
 #define BFSR_PRECISERR (1u << 9)
@@ -272,13 +293,37 @@ enum mm_image_type {
     MM_IMAGE_BIN = 0,
     MM_IMAGE_ELF,
     MM_IMAGE_IHEX,
+    MM_IMAGE_UF2,
     MM_IMAGE_UNKNOWN
+};
+
+enum mm_boot_mode {
+    MM_BOOT_FLASH = 0,
+    MM_BOOT_RAM,
+    MM_BOOT_SPIFLASH
+};
+
+enum mm_load_target {
+    MM_LOAD_FLASH = 0,
+    MM_LOAD_RAM,
+    MM_LOAD_SPIFLASH
+};
+
+struct mm_load_targets {
+    mm_u8 *flash;
+    size_t flash_size;
+    mm_u8 *ram;
+    size_t ram_size;
+    mm_u8 *spiflash;
+    size_t spiflash_size;
+    mm_u32 spiflash_base;
 };
 
 static int load_image_autodetect(struct mm_image_spec *img,
                                  const struct mm_target_cfg *cfg,
-                                 mm_u8 *flash,
-                                 size_t flash_size);
+                                 const struct mm_load_targets *targets,
+                                 enum mm_boot_mode boot_mode,
+                                 const char *cpu_name);
 
 static mm_u32 read_u32_le(const mm_u8 *buf)
 {
@@ -360,9 +405,10 @@ static mm_u32 default_rp2350_boot_offset(const char *cpu_name,
 
 static mm_bool reload_images(struct mm_image_spec *images,
                              int image_count,
-                             mm_u8 *flash,
-                             size_t flash_size,
+                             struct mm_load_targets *targets,
                              const struct mm_target_cfg *cfg,
+                             enum mm_boot_mode boot_mode,
+                             const char *cpu_name,
                              size_t *loaded_total,
                              size_t *loaded_max_end)
 {
@@ -370,14 +416,21 @@ static mm_bool reload_images(struct mm_image_spec *images,
     size_t idx;
     size_t total = 0;
     size_t max_end = 0;
-    if (images == 0 || flash == 0 || loaded_total == 0 || loaded_max_end == 0) {
+    if (images == 0 || targets == 0 || loaded_total == 0 || loaded_max_end == 0) {
         return MM_FALSE;
     }
-    for (idx = 0; idx < flash_size; ++idx) {
-        flash[idx] = 0xFFu;
+    if (targets->flash != 0) {
+        for (idx = 0; idx < targets->flash_size; ++idx) {
+            targets->flash[idx] = 0xFFu;
+        }
+    }
+    if (boot_mode == MM_BOOT_RAM && targets->ram != 0) {
+        for (idx = 0; idx < targets->ram_size; ++idx) {
+            targets->ram[idx] = (mm_u8)(rand() & 0xFF);
+        }
     }
     for (i = 0; i < image_count; ++i) {
-        if (load_image_autodetect(&images[i], cfg, flash, flash_size) != 0) {
+        if (load_image_autodetect(&images[i], cfg, targets, boot_mode, cpu_name) != 0) {
             fprintf(stderr, "failed to reload image %s\n", images[i].path);
             return MM_FALSE;
         }
@@ -1064,6 +1117,7 @@ static const char *image_type_name(mm_u8 type)
     switch (type) {
     case MM_IMAGE_ELF: return "ELF";
     case MM_IMAGE_IHEX: return "IHEX";
+    case MM_IMAGE_UF2: return "UF2";
     case MM_IMAGE_BIN: return "BIN";
     default: return "UNKNOWN";
     }
@@ -1080,6 +1134,7 @@ static mm_u8 detect_image_type(const char *path)
         if (ext != 0) {
             if (strcmp(ext, ".elf") == 0) return MM_IMAGE_ELF;
             if (strcmp(ext, ".hex") == 0 || strcmp(ext, ".ihex") == 0) return MM_IMAGE_IHEX;
+            if (strcmp(ext, ".uf2") == 0) return MM_IMAGE_UF2;
         }
     }
     f = fopen(path, "rb");
@@ -1090,6 +1145,13 @@ static mm_u8 detect_image_type(const char *path)
     fclose(f);
     if (n >= 4 && buf[0] == 0x7fu && buf[1] == 'E' && buf[2] == 'L' && buf[3] == 'F') {
         return MM_IMAGE_ELF;
+    }
+    if (n >= 8) {
+        mm_u32 m0 = (mm_u32)buf[0] | ((mm_u32)buf[1] << 8) | ((mm_u32)buf[2] << 16) | ((mm_u32)buf[3] << 24);
+        mm_u32 m1 = (mm_u32)buf[4] | ((mm_u32)buf[5] << 8) | ((mm_u32)buf[6] << 16) | ((mm_u32)buf[7] << 24);
+        if (m0 == UF2_MAGIC_START0 && m1 == UF2_MAGIC_START1) {
+            return MM_IMAGE_UF2;
+        }
     }
     if (n > 0 && buf[0] == ':') {
         return MM_IMAGE_IHEX;
@@ -1115,10 +1177,119 @@ static mm_bool map_flash_offset(const struct mm_target_cfg *cfg, mm_u32 addr, mm
     return MM_FALSE;
 }
 
+static mm_bool map_ram_offset(const struct mm_target_cfg *cfg, mm_u32 addr, mm_u32 *off_out)
+{
+    if (cfg == 0 || off_out == 0) return MM_FALSE;
+    if (addr >= cfg->ram_base_s && addr < (cfg->ram_base_s + cfg->ram_size_s)) {
+        *off_out = addr - cfg->ram_base_s;
+        return MM_TRUE;
+    }
+    if (addr >= cfg->ram_base_ns && addr < (cfg->ram_base_ns + cfg->ram_size_ns)) {
+        *off_out = addr - cfg->ram_base_ns;
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static mm_bool map_spiflash_offset(const struct mm_load_targets *targets, mm_u32 addr, mm_u32 *off_out)
+{
+    if (targets == 0 || off_out == 0 || targets->spiflash == 0) return MM_FALSE;
+    if (addr >= targets->spiflash_base && addr < (targets->spiflash_base + (mm_u32)targets->spiflash_size)) {
+        *off_out = addr - targets->spiflash_base;
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static mm_bool map_target_offset(const struct mm_target_cfg *cfg,
+                                 const struct mm_load_targets *targets,
+                                 mm_u32 addr,
+                                 enum mm_load_target *target_out,
+                                 mm_u32 *off_out)
+{
+    mm_u32 off = 0;
+    if (cfg == 0 || targets == 0 || target_out == 0 || off_out == 0) return MM_FALSE;
+    if (map_spiflash_offset(targets, addr, &off)) {
+        *target_out = MM_LOAD_SPIFLASH;
+        *off_out = off;
+        return MM_TRUE;
+    }
+    if (map_flash_offset(cfg, addr, &off)) {
+        *target_out = MM_LOAD_FLASH;
+        *off_out = off;
+        return MM_TRUE;
+    }
+    if (map_ram_offset(cfg, addr, &off)) {
+        *target_out = MM_LOAD_RAM;
+        *off_out = off;
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static mm_u8 *load_target_ptr(const struct mm_load_targets *targets,
+                              enum mm_load_target target,
+                              mm_u32 off,
+                              size_t len,
+                              size_t *size_out)
+{
+    mm_u8 *base = 0;
+    size_t size = 0;
+    if (targets == 0) return 0;
+    switch (target) {
+    case MM_LOAD_RAM:
+        base = targets->ram;
+        size = targets->ram_size;
+        break;
+    case MM_LOAD_SPIFLASH:
+        base = targets->spiflash;
+        size = targets->spiflash_size;
+        break;
+    case MM_LOAD_FLASH:
+    default:
+        base = targets->flash;
+        size = targets->flash_size;
+        break;
+    }
+    if (base == 0 || (size_t)off >= size) return 0;
+    if ((size_t)off + len > size) return 0;
+    if (size_out) *size_out = size;
+    return base + off;
+}
+
+static const char *boot_mode_name(enum mm_boot_mode mode)
+{
+    switch (mode) {
+    case MM_BOOT_RAM: return "ram";
+    case MM_BOOT_SPIFLASH: return "spiflash";
+    case MM_BOOT_FLASH:
+    default:
+        break;
+    }
+    return "flash";
+}
+
+static mm_bool parse_boot_mode(const char *s, enum mm_boot_mode *mode_out)
+{
+    if (s == 0 || mode_out == 0) return MM_FALSE;
+    if (strcmp(s, "flash") == 0) {
+        *mode_out = MM_BOOT_FLASH;
+        return MM_TRUE;
+    }
+    if (strcmp(s, "ram") == 0) {
+        *mode_out = MM_BOOT_RAM;
+        return MM_TRUE;
+    }
+    if (strcmp(s, "spiflash") == 0) {
+        *mode_out = MM_BOOT_SPIFLASH;
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
 static int load_elf_segments(const char *path,
                              const struct mm_target_cfg *cfg,
-                             mm_u8 *flash,
-                             size_t flash_size,
+                             const struct mm_load_targets *targets,
                              mm_u32 offset,
                              mm_u32 *start_out,
                              mm_u32 *end_out,
@@ -1132,14 +1303,14 @@ static int load_elf_segments(const char *path,
     size_t phnum = 0;
     size_t i;
     mm_bool any = MM_FALSE;
-    mm_u32 min_off = 0xffffffffu;
-    mm_u32 max_off = 0u;
+    mm_u32 min_addr = 0xffffffffu;
+    mm_u32 max_addr = 0u;
     size_t loaded = 0;
 
     if (start_out) *start_out = 0u;
     if (end_out) *end_out = 0u;
     if (loaded_out) *loaded_out = 0u;
-    if (cfg == 0 || flash == 0 || flash_size == 0u) {
+    if (cfg == 0 || targets == 0) {
         return -1;
     }
     if (elf_version(EV_CURRENT) == EV_NONE) {
@@ -1170,6 +1341,8 @@ static int load_elf_segments(const char *path,
         mm_u32 addr;
         mm_u32 off;
         size_t to_read;
+        enum mm_load_target target;
+        mm_u8 *dst;
         if (gelf_getphdr(elf, (int)i, &phdr) == NULL) {
             continue;
         }
@@ -1180,35 +1353,29 @@ static int load_elf_segments(const char *path,
         if (addr == 0u) {
             addr = (mm_u32)phdr.p_vaddr;
         }
-        if (!map_flash_offset(cfg, addr, &off)) {
-            if (addr < cfg->flash_size_s) {
-                off = addr;
-            } else {
-                fprintf(stderr, "warning: ELF segment 0x%08lx out of flash range (file %s)\n",
-                        (unsigned long)addr, path);
-                continue;
-            }
-        }
-        if (addr < cfg->flash_size_s && offset != 0u) {
-            off += offset;
-        }
-        if ((size_t)off >= flash_size) {
-            fprintf(stderr, "warning: ELF segment offset 0x%08lx out of bounds (file %s)\n",
-                    (unsigned long)off, path);
+        if (!map_target_offset(cfg, targets, addr, &target, &off)) {
+            fprintf(stderr, "warning: ELF segment 0x%08lx out of range (file %s)\n",
+                    (unsigned long)addr, path);
             continue;
         }
+        if (target == MM_LOAD_FLASH && addr < cfg->flash_size_s && offset != 0u) {
+            off += offset;
+        }
         to_read = (size_t)phdr.p_filesz;
-        if ((size_t)off + to_read > flash_size) {
-            to_read = flash_size - (size_t)off;
+        dst = load_target_ptr(targets, target, off, to_read, 0);
+        if (dst == 0) {
+            fprintf(stderr, "warning: ELF segment 0x%08lx out of bounds (file %s)\n",
+                    (unsigned long)addr, path);
+            continue;
         }
         if (fseek(f, (long)phdr.p_offset, SEEK_SET) != 0) {
             continue;
         }
-        if (fread(flash + off, 1, to_read, f) != to_read) {
+        if (fread(dst, 1, to_read, f) != to_read) {
             fprintf(stderr, "warning: short read for ELF segment (file %s)\n", path);
         }
-        if (off < min_off) min_off = off;
-        if (off + (mm_u32)to_read > max_off) max_off = off + (mm_u32)to_read;
+        if (addr < min_addr) min_addr = addr;
+        if (addr + (mm_u32)to_read > max_addr) max_addr = addr + (mm_u32)to_read;
         loaded += to_read;
         any = MM_TRUE;
     }
@@ -1217,15 +1384,14 @@ static int load_elf_segments(const char *path,
     if (!any) {
         return -1;
     }
-    if (start_out) *start_out = min_off;
-    if (end_out) *end_out = max_off;
+    if (start_out) *start_out = min_addr;
+    if (end_out) *end_out = max_addr;
     if (loaded_out) *loaded_out = loaded;
     return 0;
 #else
     (void)path;
     (void)cfg;
-    (void)flash;
-    (void)flash_size;
+    (void)targets;
     (void)offset;
     if (start_out) *start_out = 0u;
     if (end_out) *end_out = 0u;
@@ -1253,8 +1419,7 @@ static mm_bool parse_ihex_byte(const char *s, mm_u8 *out)
 
 static int load_ihex(const char *path,
                      const struct mm_target_cfg *cfg,
-                     mm_u8 *flash,
-                     size_t flash_size,
+                     const struct mm_load_targets *targets,
                      mm_u32 offset,
                      mm_u32 *start_out,
                      mm_u32 *end_out,
@@ -1263,15 +1428,15 @@ static int load_ihex(const char *path,
     FILE *f;
     char line[1024];
     mm_u32 upper = 0;
-    mm_u32 min_off = 0xffffffffu;
-    mm_u32 max_off = 0u;
+    mm_u32 min_addr = 0xffffffffu;
+    mm_u32 max_addr = 0u;
     size_t loaded = 0;
     mm_bool any = MM_FALSE;
 
     if (start_out) *start_out = 0u;
     if (end_out) *end_out = 0u;
     if (loaded_out) *loaded_out = 0u;
-    if (cfg == 0 || flash == 0 || flash_size == 0u) {
+    if (cfg == 0 || targets == 0) {
         return -1;
     }
     f = fopen(path, "rb");
@@ -1303,30 +1468,31 @@ static int load_ihex(const char *path,
             continue;
         }
         if (rectype == 0x00u) {
-            mm_u32 off;
             full = (upper << 16) + addr;
-            if (!map_flash_offset(cfg, full, &off)) {
-                if (full < cfg->flash_size_s) {
-                    off = full;
-                } else {
-                    continue;
-                }
-            }
-            if (full < cfg->flash_size_s && offset != 0u) {
-                off += offset;
-            }
             for (i = 0; i < count; ++i) {
                 mm_u8 byte;
+                mm_u32 addr_abs = full + (mm_u32)i;
+                mm_u32 off = 0;
+                enum mm_load_target target;
+                mm_u8 *dst;
                 size_t pos = 9u + (size_t)i * 2u;
                 if (!parse_ihex_byte(line + pos, &byte)) {
                     break;
                 }
-                if ((size_t)off + (size_t)i < flash_size) {
-                    flash[off + (mm_u32)i] = byte;
+                if (!map_target_offset(cfg, targets, addr_abs, &target, &off)) {
+                    continue;
                 }
+                if (target == MM_LOAD_FLASH && addr_abs < cfg->flash_size_s && offset != 0u) {
+                    off += offset;
+                }
+                dst = load_target_ptr(targets, target, off, 1u, 0);
+                if (dst == 0) {
+                    continue;
+                }
+                *dst = byte;
             }
-            if (off < min_off) min_off = off;
-            if (off + (mm_u32)count > max_off) max_off = off + (mm_u32)count;
+            if (full < min_addr) min_addr = full;
+            if (full + (mm_u32)count > max_addr) max_addr = full + (mm_u32)count;
             loaded += count;
             any = MM_TRUE;
         } else if (rectype == 0x01u) {
@@ -1347,20 +1513,220 @@ static int load_ihex(const char *path,
     if (!any) {
         return -1;
     }
-    if (start_out) *start_out = min_off;
-    if (end_out) *end_out = max_off;
+    if (start_out) *start_out = min_addr;
+    if (end_out) *end_out = max_addr;
+    if (loaded_out) *loaded_out = loaded;
+    return 0;
+}
+
+static mm_u32 uf2_u32(const mm_u8 *p)
+{
+    return (mm_u32)p[0] | ((mm_u32)p[1] << 8) | ((mm_u32)p[2] << 16) | ((mm_u32)p[3] << 24);
+}
+
+static mm_bool uf2_addr_in_ram(const struct mm_target_cfg *cfg, mm_u32 addr, mm_u32 size)
+{
+    mm_u32 off;
+    if (cfg == 0 || size == 0u) return MM_FALSE;
+    if (!map_ram_offset(cfg, addr, &off)) return MM_FALSE;
+    if (!map_ram_offset(cfg, addr + size - 1u, &off)) return MM_FALSE;
+    return MM_TRUE;
+}
+
+static mm_bool uf2_family_allowed_rp2350(mm_u32 family_id, mm_bool ram_target)
+{
+    if (ram_target) {
+        return (family_id == UF2_FAMILY_ID_ABSOLUTE ||
+                family_id == UF2_FAMILY_ID_DATA ||
+                family_id == UF2_FAMILY_ID_RP2350_ARM_S ||
+                family_id == UF2_FAMILY_ID_RP2350_RISCV) ? MM_TRUE : MM_FALSE;
+    }
+    return (family_id == UF2_FAMILY_ID_ABSOLUTE ||
+            family_id == UF2_FAMILY_ID_DATA ||
+            family_id == UF2_FAMILY_ID_RP2350_ARM_S ||
+            family_id == UF2_FAMILY_ID_RP2350_ARM_NS ||
+            family_id == UF2_FAMILY_ID_RP2350_RISCV) ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool uf2_should_ignore_block(const mm_u8 *block)
+{
+    mm_u32 flags = uf2_u32(block + 8);
+    if ((flags & UF2_FLAG_EXTENSION_FLAGS_PRESENT) != 0u) {
+        mm_u32 ext = uf2_u32(block + 32 + UF2_PAYLOAD_SIZE);
+        if (ext == UF2_EXTENSION_RP2_IGNORE_BLOCK) {
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
+static mm_bool uf2_block_valid(const mm_u8 *block, mm_bool rp2350)
+{
+    mm_u32 magic0 = uf2_u32(block + 0);
+    mm_u32 magic1 = uf2_u32(block + 4);
+    mm_u32 magic_end = uf2_u32(block + 508);
+    mm_u32 flags = uf2_u32(block + 8);
+    mm_u32 payload = uf2_u32(block + 16);
+    if (magic0 != UF2_MAGIC_START0 || magic1 != UF2_MAGIC_START1 || magic_end != UF2_MAGIC_END) {
+        return MM_FALSE;
+    }
+    if ((flags & UF2_FLAG_FILE_CONTAINER) != 0u) {
+        return MM_FALSE;
+    }
+    if ((flags & UF2_FLAG_NOT_MAIN_FLASH) != 0u) {
+        return MM_FALSE;
+    }
+    if (payload != UF2_PAYLOAD_SIZE) {
+        return MM_FALSE;
+    }
+    if (rp2350 && (flags & UF2_FLAG_FAMILY_ID_PRESENT) == 0u) {
+        return MM_FALSE;
+    }
+    if (uf2_should_ignore_block(block)) {
+        return MM_FALSE;
+    }
+    return MM_TRUE;
+}
+
+static mm_bool uf2_scan_for_ram_boot(const char *path,
+                                     const struct mm_target_cfg *cfg,
+                                     const char *cpu_name,
+                                     mm_bool *ram_out)
+{
+    FILE *f;
+    mm_u8 block[UF2_BLOCK_SIZE];
+    size_t n;
+    mm_bool rp2350 = (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) ? MM_TRUE : MM_FALSE;
+    mm_bool found = MM_FALSE;
+    if (ram_out) *ram_out = MM_FALSE;
+    if (path == 0 || cfg == 0 || ram_out == 0) return MM_FALSE;
+    if (detect_image_type(path) != MM_IMAGE_UF2) return MM_FALSE;
+    f = fopen(path, "rb");
+    if (f == NULL) return MM_FALSE;
+    while ((n = fread(block, 1, UF2_BLOCK_SIZE, f)) == UF2_BLOCK_SIZE) {
+        mm_u32 flags;
+        mm_u32 target_addr;
+        mm_u32 family_id;
+        mm_bool ram_target;
+        if (!uf2_block_valid(block, rp2350)) {
+            continue;
+        }
+        flags = uf2_u32(block + 8);
+        target_addr = uf2_u32(block + 12);
+        family_id = uf2_u32(block + 28);
+        ram_target = uf2_addr_in_ram(cfg, target_addr, UF2_PAYLOAD_SIZE);
+        if (rp2350 && (flags & UF2_FLAG_FAMILY_ID_PRESENT) != 0u) {
+            if (!uf2_family_allowed_rp2350(family_id, ram_target)) {
+                continue;
+            }
+        }
+        found = MM_TRUE;
+        if (ram_target) {
+            *ram_out = MM_TRUE;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+static int load_uf2(const char *path,
+                    const struct mm_target_cfg *cfg,
+                    const struct mm_load_targets *targets,
+                    const char *cpu_name,
+                    mm_u32 *start_out,
+                    mm_u32 *end_out,
+                    size_t *loaded_out)
+{
+    FILE *f;
+    mm_u8 block[UF2_BLOCK_SIZE];
+    size_t n;
+    mm_u32 min_addr = 0xffffffffu;
+    mm_u32 max_addr = 0u;
+    size_t loaded = 0;
+    mm_bool any = MM_FALSE;
+    mm_bool rp2350 = (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) ? MM_TRUE : MM_FALSE;
+    mm_u32 expected_family = 0u;
+    mm_bool has_family = MM_FALSE;
+
+    if (start_out) *start_out = 0u;
+    if (end_out) *end_out = 0u;
+    if (loaded_out) *loaded_out = 0u;
+    if (path == 0 || cfg == 0 || targets == 0) return -1;
+
+    f = fopen(path, "rb");
+    if (f == NULL) return -1;
+
+    while ((n = fread(block, 1, UF2_BLOCK_SIZE, f)) == UF2_BLOCK_SIZE) {
+        mm_u32 flags;
+        mm_u32 target_addr;
+        mm_u32 payload;
+        mm_u32 family_id;
+        mm_u32 off;
+        enum mm_load_target target;
+        mm_u8 *dst;
+        mm_bool ram_target;
+
+        if (!uf2_block_valid(block, rp2350)) {
+            continue;
+        }
+        flags = uf2_u32(block + 8);
+        target_addr = uf2_u32(block + 12);
+        payload = uf2_u32(block + 16);
+        family_id = uf2_u32(block + 28);
+        if ((flags & UF2_FLAG_FAMILY_ID_PRESENT) != 0u) {
+            if (!has_family) {
+                expected_family = family_id;
+                has_family = MM_TRUE;
+            } else if (family_id != expected_family) {
+                fclose(f);
+                return -1;
+            }
+        }
+        ram_target = uf2_addr_in_ram(cfg, target_addr, payload);
+        if (rp2350 && has_family) {
+            if (!uf2_family_allowed_rp2350(expected_family, ram_target)) {
+                fclose(f);
+                return -1;
+            }
+        }
+        if (!map_target_offset(cfg, targets, target_addr, &target, &off)) {
+            fclose(f);
+            return -1;
+        }
+        dst = load_target_ptr(targets, target, off, payload, 0);
+        if (dst == 0) {
+            fclose(f);
+            return -1;
+        }
+        memcpy(dst, block + 32, payload);
+        if (target_addr < min_addr) min_addr = target_addr;
+        if (target_addr + payload > max_addr) max_addr = target_addr + payload;
+        loaded += payload;
+        any = MM_TRUE;
+    }
+    fclose(f);
+    if (!any) {
+        return -1;
+    }
+    if (start_out) *start_out = min_addr;
+    if (end_out) *end_out = max_addr;
     if (loaded_out) *loaded_out = loaded;
     return 0;
 }
 
 static int load_image_autodetect(struct mm_image_spec *img,
                                  const struct mm_target_cfg *cfg,
-                                 mm_u8 *flash,
-                                 size_t flash_size)
+                                 const struct mm_load_targets *targets,
+                                 enum mm_boot_mode boot_mode,
+                                 const char *cpu_name)
 {
     mm_u32 start = 0;
     mm_u32 end = 0;
     size_t loaded = 0;
+    mm_u32 base_addr = 0;
+    mm_u32 off = 0;
+    enum mm_load_target target = MM_LOAD_FLASH;
     if (img == 0 || img->path == 0) {
         return -1;
     }
@@ -1373,7 +1739,7 @@ static int load_image_autodetect(struct mm_image_spec *img,
         if (img->offset != 0u) {
             printf("warning: ignoring offset for ELF image %s\n", img->path);
         }
-        if (load_elf_segments(img->path, cfg, flash, flash_size, img->offset, &start, &end, &loaded) != 0) {
+        if (load_elf_segments(img->path, cfg, targets, img->offset, &start, &end, &loaded) != 0) {
             fprintf(stderr, "failed to load ELF image %s (missing libelf?)\n", img->path);
             return -1;
         }
@@ -1385,7 +1751,18 @@ static int load_image_autodetect(struct mm_image_spec *img,
         if (img->offset != 0u) {
             printf("warning: applying offset to IHEX image %s\n", img->path);
         }
-        if (load_ihex(img->path, cfg, flash, flash_size, img->offset, &start, &end, &loaded) != 0) {
+        if (load_ihex(img->path, cfg, targets, img->offset, &start, &end, &loaded) != 0) {
+            return -1;
+        }
+        img->loaded = loaded;
+        img->load_start = start;
+        img->load_end = end;
+        break;
+    case MM_IMAGE_UF2:
+        if (img->offset != 0u) {
+            printf("warning: ignoring offset for UF2 image %s\n", img->path);
+        }
+        if (load_uf2(img->path, cfg, targets, cpu_name, &start, &end, &loaded) != 0) {
             return -1;
         }
         img->loaded = loaded;
@@ -1394,13 +1771,34 @@ static int load_image_autodetect(struct mm_image_spec *img,
         break;
     case MM_IMAGE_BIN:
     default:
-        if (load_file_at(img->path, flash, flash_size, img->offset, &loaded) != 0) {
+        if (boot_mode == MM_BOOT_RAM) {
+            target = MM_LOAD_RAM;
+        } else if (boot_mode == MM_BOOT_SPIFLASH) {
+            target = MM_LOAD_SPIFLASH;
+        } else {
+            target = MM_LOAD_FLASH;
+        }
+        if (target == MM_LOAD_RAM) {
+            base_addr = cfg->ram_base_s;
+        } else if (target == MM_LOAD_SPIFLASH) {
+            base_addr = targets->spiflash_base;
+        } else {
+            base_addr = cfg->flash_base_s;
+        }
+        off = img->offset;
+        if (target == MM_LOAD_RAM && targets->ram == 0) return -1;
+        if (target == MM_LOAD_SPIFLASH && targets->spiflash == 0) return -1;
+        if (load_file_at(img->path,
+                         (target == MM_LOAD_RAM) ? targets->ram : (target == MM_LOAD_SPIFLASH) ? targets->spiflash : targets->flash,
+                         (target == MM_LOAD_RAM) ? targets->ram_size : (target == MM_LOAD_SPIFLASH) ? targets->spiflash_size : targets->flash_size,
+                         off,
+                         &loaded) != 0) {
             return -1;
         }
         img->type = MM_IMAGE_BIN;
         img->loaded = loaded;
-        img->load_start = img->offset;
-        img->load_end = img->offset + (mm_u32)loaded;
+        img->load_start = base_addr + img->offset;
+        img->load_end = base_addr + img->offset + (mm_u32)loaded;
         break;
     }
     return 0;
@@ -1521,9 +1919,18 @@ static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
 }
 
 static volatile mm_bool g_system_reset_pending = MM_FALSE;
+static volatile mm_bool g_boot_override_pending = MM_FALSE;
+static volatile mm_u32 g_boot_override_mode = 0u;
 
 void mm_system_request_reset(void)
 {
+    g_system_reset_pending = MM_TRUE;
+}
+
+void mm_system_request_reset_boot(int mode)
+{
+    g_boot_override_mode = (mm_u32)mode;
+    g_boot_override_pending = MM_TRUE;
     g_system_reset_pending = MM_TRUE;
 }
 
@@ -3142,6 +3549,7 @@ int main(int argc, char **argv)
     struct mm_flash_persist persist;
     mm_bool tui_active = MM_FALSE;
     int rc = 0;
+    struct mm_load_targets targets;
     /* IT block tracking: pattern encodes THEN(1)/ELSE(0) for remaining instructions. */
     mm_u8 it_pattern = 0;
     mm_u8 it_remaining = 0;
@@ -3183,12 +3591,17 @@ int main(int argc, char **argv)
     mm_bool opt_capstone_pc = MM_FALSE;
     mm_bool opt_boot_offset = MM_FALSE;
     mm_u32 boot_offset = 0;
+    enum mm_boot_mode boot_mode = MM_BOOT_FLASH;
+    mm_bool opt_boot_mode = MM_FALSE;
     mm_bool opt_expect_bkpt = MM_FALSE;
     mm_u32 expect_bkpt = 0;
     mm_bool expect_bkpt_hit = MM_FALSE;
     mm_u32 opt_timeout = 0;
     mm_u64 opt_fault_clocks[16];
     mm_u8 opt_fault_clock_count = 0;
+    mm_u8 *spiflash_boot_data = 0;
+    size_t spiflash_boot_size = 0;
+    mm_u32 spiflash_boot_base = 0;
 
     if (strcmp_trace_env != 0 && strcmp_trace_env[0] != '\0') {
         if (parse_pc_trace_range(strcmp_trace_env, &strcmp_trace_start, &strcmp_trace_end)) {
@@ -3335,6 +3748,23 @@ int main(int argc, char **argv)
             opt_timeout = (mm_u32)t;
         } else if (strcmp(argv[i], "--no-tz") == 0) {
             opt_no_tz = MM_TRUE;
+        } else if (strcmp(argv[i], "--boot") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing boot mode\n");
+                return 1;
+            }
+            if (!parse_boot_mode(argv[i + 1], &boot_mode)) {
+                fprintf(stderr, "invalid boot mode: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_boot_mode = MM_TRUE;
+            i++;
+        } else if (strncmp(argv[i], "--boot=", 7) == 0) {
+            if (!parse_boot_mode(argv[i] + 7, &boot_mode)) {
+                fprintf(stderr, "invalid boot mode: %s\n", argv[i] + 7);
+                return 1;
+            }
+            opt_boot_mode = MM_TRUE;
         } else if (strncmp(argv[i], "--boot-offset=", 14) == 0) {
             if (!parse_hex_u32(argv[i] + 14, &boot_offset)) {
                 fprintf(stderr, "invalid boot offset: %s\n", argv[i]);
@@ -3438,6 +3868,7 @@ int main(int argc, char **argv)
 #endif
                         "[--uart-stdout] [--quit-on-faults] [--meminfo] [--call-trace] [--dualbank] [--fault-clock N] [--no-tz] [--gdb-symbols <elf>] "
                         "[--expect-bkpt 0xNN] [--timeout seconds] "
+                        "[--boot flash|ram|spiflash] "
                         "[--boot-offset=0xN] "
                         "[--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]] "
                         "[--usb[:port=<n>]] "
@@ -3445,7 +3876,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_HAS_LIBTPMS
                         "[--tpm:SPIx:cs=GPIONAME[:file=<path>]] "
 #endif
-                        "<image.bin[:offset]|image.elf|image.hex> [more images...]\n",
+                        "<image.bin[:offset]|image.elf|image.hex|image.uf2> [more images...]\n",
                 argv[0]);
         fprintf(stderr, "supported CPUs:");
         for (size_t i = 0; i < mm_cpu_count(); ++i) {
@@ -3493,11 +3924,22 @@ int main(int argc, char **argv)
     if (opt_dualbank) {
         cfg.flags |= MM_TARGET_FLAG_DUALBANK;
     }
-    if (opt_boot_offset && (boot_offset + 8u > cfg.flash_size_s)) {
-        fprintf(stderr, "boot offset 0x%08lx out of bounds (flash size 0x%08lx)\n",
-                (unsigned long)boot_offset,
-                (unsigned long)cfg.flash_size_s);
-        return 1;
+
+    if (image_count > 0 && boot_mode != MM_BOOT_RAM) {
+        int ii;
+        for (ii = 0; ii < image_count; ++ii) {
+            mm_bool ram_boot = MM_FALSE;
+            if (detect_image_type(images[ii].path) != MM_IMAGE_UF2) {
+                continue;
+            }
+            if (uf2_scan_for_ram_boot(images[ii].path, &cfg, cpu_name, &ram_boot) && ram_boot) {
+                if (opt_boot_mode) {
+                    printf("warning: UF2 requests RAM boot; overriding --boot to ram\n");
+                }
+                boot_mode = MM_BOOT_RAM;
+                break;
+            }
+        }
     }
 
     if (opt_capstone) {
@@ -3523,6 +3965,60 @@ int main(int argc, char **argv)
         }
     }
 #endif
+
+    {
+        mm_u8 *spiflash_data = 0;
+        size_t spiflash_size = 0;
+        mm_u32 spiflash_base = 0;
+        mm_bool spiflash_ready = MM_FALSE;
+        size_t si;
+        struct mm_spiflash_info info;
+
+        if (boot_mode == MM_BOOT_SPIFLASH) {
+            for (si = 0; si < mm_spiflash_count(); ++si) {
+                if (!mm_spiflash_get_info(si, &info)) continue;
+                if (!info.mmap) continue;
+                if (!mm_spiflash_get_storage(si, &spiflash_data, &spiflash_size)) continue;
+                spiflash_base = info.mmap_base;
+                spiflash_ready = MM_TRUE;
+                break;
+            }
+            if (!spiflash_ready) {
+                fprintf(stderr, "boot mode spiflash requested but no mmap spiflash configured\n");
+                return 1;
+            }
+        }
+
+        if (opt_boot_offset) {
+            size_t limit = cfg.flash_size_s;
+            const char *kind = "flash";
+            if (boot_mode == MM_BOOT_RAM) {
+                limit = cfg_total_ram(&cfg);
+                kind = "ram";
+            } else if (boot_mode == MM_BOOT_SPIFLASH) {
+                limit = spiflash_size;
+                kind = "spiflash";
+            }
+            if ((size_t)boot_offset + 8u > limit) {
+                fprintf(stderr, "boot offset 0x%08lx out of bounds (%s size 0x%08lx)\n",
+                        (unsigned long)boot_offset,
+                        kind,
+                        (unsigned long)limit);
+                return 1;
+            }
+        }
+
+        if (boot_mode == MM_BOOT_SPIFLASH) {
+            printf("[BOOT] mode=%s base=0x%08lx size=0x%08lx\n",
+                   boot_mode_name(boot_mode),
+                   (unsigned long)spiflash_base,
+                   (unsigned long)spiflash_size);
+        }
+
+        spiflash_boot_data = spiflash_data;
+        spiflash_boot_size = spiflash_size;
+        spiflash_boot_base = spiflash_base;
+    }
 
     memset(&tui, 0, sizeof(tui));
     if (opt_tui) {
@@ -3555,11 +4051,19 @@ int main(int argc, char **argv)
         }
     }
 
+    targets.flash = flash;
+    targets.flash_size = cfg.flash_size_s;
+    targets.ram = ram;
+    targets.ram_size = cfg_total_ram(&cfg);
+    targets.spiflash = spiflash_boot_data;
+    targets.spiflash_size = spiflash_boot_size;
+    targets.spiflash_base = spiflash_boot_base;
+
     for (i = 0; i < image_count; ++i) {
         int j;
         mm_u32 b0;
         mm_u32 b1;
-        if (load_image_autodetect(&images[i], &cfg, flash, cfg.flash_size_s) != 0) {
+        if (load_image_autodetect(&images[i], &cfg, &targets, boot_mode, cpu_name) != 0) {
             fprintf(stderr, "failed to load image %s\n", images[i].path);
             rc = 1;
             goto cleanup;
@@ -3593,6 +4097,9 @@ int main(int argc, char **argv)
         mm_u32 offsets[16];
         int k;
         int persist_count = 0;
+        if (boot_mode != MM_BOOT_FLASH) {
+            printf("warning: --persist is only supported for flash boot; skipping\n");
+        } else {
         for (k = 0; k < image_count; ++k) {
             if (images[k].type != MM_IMAGE_BIN) {
                 printf("warning: persist skipped for non-BIN image %s\n", images[k].path);
@@ -3604,6 +4111,7 @@ int main(int argc, char **argv)
         }
         if (persist_count > 0) {
             mm_flash_persist_build(&persist, flash, cfg.flash_size_s, paths, offsets, persist_count);
+        }
         }
     }
 
@@ -3662,6 +4170,10 @@ int main(int argc, char **argv)
             mm_u64 cycles_since_poll = 0;
             mm_u64 fault_clocks[16];
             mm_u8 fault_clock_count = opt_fault_clock_count;
+            mm_u32 boot_offset_local = 0;
+            mm_u32 boot_base_s = 0;
+            mm_u32 boot_base_ns = 0;
+            enum mm_boot_mode boot_mode_local = boot_mode;
             const mm_u64 poll_granularity = DEFAULT_BATCH_CYCLES;
             mm_u64 sync_granularity = DEFAULT_SYNC_GRANULARITY;
             mm_u64 host0_ns = host_now_ns();
@@ -3680,6 +4192,10 @@ int main(int argc, char **argv)
             }
 
             mm_system_clear_reset();
+            if (g_boot_override_pending) {
+                boot_mode_local = (enum mm_boot_mode)g_boot_override_mode;
+                g_boot_override_pending = MM_FALSE;
+            }
             mm_memmap_init(&map, regions, sizeof(regions) / sizeof(regions[0]));
             mm_target_soc_reset(&cfg);
             mm_timer_reset(&cfg);
@@ -3692,15 +4208,30 @@ int main(int argc, char **argv)
             mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE);
             mm_memmap_configure_ram(&map, &cfg, ram, MM_FALSE);
             {
-                mm_u32 boot_offset_local = opt_boot_offset ? boot_offset
-                    : default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
+                if (opt_boot_offset) {
+                    boot_offset_local = boot_offset;
+                } else if (boot_mode_local == MM_BOOT_FLASH) {
+                    boot_offset_local = default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
+                } else {
+                    boot_offset_local = 0u;
+                }
+                if (boot_mode_local == MM_BOOT_RAM) {
+                    boot_base_s = cfg.ram_base_s + boot_offset_local;
+                    boot_base_ns = cfg.ram_base_ns + boot_offset_local;
+                } else if (boot_mode_local == MM_BOOT_SPIFLASH) {
+                    boot_base_s = spiflash_boot_base + boot_offset_local;
+                    boot_base_ns = spiflash_boot_base + boot_offset_local;
+                } else {
+                    boot_base_s = cfg.flash_base_s + boot_offset_local;
+                    boot_base_ns = cfg.flash_base_ns + boot_offset_local;
+                }
                 if (opt_no_tz) {
                     force_ns_boot = MM_TRUE;
                     cfg.mpcbb_block_secure = 0;
                     cfg.mpcbb_block_size = 0;
                     printf("[TZ] TrustZone disabled via --no-tz\n");
-                } else if (cfg.ram_base_s != cfg.ram_base_ns) {
-                    if (mm_vector_read(&map, MM_SECURE, cfg.flash_base_s + boot_offset_local, 0u, &initial_sp)) {
+                } else if (cfg.ram_base_s != cfg.ram_base_ns && boot_mode_local != MM_BOOT_SPIFLASH) {
+                    if (mm_vector_read(&map, MM_SECURE, boot_base_s, 0u, &initial_sp)) {
                         if ((initial_sp & 0xF0000000u) == 0x20000000u) {
                             force_ns_boot = MM_TRUE;
                             cfg.mpcbb_block_secure = 0;
@@ -3714,6 +4245,10 @@ int main(int argc, char **argv)
                     map.flash.base = cfg.flash_base_ns;
                     map.flash.length = cfg.flash_size_ns;
                     map.ram.base = cfg.ram_base_ns;
+                    if (boot_mode_local == MM_BOOT_FLASH) {
+                        boot_base_s = cfg.flash_base_ns + boot_offset_local;
+                        boot_base_ns = cfg.flash_base_ns + boot_offset_local;
+                    }
                 } else {
                     map.flash.base = cfg.flash_base_s;
                     map.flash.length = cfg.flash_size_s;
@@ -3791,6 +4326,10 @@ int main(int argc, char **argv)
             /* Permit SIO/system bus window (e.g. RP2350 SIO at 0xD0000000). */
             mm_prot_add_region(&prot, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
             mm_prot_add_region(&prot, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+            if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                mm_prot_add_region(&prot, 0x18000000u, 0x04000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                mm_prot_add_region(&prot, 0x18000000u, 0x04000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+            }
             if (cfg.core_count > 1u) {
                 mm_prot_add_region(&prot1, cfg.flash_base_s, cfg.flash_size_s, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
                 mm_prot_add_region(&prot1, cfg.flash_base_ns, cfg.flash_size_ns, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
@@ -3813,6 +4352,10 @@ int main(int argc, char **argv)
                 mm_prot_add_region(&prot1, 0x40000000u, 0x20000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
                 mm_prot_add_region(&prot1, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
                 mm_prot_add_region(&prot1, 0xD0000000u, 0x10000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+                if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
+                    mm_prot_add_region(&prot1, 0x18000000u, 0x04000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                    mm_prot_add_region(&prot1, 0x18000000u, 0x04000000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+                }
             }
             mm_spiflash_register_prot_regions(&prot);
 
@@ -3838,8 +4381,6 @@ int main(int argc, char **argv)
             /* Reset CPU state */
             {
                 int i;
-                mm_u32 boot_offset_local = opt_boot_offset ? boot_offset
-                    : default_rp2350_boot_offset(cpu_name, &cfg, images, image_count, flash, cfg.flash_size_s);
                 for (i = 0; i < 16; ++i) cpu.r[i] = 0;
                 for (i = 0; i < 32; ++i) cpu.s[i] = 0;
                 cpu.xpsr = 0;
@@ -3855,13 +4396,8 @@ int main(int argc, char **argv)
                 cpu.faultmask_s = cpu.faultmask_ns = 0;
                 cpu.msp_s = cpu.msp_ns = 0;
                 cpu.psp_s = cpu.psp_ns = 0;
-                if (force_ns_boot) {
-                    cpu.vtor_s = cfg.flash_base_ns + boot_offset_local;
-                    cpu.vtor_ns = cfg.flash_base_ns + boot_offset_local;
-                } else {
-                    cpu.vtor_s = cfg.flash_base_s + boot_offset_local;
-                    cpu.vtor_ns = cfg.flash_base_ns + boot_offset_local;
-                }
+                cpu.vtor_s = boot_base_s;
+                cpu.vtor_ns = boot_base_ns;
                 cpu.exc_depth = 0;
                 cpu.tz_depth = 0;
                 cpu.sleeping = MM_FALSE;
@@ -3883,8 +4419,8 @@ int main(int argc, char **argv)
                     cpu1.faultmask_s = cpu1.faultmask_ns = 0;
                     cpu1.msp_s = cpu1.msp_ns = 0;
                     cpu1.psp_s = cpu1.psp_ns = 0;
-                    cpu1.vtor_s = cfg.flash_base_s + boot_offset_local;
-                    cpu1.vtor_ns = cfg.flash_base_ns + boot_offset_local;
+                    cpu1.vtor_s = boot_base_s;
+                    cpu1.vtor_ns = boot_base_ns;
                     cpu1.exc_depth = 0;
                     cpu1.tz_depth = 0;
                     cpu1.sleeping = MM_TRUE;
@@ -4169,7 +4705,7 @@ int main(int argc, char **argv)
                 }
 
                 if (!opt_gdb && reload_pending && tui_paused) {
-                    if (reload_images(images, image_count, flash, cfg.flash_size_s, &cfg, &loaded_total, &loaded_max_end)) {
+                    if (reload_images(images, image_count, &targets, &cfg, boot_mode, cpu_name, &loaded_total, &loaded_max_end)) {
                         if (opt_persist) {
                             const char *paths[16];
                             mm_u32 offsets[16];

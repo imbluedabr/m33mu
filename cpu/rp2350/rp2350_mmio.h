@@ -21,6 +21,23 @@
 #define RP2350_RESET_UART0     (1u << 26)
 #define RP2350_RESET_UART1     (1u << 27)
 #define RP2350_RESET_USBCTRL   (1u << 28)
+#define RP2350_PARTITION_TABLE_MAX_PARTITIONS 16u
+#define RP2350_BOOTRAM_BASE 0x400e0000u
+#define RP2350_BOOTRAM_PARTITION_TABLE_OFFSET 0x0f60u
+
+struct rp2350_resident_partition {
+    mm_u32 permissions_and_location;
+    mm_u32 permissions_and_flags;
+};
+
+struct rp2350_partition_table {
+    mm_u8 partition_count;
+    mm_u8 permission_partition_count;
+    mm_u8 loaded;
+    mm_u8 reserved;
+    mm_u32 unpartitioned_space_permissions_and_flags;
+    struct rp2350_resident_partition partitions[RP2350_PARTITION_TABLE_MAX_PARTITIONS];
+};
 
 mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus);
 void mm_rp2350_mmio_reset(void);
@@ -44,6 +61,11 @@ mm_bool mm_rp2350_flash_program(struct mm_memmap *map,
                                 mm_u32 flash_offs,
                                 mm_u32 data_addr,
                                 mm_u32 count);
+mm_bool mm_rp2350_flash_erase_all(void);
+mm_u32 mm_rp2350_flash_size(void);
+mm_u32 mm_rp2350_partition_table_addr(void);
+const struct rp2350_partition_table *mm_rp2350_partition_table_get(void);
+struct rp2350_partition_table *mm_rp2350_partition_table_get_mut(void);
 void mm_rp2350_set_active_core(mm_u32 core_id);
 void mm_rp2350_bind_multicore(struct mm_cpu *core0,
                               struct mm_cpu *core1,
