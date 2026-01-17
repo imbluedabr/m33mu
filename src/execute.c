@@ -145,31 +145,14 @@ static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs 
 
 static mm_bool dcp_access_allowed(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u8 coproc)
 {
-    mm_u32 field;
-    mm_u32 cpacr;
     if (cpu == 0) {
         return MM_FALSE;
     }
+    (void)scs;
     if (!mm_rp2350_active()) {
         return MM_FALSE;
     }
     if (coproc == 5u && cpu->sec_state != MM_SECURE) {
-        return MM_FALSE;
-    }
-    if (scs == 0) {
-        return MM_FALSE;
-    }
-    if (cpu->sec_state == MM_NONSECURE) {
-        if (((scs->nsacr >> coproc) & 0x1u) == 0u) {
-            return MM_FALSE;
-        }
-    }
-    cpacr = cpacr_for_sec(scs, cpu->sec_state);
-    field = (cpacr >> ((mm_u32)coproc * 2u)) & 0x3u;
-    if (field == 0u) {
-        return MM_FALSE;
-    }
-    if (!mm_cpu_get_privileged(cpu) && field != 3u) {
         return MM_FALSE;
     }
     return MM_TRUE;
@@ -1024,6 +1007,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                               }
                                               if (count == 0u) {
                                                   EXEC_RAISE_UNDEF();
+                                              }
+                                              if (is_double) {
+                                                  if ((count & 1u) != 0u) {
+                                                      EXEC_RAISE_UNDEF();
+                                                  }
+                                                  count >>= 1;
                                               }
                                               if (is_double) {
                                                   if (d.rd >= 16u || (d.rd + count) > 16u) {
@@ -3121,6 +3110,14 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                                (int)cpu.sec_state,
                                                                (int)cpu.mode,
                                                                (unsigned long)(cpu.xpsr & 0x1ffu));
+                                                    }
+                                                    if ((val & 0xffffff00u) == 0xffffff00u && wbit) {
+                                                        mm_u32 sp_after = (opc == 2u) ? (base - 4u * count) : (base + 4u * count);
+                                                        if (d.rn == 13u) {
+                                                            EXEC_SET_SP(sp_after);
+                                                        } else {
+                                                            cpu.r[d.rn] = sp_after;
+                                                        }
                                                     }
                                                     if (!handle_pc_write(&cpu, &map, &scs, val, &it_pattern, &it_remaining, &it_cond)) {
                                                         done = MM_TRUE;

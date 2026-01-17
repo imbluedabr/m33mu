@@ -2078,7 +2078,9 @@ static struct mm_decoded decode_32(mm_u32 insn)
     }
 
     /* VFP single load/store (VLDR/VSTR). */
-    if ((insn & 0xff000f00u) == 0xed000a00u) {
+    if ((insn & 0xff000f00u) == 0xed000a00u ||
+        (insn & 0xff000f00u) == 0xed000200u ||
+        (insn & 0xff000f00u) == 0xed000300u) {
         if ((insn & (1u << 21)) == 0u) {
         mm_bool load = ((insn >> 20) & 1u) != 0u;
         mm_bool u = ((insn >> 23) & 1u) != 0u;

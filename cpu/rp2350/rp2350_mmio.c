@@ -35,10 +35,16 @@
 #define TIMER0_SIZE 0x1000u
 #define TIMER1_BASE 0x400b8000u
 #define TIMER1_SIZE 0x1000u
+#define HSTX_CTRL_BASE 0x400c0000u
+#define HSTX_CTRL_SIZE 0x1000u
 #define XIP_CTRL_BASE 0x400c8000u
 #define XIP_CTRL_SIZE 0x1000u
+#define XIP_QMI_BASE  0x400d0000u
+#define XIP_QMI_SIZE  0x1000u
 #define XIP_AUX_BASE  0x50500000u
 #define XIP_AUX_SIZE  0x1000u
+#define HSTX_FIFO_BASE 0x50600000u
+#define HSTX_FIFO_SIZE 0x1000u
 #define BOOTRAM_BASE  0x400e0000u
 #define BOOTRAM_SIZE  0x1000u
 #define TICKS_BASE 0x40108000u
@@ -78,6 +84,35 @@
 
 #define CLK_PERI_CTRL_ENABLE_BIT 11u
 #define CLK_PERI_CTRL_ENABLED_BIT 28u
+
+#define HSTX_CTRL_CSR 0x000u
+
+#define HSTX_FIFO_STAT 0x000u
+#define HSTX_FIFO_FIFO 0x004u
+#define HSTX_FIFO_STAT_LEVEL_MASK 0x000000ffu
+#define HSTX_FIFO_STAT_FULL  (1u << 8)
+#define HSTX_FIFO_STAT_EMPTY (1u << 9)
+#define HSTX_FIFO_STAT_WOF   (1u << 10)
+
+#define QMI_DIRECT_CSR 0x000u
+#define QMI_DIRECT_TX  0x004u
+#define QMI_DIRECT_RX  0x008u
+#define QMI_DIRECT_CSR_RXLEVEL_SHIFT 18u
+#define QMI_DIRECT_CSR_TXLEVEL_SHIFT 12u
+#define QMI_DIRECT_CSR_RXFULL_BIT 17u
+#define QMI_DIRECT_CSR_RXEMPTY_BIT 16u
+#define QMI_DIRECT_CSR_TXEMPTY_BIT 11u
+#define QMI_DIRECT_CSR_TXFULL_BIT 10u
+#define QMI_DIRECT_CSR_AUTO_CS1N_BIT 7u
+#define QMI_DIRECT_CSR_AUTO_CS0N_BIT 6u
+#define QMI_DIRECT_CSR_ASSERT_CS1N_BIT 3u
+#define QMI_DIRECT_CSR_ASSERT_CS0N_BIT 2u
+#define QMI_DIRECT_CSR_BUSY_BIT 1u
+#define QMI_DIRECT_CSR_EN_BIT 0u
+#define QMI_DIRECT_CSR_WRITE_MASK 0xffc000cdu
+#define QMI_DIRECT_CSR_RESET 0x01800000u
+#define QMI_DIRECT_TX_NOPUSH_BIT 20u
+#define QMI_DIRECT_TX_DWIDTH_BIT 18u
 #define CLK_PERI_CTRL_KILL_BIT 10u
 
 #define SIO_GPIO_IN       0x004u
@@ -208,6 +243,21 @@ struct rp2350_fifo {
     mm_u8 count;
 };
 
+struct rp2350_hstx_fifo {
+    mm_u32 buf[16];
+    mm_u8 head;
+    mm_u8 tail;
+    mm_u8 count;
+    mm_u8 wof;
+};
+
+struct rp2350_qmi_fifo {
+    mm_u16 buf[8];
+    mm_u8 head;
+    mm_u8 tail;
+    mm_u8 count;
+};
+
 struct rp2350_multicore_state {
     struct rp2350_fifo rx[2];
     mm_u8 wof[2];
@@ -241,10 +291,15 @@ static struct bank_regs pads_qspi;
 static struct bank_regs xosc;
 static struct bank_regs pll_sys;
 static struct bank_regs pll_usb;
+static struct bank_regs hstx_ctrl;
 static struct bank_regs xip_ctrl;
 static struct bank_regs xip_aux;
+static struct bank_regs qmi_regs;
 static struct bank_regs bootram;
 static struct bank_regs ticks;
+static struct rp2350_hstx_fifo hstx_fifo;
+static struct rp2350_qmi_fifo qmi_rx;
+static struct rp2350_qmi_fifo qmi_tx;
 static struct {
     mm_u32 lock;
     mm_u32 force_core_ns;
@@ -468,8 +523,11 @@ static mm_u32 access_ctrl_reg_for_addr(mm_u32 addr)
     if (addr >= IO_QSPI_BASE && addr < IO_QSPI_BASE + IO_QSPI_SIZE) return access_ctrl.io_bank1;
     if (addr >= PADS_BANK0_BASE && addr < PADS_BANK0_BASE + PADS_BANK0_SIZE) return access_ctrl.pads_bank0;
     if (addr >= PADS_QSPI_BASE && addr < PADS_QSPI_BASE + PADS_QSPI_SIZE) return access_ctrl.pads_qspi;
+    if (addr >= HSTX_CTRL_BASE && addr < HSTX_CTRL_BASE + HSTX_CTRL_SIZE) return access_ctrl.hstx;
     if (addr >= XIP_CTRL_BASE && addr < XIP_CTRL_BASE + XIP_CTRL_SIZE) return access_ctrl.xip_ctrl;
+    if (addr >= XIP_QMI_BASE && addr < XIP_QMI_BASE + XIP_QMI_SIZE) return access_ctrl.xip_qmi;
     if (addr >= XIP_AUX_BASE && addr < XIP_AUX_BASE + XIP_AUX_SIZE) return access_ctrl.xip_aux;
+    if (addr >= HSTX_FIFO_BASE && addr < HSTX_FIFO_BASE + HSTX_FIFO_SIZE) return access_ctrl.hstx;
     if (addr >= BOOTRAM_BASE && addr < BOOTRAM_BASE + BOOTRAM_SIZE) return 0u;
     if (addr >= TIMER0_BASE && addr < TIMER0_BASE + TIMER0_SIZE) return access_ctrl.timer0;
     if (addr >= TIMER1_BASE && addr < TIMER1_BASE + TIMER1_SIZE) return access_ctrl.timer1;
@@ -623,6 +681,69 @@ static void rp2350_fifo_update_irq(mm_u32 core_id)
     } else {
         mm_nvic_set_pending(nvic, SIO_IRQ_FIFO, MM_FALSE);
     }
+}
+
+static void hstx_fifo_clear(struct rp2350_hstx_fifo *fifo)
+{
+    if (fifo == 0) return;
+    fifo->head = 0u;
+    fifo->tail = 0u;
+    fifo->count = 0u;
+    fifo->wof = 0u;
+}
+
+static mm_bool hstx_fifo_push(struct rp2350_hstx_fifo *fifo, mm_u32 value)
+{
+    if (fifo == 0) return MM_FALSE;
+    if (fifo->count >= 16u) {
+        fifo->wof = 1u;
+        return MM_FALSE;
+    }
+    fifo->buf[fifo->head] = value;
+    fifo->head = (mm_u8)((fifo->head + 1u) & 15u);
+    fifo->count++;
+    return MM_TRUE;
+}
+
+static mm_u32 hstx_fifo_status(struct rp2350_hstx_fifo *fifo)
+{
+    mm_u32 level;
+    mm_u32 status;
+    if (fifo == 0) return 0u;
+    level = fifo->count & 0xffu;
+    status = level;
+    if (fifo->count == 0u) status |= HSTX_FIFO_STAT_EMPTY;
+    if (fifo->count >= 16u) status |= HSTX_FIFO_STAT_FULL;
+    if (fifo->wof != 0u) status |= HSTX_FIFO_STAT_WOF;
+    return status;
+}
+
+static void qmi_fifo_clear(struct rp2350_qmi_fifo *fifo)
+{
+    if (fifo == 0) return;
+    fifo->head = 0u;
+    fifo->tail = 0u;
+    fifo->count = 0u;
+}
+
+static mm_bool qmi_fifo_push(struct rp2350_qmi_fifo *fifo, mm_u16 value)
+{
+    if (fifo == 0) return MM_FALSE;
+    if (fifo->count >= 8u) return MM_FALSE;
+    fifo->buf[fifo->head] = value;
+    fifo->head = (mm_u8)((fifo->head + 1u) & 7u);
+    fifo->count++;
+    return MM_TRUE;
+}
+
+static mm_bool qmi_fifo_pop(struct rp2350_qmi_fifo *fifo, mm_u16 *value_out)
+{
+    if (fifo == 0 || value_out == 0) return MM_FALSE;
+    if (fifo->count == 0u) return MM_FALSE;
+    *value_out = fifo->buf[fifo->tail];
+    fifo->tail = (mm_u8)((fifo->tail + 1u) & 7u);
+    fifo->count--;
+    return MM_TRUE;
 }
 
 static void rp2350_doorbell_update_irq(mm_u32 core_id)
@@ -1297,6 +1418,183 @@ static mm_bool bank_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
     return MM_TRUE;
 }
 
+static mm_bool hstx_fifo_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct rp2350_hstx_fifo *fifo = (struct rp2350_hstx_fifo *)opaque;
+    if (fifo == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > HSTX_FIFO_SIZE) return MM_FALSE;
+    if (offset == HSTX_FIFO_STAT) {
+        *value_out = read_slice(hstx_fifo_status(fifo), offset & 3u, size_bytes);
+        return MM_TRUE;
+    }
+    if (offset == HSTX_FIFO_FIFO) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+    *value_out = 0u;
+    return MM_TRUE;
+}
+
+static mm_bool hstx_fifo_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct rp2350_hstx_fifo *fifo = (struct rp2350_hstx_fifo *)opaque;
+    mm_u32 csr;
+    if (fifo == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > HSTX_FIFO_SIZE) return MM_FALSE;
+    if (offset == HSTX_FIFO_STAT) {
+        if ((value & HSTX_FIFO_STAT_WOF) != 0u) {
+            fifo->wof = 0u;
+        }
+        return MM_TRUE;
+    }
+    if (offset == HSTX_FIFO_FIFO) {
+        csr = hstx_ctrl.regs[HSTX_CTRL_CSR / 4u];
+        if ((csr & 1u) != 0u) {
+            fifo->count = 0u;
+            fifo->head = 0u;
+            fifo->tail = 0u;
+            return MM_TRUE;
+        }
+        (void)hstx_fifo_push(fifo, value);
+        return MM_TRUE;
+    }
+    return MM_TRUE;
+}
+
+static mm_u32 qmi_direct_csr_value(void)
+{
+    mm_u32 reg = qmi_regs.regs[QMI_DIRECT_CSR / 4u] & QMI_DIRECT_CSR_WRITE_MASK;
+    mm_u32 rxlevel = qmi_rx.count;
+    mm_u32 txlevel = qmi_tx.count;
+    mm_bool rxempty = (rxlevel == 0u);
+    mm_bool rxfull = (rxlevel >= 8u);
+    mm_bool txempty = (txlevel == 0u);
+    mm_bool txfull = (rxlevel >= 8u);
+    mm_bool busy = ((reg & (1u << QMI_DIRECT_CSR_EN_BIT)) != 0u) && !rxempty;
+
+    reg |= (rxlevel << QMI_DIRECT_CSR_RXLEVEL_SHIFT) & 0x001c0000u;
+    reg |= (txlevel << QMI_DIRECT_CSR_TXLEVEL_SHIFT) & 0x00007000u;
+    if (rxfull) reg |= (1u << QMI_DIRECT_CSR_RXFULL_BIT);
+    if (rxempty) reg |= (1u << QMI_DIRECT_CSR_RXEMPTY_BIT);
+    if (txempty) reg |= (1u << QMI_DIRECT_CSR_TXEMPTY_BIT);
+    if (txfull) reg |= (1u << QMI_DIRECT_CSR_TXFULL_BIT);
+    if (busy) reg |= (1u << QMI_DIRECT_CSR_BUSY_BIT);
+    return reg;
+}
+
+static mm_bool qmi_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    mm_u32 alias;
+    mm_u32 base_off;
+    mm_u16 value;
+    (void)opaque;
+    if (value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+    base_off = alias_base_offset(offset, &alias);
+    (void)alias;
+    if ((base_off + size_bytes) > 0x1000u) return MM_FALSE;
+    if (base_off == QMI_DIRECT_CSR) {
+        *value_out = read_slice(qmi_direct_csr_value(), base_off & 3u, size_bytes);
+        return MM_TRUE;
+    }
+    if (base_off == QMI_DIRECT_RX) {
+        if (!qmi_fifo_pop(&qmi_rx, &value)) {
+            value = 0xffu;
+        }
+        *value_out = read_slice((mm_u32)value, base_off & 3u, size_bytes);
+        return MM_TRUE;
+    }
+    return bank_read(&qmi_regs, base_off, size_bytes, value_out);
+}
+
+static mm_bool qmi_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    mm_u32 alias;
+    mm_u32 base_off;
+    mm_u32 mask;
+    mm_u32 reg;
+    mm_u32 data;
+    mm_bool nopush;
+    mm_bool dwidth;
+    (void)opaque;
+    if (size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > 0x1000u) return MM_FALSE;
+    if (base_off == QMI_DIRECT_CSR) {
+        reg = qmi_regs.regs[QMI_DIRECT_CSR / 4u] & QMI_DIRECT_CSR_WRITE_MASK;
+        if (alias == 0u) {
+            reg = apply_write(reg, base_off & 3u, size_bytes, value);
+        } else {
+            mask = alias_value(base_off & 3u, size_bytes, value);
+            switch (alias) {
+            case 1u:
+                reg ^= mask;
+                break;
+            case 2u:
+                reg |= mask;
+                break;
+            case 3u:
+                reg &= ~mask;
+                break;
+            default:
+                break;
+            }
+        }
+        reg &= QMI_DIRECT_CSR_WRITE_MASK;
+        qmi_regs.regs[QMI_DIRECT_CSR / 4u] = reg;
+        if ((reg & (1u << QMI_DIRECT_CSR_EN_BIT)) == 0u) {
+            qmi_fifo_clear(&qmi_rx);
+            qmi_fifo_clear(&qmi_tx);
+        }
+        return MM_TRUE;
+    }
+    if (base_off == QMI_DIRECT_TX) {
+        data = apply_write(0u, base_off & 3u, size_bytes, value);
+        nopush = ((data >> QMI_DIRECT_TX_NOPUSH_BIT) & 1u) != 0u;
+        dwidth = ((data >> QMI_DIRECT_TX_DWIDTH_BIT) & 1u) != 0u;
+        if (!nopush) {
+            mm_u16 rx_value = dwidth ? 0xffffu : 0x00ffu;
+            (void)qmi_fifo_push(&qmi_rx, rx_value);
+        }
+        return MM_TRUE;
+    }
+    return bank_write(&qmi_regs, offset, size_bytes, value);
+}
+
+static mm_bool xip_aux_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    if (b == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > XIP_AUX_SIZE) return MM_FALSE;
+    if (offset == 0x000u) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+    if (offset == 0x004u) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+    if (offset == 0x008u) {
+        return qmi_read(0, QMI_DIRECT_RX, size_bytes, value_out);
+    }
+    return bank_read(b, offset, size_bytes, value_out);
+}
+
+static mm_bool xip_aux_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    if (b == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > XIP_AUX_SIZE) return MM_FALSE;
+    if (offset == 0x004u) {
+        return qmi_write(0, QMI_DIRECT_TX, size_bytes, value);
+    }
+    if (offset == 0x008u) {
+        return MM_TRUE;
+    }
+    return bank_write(b, offset, size_bytes, value);
+}
+
 static mm_bool xosc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
     (void)opaque;
@@ -1533,6 +1831,13 @@ mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus)
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     reg.size = MMIO_ALIAS_SIZE;
+    reg.base = HSTX_CTRL_BASE;
+    reg.opaque = &hstx_ctrl;
+    reg.read = bank_read;
+    reg.write = bank_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
     reg.base = XIP_CTRL_BASE;
     reg.opaque = &xip_ctrl;
     reg.read = bank_read;
@@ -1540,10 +1845,24 @@ mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus)
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     reg.size = MMIO_ALIAS_SIZE;
+    reg.base = XIP_QMI_BASE;
+    reg.opaque = 0;
+    reg.read = qmi_read;
+    reg.write = qmi_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
     reg.base = XIP_AUX_BASE;
     reg.opaque = &xip_aux;
-    reg.read = bank_read;
-    reg.write = bank_write;
+    reg.read = xip_aux_read;
+    reg.write = xip_aux_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = HSTX_FIFO_SIZE;
+    reg.base = HSTX_FIFO_BASE;
+    reg.opaque = &hstx_fifo;
+    reg.read = hstx_fifo_read;
+    reg.write = hstx_fifo_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     reg.size = BOOTRAM_SIZE;
@@ -1585,14 +1904,20 @@ void mm_rp2350_mmio_reset(void)
     memset(&xosc, 0, sizeof(xosc));
     memset(&pll_sys, 0, sizeof(pll_sys));
     memset(&pll_usb, 0, sizeof(pll_usb));
+    memset(&hstx_ctrl, 0, sizeof(hstx_ctrl));
     memset(&xip_ctrl, 0, sizeof(xip_ctrl));
     memset(&xip_aux, 0, sizeof(xip_aux));
+    memset(&qmi_regs, 0, sizeof(qmi_regs));
     memset(&bootram, 0, sizeof(bootram));
     bootram.regs[BOOTRAM_BOOTLOCK_STAT / 4u] = 0xffu;
     memset(&ticks, 0, sizeof(ticks));
     mm_rp2350_usb_reset();
     mm_rp2350_coproc_reset();
     access_ctrl_reset();
+    hstx_fifo_clear(&hstx_fifo);
+    qmi_fifo_clear(&qmi_rx);
+    qmi_fifo_clear(&qmi_tx);
+    qmi_regs.regs[QMI_DIRECT_CSR / 4u] = QMI_DIRECT_CSR_RESET;
 
     rp2350_mc.core1_state = 1u; /* bootrom wait */
     rp2350_fifo_clear(&rp2350_mc.rx[0]);
