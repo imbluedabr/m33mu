@@ -179,6 +179,9 @@ static void memfault_reason(const struct mm_prot_ctx *ctx,
     if (ctx != 0 && ctx->cpu != 0) {
         privileged = mm_cpu_get_privileged(ctx->cpu);
     }
+    if (prot_trace_level() <= 0) {
+        return;
+    }
     printf("[MEMFAULT_CAUSE] sec=%s type=%s addr=0x%08lx reason=%s attr=%s addr_sec=%s src=%s priv=%d\n",
            sec_name(sec),
            type_name(type),
