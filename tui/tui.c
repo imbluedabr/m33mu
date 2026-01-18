@@ -1463,18 +1463,15 @@ static void tui_draw(struct mm_tui *tui)
                               TUI_FG_DIM, console_bg, "USB: Not running");
                 y++;
             } else {
-                snprintf(buf, sizeof(buf), "USB: running=%s connected=%s imported=%s",
+                snprintf(buf, sizeof(buf), "USB: running=%s connected=%s configured=%s",
                          usb_status.running ? "yes" : "no",
                          usb_status.connected ? "yes" : "no",
-                         usb_status.imported ? "yes" : "no");
+                         usb_status.configured ? "yes" : "no");
                 tui_draw_text(split_x + 2, y, inner_x + inner_w - 1,
                               console_fg, console_bg, buf);
                 y++;
                 if (y < log_y + log_h) {
-                    snprintf(buf, sizeof(buf), "  USBIP port=%d busid=%s devid=0x%08lx",
-                             usb_status.port,
-                             usb_status.busid,
-                             (unsigned long)usb_status.devid);
+                    snprintf(buf, sizeof(buf), "  UDC=%s", usb_status.udc);
                     tui_draw_text(split_x + 2, y, inner_x + inner_w - 1,
                                   console_fg, console_bg, buf);
                     y++;

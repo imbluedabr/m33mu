@@ -16,16 +16,17 @@ struct mm_usbdev_ops {
 struct mm_usbdev_status {
     mm_bool running;
     mm_bool connected;
-    mm_bool imported;
-    int port;
-    mm_u32 devid;
-    char busid[32];
+    mm_bool configured;
+    char udc[128];
 };
 
 mm_bool mm_usbdev_register(const struct mm_usbdev_ops *ops, void *opaque);
-mm_bool mm_usbdev_start(int port);
+mm_bool mm_usbdev_start(const char *udc_name);
 void mm_usbdev_poll(void);
 void mm_usbdev_stop(void);
 void mm_usbdev_get_status(struct mm_usbdev_status *out);
+void mm_usbdev_set_connected(mm_bool connected);
+void mm_usbdev_set_irq_enabled(mm_bool enabled);
+void mm_usbdev_set_paused(mm_bool paused);
 
 #endif /* M33MU_USBDEV_H */

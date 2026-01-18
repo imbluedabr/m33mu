@@ -554,7 +554,7 @@ mm_bool mm_stm32h563_usb_register_mmio(struct mmio_bus *bus)
     memset(&g_usb, 0, sizeof(g_usb));
     g_usb.regs[USB_BTABLE / 4u] = 0u;
     if (!mm_usbdev_register(&usb_ops, &g_usb)) {
-        /* No-op: USB/IP will stay inactive if no frontend is used. */
+        /* No-op: USB backend will stay inactive if no frontend is used. */
     }
     usb_trace("register mmio USB base=0x%08x size=0x%x PMA base=0x%08x size=0x%x",
               USB_BASE, USB_SIZE, USB_PMA_BASE, USB_PMA_SIZE);

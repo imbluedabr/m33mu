@@ -144,7 +144,7 @@ Options:
 - `--meminfo`: emit `[MEMINFO]` logs for SAU/MPU layout and register writes.
 - `--no-tz`: force non-secure boot and disable TrustZone protections for the session.
 - `--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]`: attach a SPI flash image.
-- `--usb` or `--usb:port=<n>`: enable USB/IP backend (default port 3240).
+- `--usb` or `--usb:udc=<name>` / `--usb:path=/dev/gadget/<name>`: enable GadgetFS USB backend (default UDC `dummy_udc.0`; requires gadgetfs mounted under `/dev/gadget` and dummy_hcd loaded).
 - `--tap[:tap0]`: enable Ethernet TAP backend (default interface: `tap0`).
 - `--vde[:/var/run/vde.ctl]`: enable Ethernet VDE backend (default socket: `/var/run/vde.ctl`).
 - `--tpm:SPIx:cs=GPIONAME[:file=<path>]`: attach a TPM TIS device (optional NV backing file).

@@ -12,7 +12,9 @@
 #include "m33mu/nvic.h"
 
 #define USB_BASE       0x50110000u
-#define USB_SIZE       0x1000u
+#define USB_REGS_SIZE  0x1000u
+#define USB_ALIAS_STRIDE 0x1000u
+#define USB_SIZE       0x4000u
 #define USB_DPRAM_BASE 0x50100000u
 #define USB_DPRAM_SIZE 0x1000u
 
@@ -36,6 +38,9 @@
 #define INTR_TRANS_COMPLETE (1u << 3)
 #define INTR_SETUP_REQ (1u << 16)
 #define INTR_BUS_RESET (1u << 12)
+#define SIE_STATUS_SETUP_REC (1u << 17)
+#define SIE_STATUS_CONNECTED (1u << 16)
+#define SIE_STATUS_BUS_RESET (1u << 19)
 
 #define USB_IRQ 14
 
@@ -52,7 +57,7 @@
 #define BUF_CTRL_LENGTH_MASK 0x3ffu
 #define BUF_CTRL_AVAILABLE (1u << 10)
 #define BUF_CTRL_STALL (1u << 11)
-#define BUF_CTRL_RESET (1u << 12)
+#define BUF_CTRL_SEL (1u << 12)
 #define BUF_CTRL_PID (1u << 13)
 #define BUF_CTRL_LAST (1u << 14)
 #define BUF_CTRL_FULL (1u << 15)
@@ -61,18 +66,32 @@
 #define BUF_CTRL_AVAILABLE1 (1u << 26)
 #define BUF_CTRL_FULL1 (1u << 31)
 
-#define EP0_OUT_BUF_BASE 0x100u
-#define EP0_IN_BUF_BASE  0x140u
+#define EP0_BUF_A_BASE 0x100u
+#define EP0_BUF_B_BASE 0x140u
 #define EP0_BUF_SIZE 64u
 
 struct rp2350_usb {
-    mm_u32 regs[USB_SIZE / 4u];
+    mm_u32 regs[USB_REGS_SIZE / 4u];
     mm_u8 dpram[USB_DPRAM_SIZE];
     struct mm_nvic *nvic;
+    mm_bool irq_enabled;
+    mm_bool irq_vector_ready;
 };
 
 static struct rp2350_usb g_usb;
 static int g_usb_trace = -1;
+
+static void usb_update_ints(void);
+
+static void usb_irq_enable_hook(mm_u32 irq, mm_bool enable, void *opaque)
+{
+    (void)opaque;
+    if (irq != USB_IRQ) return;
+    g_usb.irq_enabled = enable;
+    mm_usbdev_set_irq_enabled(enable ? MM_TRUE : MM_FALSE);
+    fprintf(stderr, "[USB] IRQ %s\n", enable ? "enabled" : "disabled");
+    usb_update_ints();
+}
 
 static mm_bool usb_trace_enabled(void)
 {
@@ -92,6 +111,33 @@ static void usb_trace(const char *fmt, ...)
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, "\n");
     va_end(ap);
+}
+
+static mm_u32 apply_write(mm_u32 cur, mm_u32 offset_in_reg, mm_u32 size_bytes, mm_u32 value)
+{
+    mm_u32 shift = offset_in_reg * 8u;
+    mm_u32 mask = (size_bytes == 4u) ? 0xffffffffu : ((1u << (size_bytes * 8u)) - 1u);
+    mm_u32 shifted = (value & mask) << shift;
+    return (cur & ~(mask << shift)) | shifted;
+}
+
+static mm_u32 alias_value(mm_u32 offset_in_reg, mm_u32 size_bytes, mm_u32 value)
+{
+    return apply_write(0u, offset_in_reg, size_bytes, value);
+}
+
+static mm_u32 alias_base_offset(mm_u32 offset, mm_u32 *alias_out)
+{
+    mm_u32 alias = 0u;
+    mm_u32 base = offset;
+    if (offset >= USB_ALIAS_STRIDE && offset < USB_SIZE) {
+        alias = (offset >> 12) & 0x3u;
+        base = offset & 0xfffu;
+    }
+    if (alias_out != 0) {
+        *alias_out = alias;
+    }
+    return base;
 }
 
 static mm_u32 dpram_read32(mm_u32 offset)
@@ -136,8 +182,10 @@ static mm_u32 dpram_ep_buf_ctrl_offset(int ep, mm_bool in)
 
 static mm_u32 ep_buffer_address(int ep, mm_bool in)
 {
+    mm_u32 buf_ctrl;
     if (ep == 0) {
-        return in ? EP0_IN_BUF_BASE : EP0_OUT_BUF_BASE;
+        buf_ctrl = dpram_read32(dpram_ep_buf_ctrl_offset(0, in));
+        return (buf_ctrl & BUF_CTRL_SEL) != 0u ? EP0_BUF_A_BASE : EP0_BUF_B_BASE;
     }
     return dpram_read32(dpram_ep_ctrl_offset(ep, in)) & EP_CTRL_BUF_ADDR_MASK;
 }
@@ -167,13 +215,43 @@ static mm_u32 buf_set_length(mm_u32 ctrl, mm_u32 len)
 
 static void usb_update_ints(void)
 {
-    mm_u32 intr = g_usb.regs[USB_INTR / 4u];
+    mm_u32 intr = 0u;
     mm_u32 inte = g_usb.regs[USB_INTE / 4u];
     mm_u32 intf = g_usb.regs[USB_INTF / 4u];
-    mm_u32 ints = (intr & inte) | intf;
+    mm_u32 ints;
+    mm_bool enabled = MM_FALSE;
+    if (g_usb.regs[USB_BUFF_STATUS / 4u] != 0u) {
+        intr |= INTR_BUFF_STATUS | INTR_TRANS_COMPLETE;
+    }
+    if ((g_usb.regs[USB_SIE_STATUS / 4u] & SIE_STATUS_SETUP_REC) != 0u) {
+        intr |= INTR_SETUP_REQ;
+    }
+    if ((g_usb.regs[USB_SIE_STATUS / 4u] & SIE_STATUS_BUS_RESET) != 0u) {
+        intr |= INTR_BUS_RESET;
+    }
+    g_usb.regs[USB_INTR / 4u] = intr;
+    ints = (intr & inte) | intf;
     g_usb.regs[USB_INTS / 4u] = ints;
-    if (ints != 0u && g_usb.nvic != 0) {
-        mm_nvic_set_pending(g_usb.nvic, USB_IRQ, MM_TRUE);
+    if (g_usb.nvic != 0) {
+        mm_u32 idx = USB_IRQ / 32u;
+        mm_u32 bit = 1u << (USB_IRQ % 32u);
+        enabled = (g_usb.nvic->enable_mask[idx] & bit) != 0u ? MM_TRUE : MM_FALSE;
+    }
+    if (enabled != g_usb.irq_enabled) {
+        g_usb.irq_enabled = enabled;
+        mm_usbdev_set_irq_enabled(enabled ? MM_TRUE : MM_FALSE);
+        fprintf(stderr, "[USB] IRQ %s\n", enabled ? "enabled" : "disabled");
+    }
+    if (g_usb.nvic != 0) {
+        if (ints != 0u && enabled && g_usb.irq_vector_ready) {
+            mm_nvic_set_pending(g_usb.nvic, USB_IRQ, MM_TRUE);
+            usb_trace("irq pend set ints=0x%08lx enabled=%u vector=%u",
+                      (unsigned long)ints, enabled ? 1u : 0u, g_usb.irq_vector_ready ? 1u : 0u);
+        } else {
+            mm_nvic_set_pending(g_usb.nvic, USB_IRQ, MM_FALSE);
+            usb_trace("irq pend clr ints=0x%08lx enabled=%u vector=%u",
+                      (unsigned long)ints, enabled ? 1u : 0u, g_usb.irq_vector_ready ? 1u : 0u);
+        }
     }
 }
 
@@ -182,7 +260,8 @@ static void usb_set_buff_status(int ep, mm_bool in)
     mm_u32 bit = (mm_u32)(ep * 2 + (in ? 0 : 1));
     g_usb.regs[USB_BUFF_STATUS / 4u] |= (1u << bit);
     g_usb.regs[USB_BUFF_CPU_SHOULD_HANDLE / 4u] |= (1u << bit);
-    g_usb.regs[USB_INTR / 4u] |= (INTR_BUFF_STATUS | INTR_TRANS_COMPLETE);
+    fprintf(stderr, "[USB] buff_status set ep=%d dir=%s mask=0x%08lx\n",
+            ep, in ? "IN" : "OUT", (unsigned long)g_usb.regs[USB_BUFF_STATUS / 4u]);
     usb_update_ints();
 }
 
@@ -197,6 +276,25 @@ static mm_bool usb_ep_out(void *opaque, int ep, const mm_u8 *data, mm_u32 len, m
     if (!usb_controller_enabled()) return MM_FALSE;
     if (ep < 0 || ep > 15) return MM_FALSE;
     if (!ep_enabled(ep, MM_FALSE)) return MM_FALSE;
+
+    if (setup && ep == 0 && data != 0 && len >= 8u) {
+        dpram_write32(DPRAM_SETUP_PACKET_LOW,
+                      (mm_u32)data[0] | ((mm_u32)data[1] << 8) |
+                      ((mm_u32)data[2] << 16) | ((mm_u32)data[3] << 24));
+        dpram_write32(DPRAM_SETUP_PACKET_HIGH,
+                      (mm_u32)data[4] | ((mm_u32)data[5] << 8) |
+                      ((mm_u32)data[6] << 16) | ((mm_u32)data[7] << 24));
+        usb_trace("setup pkt bmReq=0x%02x bReq=0x%02x wValue=0x%04x wIndex=0x%04x wLen=0x%04x",
+                  (unsigned)data[0], (unsigned)data[1],
+                  (unsigned)(data[2] | ((mm_u16)data[3] << 8)),
+                  (unsigned)(data[4] | ((mm_u16)data[5] << 8)),
+                  (unsigned)(data[6] | ((mm_u16)data[7] << 8)));
+        g_usb.regs[USB_SIE_STATUS / 4u] |= SIE_STATUS_SETUP_REC;
+        g_usb.regs[USB_INTR / 4u] |= INTR_SETUP_REQ;
+        usb_update_ints();
+        usb_trace("rp2350 usb setup packet ep0 len=%u", (unsigned)len);
+        return MM_TRUE;
+    }
 
     buf_ctrl_off = dpram_ep_buf_ctrl_offset(ep, MM_FALSE);
     buf_ctrl = dpram_read32(buf_ctrl_off);
@@ -215,16 +313,6 @@ static mm_bool usb_ep_out(void *opaque, int ep, const mm_u8 *data, mm_u32 len, m
     buf_ctrl &= ~BUF_CTRL_AVAILABLE;
     buf_ctrl |= BUF_CTRL_FULL | BUF_CTRL_LAST;
     dpram_write32(buf_ctrl_off, buf_ctrl);
-
-    if (setup && ep == 0 && data != 0 && len >= 8u) {
-        dpram_write32(DPRAM_SETUP_PACKET_LOW,
-                      (mm_u32)data[0] | ((mm_u32)data[1] << 8) |
-                      ((mm_u32)data[2] << 16) | ((mm_u32)data[3] << 24));
-        dpram_write32(DPRAM_SETUP_PACKET_HIGH,
-                      (mm_u32)data[4] | ((mm_u32)data[5] << 8) |
-                      ((mm_u32)data[6] << 16) | ((mm_u32)data[7] << 24));
-        g_usb.regs[USB_INTR / 4u] |= INTR_SETUP_REQ;
-    }
 
     usb_set_buff_status(ep, MM_FALSE);
     usb_trace("rp2350 usb ep_out ep=%d len=%u setup=%u", ep, (unsigned)len, setup ? 1u : 0u);
@@ -278,7 +366,7 @@ static mm_bool usb_ep_in(void *opaque, int ep, mm_u8 *data, mm_u32 *len_inout)
 static void usb_bus_reset(void *opaque)
 {
     (void)opaque;
-    g_usb.regs[USB_INTR / 4u] |= INTR_BUS_RESET;
+    g_usb.regs[USB_SIE_STATUS / 4u] |= SIE_STATUS_BUS_RESET;
     usb_update_ints();
 }
 
@@ -291,25 +379,39 @@ static const struct mm_usbdev_ops usb_ops = {
 static mm_bool usb_mmio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
     struct rp2350_usb *u = (struct rp2350_usb *)opaque;
+    mm_u32 alias;
+    mm_u32 base_off;
     mm_u32 val;
+    static mm_u32 last_buff_status = 0;
+    static mm_u32 last_ints = 0;
     if (u == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
     if (offset + size_bytes > USB_SIZE) return MM_FALSE;
+    base_off = alias_base_offset(offset, &alias);
+    if (base_off + size_bytes > USB_REGS_SIZE) return MM_FALSE;
 
-    if (offset == USB_INTS && size_bytes == 4u) {
+    if (base_off == USB_INTS && size_bytes == 4u) {
         usb_update_ints();
         *value_out = u->regs[USB_INTS / 4u];
+        if (*value_out != last_ints) {
+            fprintf(stderr, "[USB] INTS=0x%08lx\n", (unsigned long)*value_out);
+            last_ints = *value_out;
+        }
         return MM_TRUE;
     }
-    if (offset == USB_BUFF_STATUS && size_bytes == 4u) {
+    if (base_off == USB_BUFF_STATUS && size_bytes == 4u) {
         *value_out = u->regs[USB_BUFF_STATUS / 4u];
+        if (*value_out != last_buff_status) {
+            fprintf(stderr, "[USB] BUFF_STATUS=0x%08lx\n", (unsigned long)*value_out);
+            last_buff_status = *value_out;
+        }
         return MM_TRUE;
     }
-    if (offset == USB_BUFF_CPU_SHOULD_HANDLE && size_bytes == 4u) {
+    if (base_off == USB_BUFF_CPU_SHOULD_HANDLE && size_bytes == 4u) {
         *value_out = u->regs[USB_BUFF_CPU_SHOULD_HANDLE / 4u];
         return MM_TRUE;
     }
 
-    val = u->regs[offset / 4u];
+    val = u->regs[base_off / 4u];
     *value_out = val;
     return MM_TRUE;
 }
@@ -317,40 +419,99 @@ static mm_bool usb_mmio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_
 static mm_bool usb_mmio_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
     struct rp2350_usb *u = (struct rp2350_usb *)opaque;
+    mm_u32 alias;
+    mm_u32 base_off;
+    mm_bool pullup_before;
+    mm_bool pullup_after;
     if (u == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
     if (offset + size_bytes > USB_SIZE) return MM_FALSE;
+    base_off = alias_base_offset(offset, &alias);
+    if (base_off + size_bytes > USB_REGS_SIZE) return MM_FALSE;
 
-    if (offset == USB_INTR && size_bytes == 4u) {
-        u->regs[USB_INTR / 4u] &= ~value;
+    if (alias != 0u) {
+        mm_u32 idx = base_off / 4u;
+        mm_u32 mask = alias_value(base_off & 3u, size_bytes, value);
+        mm_u32 reg = u->regs[idx];
+        pullup_before = (reg & SIE_CTRL_PULLUP_EN) != 0u;
+        switch (alias) {
+        case 1u: reg ^= mask; break;
+        case 2u: reg |= mask; break;
+        case 3u: reg &= ~mask; break;
+        default: break;
+        }
+        u->regs[idx] = reg;
+        pullup_after = (reg & SIE_CTRL_PULLUP_EN) != 0u;
+        if (base_off == USB_SIE_CTRL && pullup_before != pullup_after) {
+            mm_usbdev_set_connected(pullup_after ? MM_TRUE : MM_FALSE);
+            if (pullup_after) {
+                g_usb.regs[USB_SIE_STATUS / 4u] |= SIE_STATUS_CONNECTED;
+            } else {
+                g_usb.regs[USB_SIE_STATUS / 4u] &= ~SIE_STATUS_CONNECTED;
+            }
+        }
+        if (base_off == USB_SIE_STATUS) {
+            if (usb_trace_enabled()) {
+                usb_trace("sie_status alias write off=0x%03x alias=%lu mask=0x%08lx new=0x%08lx",
+                          (unsigned)base_off, (unsigned long)alias,
+                          (unsigned long)mask, (unsigned long)u->regs[idx]);
+            }
+            usb_update_ints();
+        }
+        if (base_off == USB_SIE_CTRL && (reg & SIE_CTRL_RESET_BUS) != 0u) {
+            g_usb.regs[USB_INTR / 4u] |= INTR_BUS_RESET;
+        }
         usb_update_ints();
         return MM_TRUE;
     }
-    if (offset == USB_INTE && size_bytes == 4u) {
+
+    if (base_off == USB_INTR && size_bytes == 4u) {
+        return MM_TRUE;
+    }
+    if (base_off == USB_SIE_STATUS && size_bytes == 4u) {
+        u->regs[USB_SIE_STATUS / 4u] &= ~value;
+        if ((value & (SIE_STATUS_SETUP_REC | SIE_STATUS_BUS_RESET)) != 0u) {
+            usb_trace("sie_status clear mask=0x%08lx new=0x%08lx",
+                      (unsigned long)value,
+                      (unsigned long)u->regs[USB_SIE_STATUS / 4u]);
+            usb_update_ints();
+        }
+        return MM_TRUE;
+    }
+    if (base_off == USB_INTE && size_bytes == 4u) {
         u->regs[USB_INTE / 4u] = value;
+        printf("[USB] INTE=0x%08lx\n", (unsigned long)value);
         usb_update_ints();
         return MM_TRUE;
     }
-    if (offset == USB_INTF && size_bytes == 4u) {
+    if (base_off == USB_INTF && size_bytes == 4u) {
         u->regs[USB_INTF / 4u] |= value;
         usb_update_ints();
         return MM_TRUE;
     }
-    if (offset == USB_BUFF_STATUS && size_bytes == 4u) {
+    if (base_off == USB_BUFF_STATUS && size_bytes == 4u) {
         u->regs[USB_BUFF_STATUS / 4u] &= ~value;
         u->regs[USB_BUFF_CPU_SHOULD_HANDLE / 4u] &= ~value;
         usb_update_ints();
         return MM_TRUE;
     }
-    if (offset == USB_BUFF_CPU_SHOULD_HANDLE && size_bytes == 4u) {
+    if (base_off == USB_BUFF_CPU_SHOULD_HANDLE && size_bytes == 4u) {
         u->regs[USB_BUFF_CPU_SHOULD_HANDLE / 4u] &= ~value;
         usb_update_ints();
         return MM_TRUE;
     }
 
-    u->regs[offset / 4u] = value;
-    if (offset == USB_SIE_CTRL && (value & SIE_CTRL_RESET_BUS) != 0u) {
+    u->regs[base_off / 4u] = value;
+    if (base_off == USB_SIE_CTRL && (value & SIE_CTRL_RESET_BUS) != 0u) {
         g_usb.regs[USB_INTR / 4u] |= INTR_BUS_RESET;
         usb_update_ints();
+    }
+    if (base_off == USB_SIE_CTRL) {
+        mm_usbdev_set_connected((value & SIE_CTRL_PULLUP_EN) != 0u ? MM_TRUE : MM_FALSE);
+        if ((value & SIE_CTRL_PULLUP_EN) != 0u) {
+            g_usb.regs[USB_SIE_STATUS / 4u] |= SIE_STATUS_CONNECTED;
+        } else {
+            g_usb.regs[USB_SIE_STATUS / 4u] &= ~SIE_STATUS_CONNECTED;
+        }
     }
     usb_update_ints();
     return MM_TRUE;
@@ -389,6 +550,14 @@ static mm_bool dpram_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
             g_usb.dpram[offset + i] = (mm_u8)((value >> (8u * i)) & 0xffu);
         }
     }
+    if (usb_trace_enabled()) {
+        if ((offset >= DPRAM_EP0_IN_BUF_CTRL && offset < DPRAM_EP0_IN_BUF_CTRL + 4u) ||
+            (offset >= DPRAM_EP0_OUT_BUF_CTRL && offset < DPRAM_EP0_OUT_BUF_CTRL + 4u)) {
+            usb_trace("dpram ep0 buf_ctrl write off=0x%03x size=%u val=0x%08lx",
+                      (unsigned)offset, (unsigned)size_bytes,
+                      (unsigned long)dpram_read32(offset & ~3u));
+        }
+    }
     return MM_TRUE;
 }
 
@@ -398,7 +567,7 @@ mm_bool mm_rp2350_usb_register_mmio(struct mmio_bus *bus)
     if (bus == 0) return MM_FALSE;
     memset(&g_usb, 0, sizeof(g_usb));
     if (!mm_usbdev_register(&usb_ops, &g_usb)) {
-        /* USB/IP inactive if no frontend is used. */
+        /* USB backend inactive if no frontend is used. */
     }
 
     memset(&reg, 0, sizeof(reg));
@@ -424,10 +593,16 @@ void mm_rp2350_usb_set_nvic(struct mm_nvic *nvic)
     g_usb.nvic = nvic;
     if (nvic != 0) {
         mm_nvic_set_itns(nvic, USB_IRQ, MM_TRUE);
+        mm_nvic_set_enable_hook(usb_irq_enable_hook, 0);
     }
 }
 
 void mm_rp2350_usb_reset(void)
 {
     memset(&g_usb, 0, sizeof(g_usb));
+}
+
+void mm_rp2350_usb_set_irq_vector_ready(mm_bool ready)
+{
+    g_usb.irq_vector_ready = ready;
 }

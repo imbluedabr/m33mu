@@ -244,7 +244,7 @@ extern void mm_system_request_reset(void);
 #define UART_SIZE 0x2000u
 #define SPI_SIZE  0x1000u
 #define USB_BASE  0x50110000u
-#define USB_SIZE  0x1000u
+#define USB_SIZE  0x4000u
 #define USB_DPRAM_BASE 0x50100000u
 #define USB_DPRAM_SIZE 0x1000u
 #define DMA_BASE 0x50000000u

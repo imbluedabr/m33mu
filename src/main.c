@@ -54,6 +54,7 @@
 #include "m33mu/usbdev.h"
 #include "m33mu/eth_backend.h"
 #include "rp2350/rp2350_bootrom.h"
+#include "rp2350/rp2350_usb.h"
 #ifdef M33MU_HAS_LIBTPMS
 #include "m33mu/tpm_tis.h"
 #endif
@@ -1051,7 +1052,7 @@ static mm_bool handle_tui(struct mm_tui *tui,
 }
 
 static mm_bool parse_u32(const char *s, mm_u32 *out);
-static mm_bool parse_usb_spec(const char *spec, int *port_out);
+static mm_bool parse_usb_spec(const char *spec, char *udc_out, size_t udc_len);
 static mm_bool is_vfp_insn_fast(mm_u32 insn);
 static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
                                          const struct mm_cpu *cpu,
@@ -1084,6 +1085,105 @@ static void host_sync_if_needed(mm_u64 vcycles,
         nanosleep(&req, 0);
     }
     *vcycles_last_sync = vcycles;
+}
+
+static struct mm_cpu *g_cpu0 = 0;
+static struct mm_cpu *g_cpu1 = 0;
+static struct mm_nvic *g_nvic0 = 0;
+static struct mm_nvic *g_nvic1 = 0;
+
+static struct mm_nvic *nvic_for_cpu(const struct mm_cpu *cpu)
+{
+    if (cpu == g_cpu1) return g_nvic1;
+    return g_nvic0;
+}
+
+static mm_bool addr_in_flash(const struct mm_memmap *map, mm_u32 addr)
+{
+    mm_u32 base = 0u;
+    mm_u32 size = 0u;
+    if (map == 0) return MM_FALSE;
+    if (map->flash_size_ns != 0u) {
+        base = map->flash_base_ns;
+        size = map->flash_size_ns;
+    } else if (map->flash.length > 0u) {
+        base = map->flash.base;
+        size = (mm_u32)map->flash.length;
+    }
+    if (size != 0u && addr >= base && addr < (base + size)) {
+        return MM_TRUE;
+    }
+    if (map->flash_size_s != 0u) {
+        base = map->flash_base_s;
+        size = map->flash_size_s;
+        if (addr >= base && addr < (base + size)) {
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
+static mm_bool addr_in_ram_region(mm_u32 addr, mm_u32 base, mm_u32 size)
+{
+    if (size == 0u) return MM_FALSE;
+    return (addr >= base && addr < (base + size)) ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool addr_exec_ok(const struct mm_memmap *map, mm_u32 addr)
+{
+    mm_u32 instr = 0u;
+    if (map == 0 || addr == 0u) return MM_FALSE;
+    if (!mm_memmap_fetch_read16(map, MM_NONSECURE, addr, &instr)) return MM_FALSE;
+    return (instr != 0u) ? MM_TRUE : MM_FALSE;
+}
+
+static void rp2350_usb_sync_vector_ready(const struct mm_scs *scs, const struct mm_memmap *map)
+{
+    mm_u32 entry = 0;
+    mm_u32 vec_addr;
+    mm_bool valid = MM_FALSE;
+    mm_u32 entry_addr = 0u;
+    mm_u32 slot1 = 0u;
+    mm_u32 slot1_addr;
+    mm_u32 slot_handler = 0u;
+    static mm_bool slot_logged = MM_FALSE;
+    static mm_u32 last_entry = 0;
+    static mm_bool last_valid = MM_FALSE;
+    if (scs == 0 || map == 0) return;
+    vec_addr = scs->vtor_ns + (mm_u32)(16u + 14u) * 4u;
+    if (mm_memmap_read(map, MM_NONSECURE, vec_addr, 4u, &entry)) {
+        entry_addr = entry & ~1u;
+        valid = (entry_addr != 0u && addr_in_flash(map, entry_addr)) ? MM_TRUE : MM_FALSE;
+        if (!valid && entry_addr != 0u &&
+            addr_in_ram_region(scs->vtor_ns, scs->vtor_ns, 0x1000u)) {
+            if (mm_memmap_read(map, MM_NONSECURE, scs->vtor_ns + 4u, 4u, &slot1)) {
+                slot1_addr = slot1 & ~1u;
+                if (slot1_addr != 0u && addr_in_flash(map, slot1_addr) &&
+                    addr_in_ram_region(entry_addr, scs->vtor_ns, 0x1000u) &&
+                    mm_memmap_read(map, MM_NONSECURE, entry_addr + 8u, 4u, &slot_handler) &&
+                    slot_handler != 0u && addr_exec_ok(map, slot_handler & ~1u)) {
+                    valid = MM_TRUE;
+                }
+                if (!slot_logged) {
+                    fprintf(stderr, "[USB] IRQ slot handler=0x%08x\n", slot_handler);
+                    slot_logged = MM_TRUE;
+                }
+            }
+        }
+        if (entry != last_entry || valid != last_valid) {
+            fprintf(stderr, "[USB] IRQ vector entry=0x%08x ready=%s\n",
+                    entry, valid ? "yes" : "no");
+            last_entry = entry;
+            last_valid = valid;
+        }
+        mm_rp2350_usb_set_irq_vector_ready(valid);
+    } else {
+        mm_rp2350_usb_set_irq_vector_ready(MM_FALSE);
+        if (last_valid) {
+            fprintf(stderr, "[USB] IRQ vector entry unavailable\n");
+        }
+        last_valid = MM_FALSE;
+    }
 }
 
 static void update_tui_steps_latched(mm_bool opt_gdb,
@@ -1873,20 +1973,26 @@ static mm_bool parse_u32(const char *s, mm_u32 *out)
     return MM_TRUE;
 }
 
-static mm_bool parse_usb_spec(const char *spec, int *port_out)
+static mm_bool parse_usb_spec(const char *spec, char *udc_out, size_t udc_len)
 {
-    mm_u32 port;
-    if (spec == 0 || port_out == 0) return MM_FALSE;
-    if (strncmp(spec, "port=", 5) != 0) {
+    const char *value;
+    size_t len;
+    if (spec == 0 || udc_out == 0 || udc_len == 0u) return MM_FALSE;
+    if (strncmp(spec, "udc=", 4) == 0) {
+        value = spec + 4;
+    } else if (strncmp(spec, "path=", 5) == 0) {
+        value = spec + 5;
+    } else {
         return MM_FALSE;
     }
-    if (!parse_u32(spec + 5, &port)) {
+    if (value[0] == '\0') {
         return MM_FALSE;
     }
-    if (port == 0u || port > 65535u) {
+    len = strlen(value);
+    if (len + 1u > udc_len) {
         return MM_FALSE;
     }
-    *port_out = (int)port;
+    memcpy(udc_out, value, len + 1u);
     return MM_TRUE;
 }
 
@@ -2254,6 +2360,12 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     }
     if (cpu->exc_depth < MM_EXC_STACK_MAX) {
         exc_num = cpu->exc_num[cpu->exc_depth];
+    }
+    if (exc_num >= 16u) {
+        struct mm_nvic *nvic = nvic_for_cpu(cpu);
+        if (nvic != 0) {
+            mm_nvic_set_active(nvic, (mm_u32)(exc_num - 16u), MM_FALSE);
+        }
     }
     if (stack_trace_enabled() ||
         (svc_stack_trace_enabled() && (cpu->xpsr & 0x1ffu) == MM_VECT_SVCALL)) {
@@ -2647,6 +2759,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         if (pend_irq >= 0) {
             mm_u32 exc_num = 16u + (mm_u32)pend_irq;
             mm_nvic_set_pending(nvic, (mm_u32)pend_irq, MM_FALSE);
+            mm_nvic_set_active(nvic, (mm_u32)pend_irq, MM_TRUE);
             if (!enter_exception_ex(cpu, map, scs, exc_num, cpu->r[15] & ~1u, cpu->xpsr, irq_sec)) {
                 if (done) *done = MM_TRUE;
             } else {
@@ -3619,7 +3732,7 @@ int main(int argc, char **argv)
     mm_bool last_running = MM_TRUE;
     mm_bool opt_strcmp_trace = MM_FALSE;
     mm_bool opt_usb = MM_FALSE;
-    int usb_port = 3240;
+    char usb_udc[128];
     enum mm_eth_backend_type eth_backend = MM_ETH_BACKEND_NONE;
     const char *eth_spec = 0;
     struct mm_spiflash_cfg spiflash_cfgs[8];
@@ -3656,6 +3769,8 @@ int main(int argc, char **argv)
     mm_u8 *spiflash_boot_data = 0;
     size_t spiflash_boot_size = 0;
     mm_u32 spiflash_boot_base = 0;
+
+    snprintf(usb_udc, sizeof(usb_udc), "dummy_udc.0");
 
     if (strcmp_trace_env != 0 && strcmp_trace_env[0] != '\0') {
         if (parse_pc_trace_range(strcmp_trace_env, &strcmp_trace_start, &strcmp_trace_end)) {
@@ -3839,7 +3954,7 @@ int main(int argc, char **argv)
             opt_usb = MM_TRUE;
         } else if (strncmp(argv[i], "--usb:", 6) == 0) {
             opt_usb = MM_TRUE;
-            if (!parse_usb_spec(argv[i] + 6, &usb_port)) {
+            if (!parse_usb_spec(argv[i] + 6, usb_udc, sizeof(usb_udc))) {
                 fprintf(stderr, "invalid usb spec: %s\n", argv[i]);
                 return 1;
             }
@@ -3925,7 +4040,7 @@ int main(int argc, char **argv)
                         "[--boot flash|ram|spiflash] "
                         "[--boot-offset=0xN] "
                         "[--spiflash:SPIx:file=<path>:size=<n>[:mmap=0xaddr][:cs=GPIONAME]] "
-                        "[--usb[:port=<n>]] "
+                        "[--usb[:udc=<name>|path=/dev/gadget/<name>]] "
                         "[--tap[:name]] [--vde[:/path/to/vde.ctl]] "
 #ifdef M33MU_HAS_LIBTPMS
                         "[--tpm:SPIx:cs=GPIONAME[:file=<path>]] "
@@ -4447,6 +4562,12 @@ int main(int argc, char **argv)
             if (cfg.core_count > 1u) {
                 mm_nvic_init(&nvic1);
             }
+            g_cpu0 = &cpu;
+            g_nvic0 = &nvic;
+            if (cfg.core_count > 1u) {
+                g_cpu1 = &cpu1;
+                g_nvic1 = &nvic1;
+            }
             if (force_ns_boot) {
                 mm_u32 irq;
                 for (irq = 0; irq < MM_MAX_IRQ; ++irq) {
@@ -4576,8 +4697,8 @@ int main(int argc, char **argv)
                     }
                 }
                 if (opt_usb) {
-                    if (!mm_usbdev_start(usb_port)) {
-                        fprintf(stderr, "failed to start USB/IP server\n");
+                    if (!mm_usbdev_start(usb_udc)) {
+                        fprintf(stderr, "failed to start USB gadget backend\n");
                         rc = 1;
                         goto cleanup;
                     }
@@ -4760,6 +4881,8 @@ int main(int argc, char **argv)
                     mm_target_usart_poll(&cfg);
                     mm_target_spi_poll(&cfg);
                     mm_target_eth_poll(&cfg);
+                    rp2350_usb_sync_vector_ready(&scs, &map);
+                    mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
                     mm_usbdev_poll();
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                              &tui_steps_offset, &tui_steps_latched);
@@ -4869,6 +4992,8 @@ int main(int argc, char **argv)
                             mm_target_usart_poll(&cfg);
                             mm_target_spi_poll(&cfg);
                             mm_target_eth_poll(&cfg);
+                            rp2350_usb_sync_vector_ready(&scs, &map);
+                            mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                                      &tui_steps_offset, &tui_steps_latched);
@@ -4903,6 +5028,8 @@ int main(int argc, char **argv)
                             mm_target_usart_poll(&cfg);
                             mm_target_spi_poll(&cfg);
                             mm_target_eth_poll(&cfg);
+                            rp2350_usb_sync_vector_ready(&scs, &map);
+                            mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                                      &tui_steps_offset, &tui_steps_latched);
@@ -4955,6 +5082,7 @@ handle_pending:
                         mm_u32 exc_num = 16u + (mm_u32)pend_irq;
                         /* Clear pending when accepted. */
                         mm_nvic_set_pending(&nvic, (mm_u32)pend_irq, MM_FALSE);
+                        mm_nvic_set_active(&nvic, (mm_u32)pend_irq, MM_TRUE);
                         if (!enter_exception_ex(&cpu, &map, &scs, exc_num, cpu.r[15] & ~1u, cpu.xpsr, irq_sec)) {
                             done = MM_TRUE;
                         } else {
@@ -5286,6 +5414,8 @@ handle_pending:
                     mm_target_usart_poll(&cfg);
                     mm_target_spi_poll(&cfg);
                     mm_target_eth_poll(&cfg);
+                    rp2350_usb_sync_vector_ready(&scs, &map);
+                    mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
                     mm_usbdev_poll();
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                              &tui_steps_offset, &tui_steps_latched);

@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+static mm_nvic_enable_hook_t g_enable_hook = 0;
+static void *g_enable_hook_opaque = 0;
 static int nvic_trace_level(void)
 {
     static mm_bool init = MM_FALSE;
@@ -79,6 +81,9 @@ static mm_bool bitop(mm_u32 *arr, mm_u32 idx, mm_bool set)
 void mm_nvic_set_enable(struct mm_nvic *nvic, mm_u32 irq, mm_bool enable)
 {
     bitop(nvic->enable_mask, irq, enable);
+    if (g_enable_hook != 0) {
+        g_enable_hook(irq, enable, g_enable_hook_opaque);
+    }
 }
 
 void mm_nvic_set_pending(struct mm_nvic *nvic, mm_u32 irq, mm_bool pending)
@@ -124,6 +129,17 @@ enum mm_sec_state mm_nvic_irq_target_sec(const struct mm_nvic *nvic, mm_u32 irq)
     return ((nvic->itns_mask[word] & mask) != 0u) ? MM_NONSECURE : MM_SECURE;
 }
 
+void mm_nvic_set_active(struct mm_nvic *nvic, mm_u32 irq, mm_bool active)
+{
+    mm_u32 word = irq / 32u;
+    mm_u32 bit = irq % 32u;
+    mm_u32 mask = 1u << bit;
+    if (nvic == 0) return;
+    if (word >= (MM_MAX_IRQ + 31u) / 32u) return;
+    if (active) nvic->active_mask[word] |= mask;
+    else nvic->active_mask[word] &= ~mask;
+}
+
 mm_bool mm_nvic_any_pending_enabled(const struct mm_nvic *nvic)
 {
     size_t i;
@@ -148,6 +164,29 @@ mm_bool mm_nvic_any_pending(const struct mm_nvic *nvic)
     return MM_FALSE;
 }
 
+void mm_nvic_set_enable_hook(mm_nvic_enable_hook_t hook, void *opaque)
+{
+    g_enable_hook = hook;
+    g_enable_hook_opaque = opaque;
+}
+
+void mm_nvic_notify_enable_mask(mm_u32 idx, mm_u32 old_mask, mm_u32 new_mask)
+{
+    mm_u32 changed;
+    mm_u32 bit;
+    if (g_enable_hook == 0) return;
+    changed = old_mask ^ new_mask;
+    if (changed == 0u) return;
+    for (bit = 0; bit < 32u; ++bit) {
+        mm_u32 mask = 1u << bit;
+        if ((changed & mask) != 0u) {
+            mm_u32 irq = idx * 32u + bit;
+            mm_bool enabled = (new_mask & mask) != 0u ? MM_TRUE : MM_FALSE;
+            g_enable_hook(irq, enabled, g_enable_hook_opaque);
+        }
+    }
+}
+
 mm_bool mm_nvic_is_pending(const struct mm_nvic *nvic, mm_u32 irq)
 {
     mm_u32 word = irq / 32u;
@@ -168,6 +207,47 @@ static mm_bool primask_blocks_target(const struct mm_cpu *cpu, enum mm_sec_state
         return cpu->primask_ns != 0u;
     }
     return cpu->primask_s != 0u;
+}
+
+static mm_bool usb_trace_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("M33MU_USB_TRACE");
+        cached = (v && v[0] != '\0') ? 1 : 0;
+    }
+    return cached ? MM_TRUE : MM_FALSE;
+}
+
+static void usb_trace_irq14_mask(mm_bool masked, enum mm_sec_state tsec, const struct mm_cpu *cpu)
+{
+    static mm_bool last_ns = MM_FALSE;
+    static mm_bool last_s = MM_FALSE;
+    mm_bool *last = (tsec == MM_NONSECURE) ? &last_ns : &last_s;
+    if (!usb_trace_enabled()) return;
+    if (masked) {
+        if (!*last) {
+            if (tsec == MM_NONSECURE) {
+                fprintf(stderr, "[USB_TRACE] irq14 masked by PRIMASK_NS=%u\n",
+                        cpu ? (unsigned)cpu->primask_ns : 0u);
+            } else {
+                fprintf(stderr, "[USB_TRACE] irq14 masked by PRIMASK_S=%u\n",
+                        cpu ? (unsigned)cpu->primask_s : 0u);
+            }
+        }
+        *last = MM_TRUE;
+        return;
+    }
+    if (*last) {
+        if (tsec == MM_NONSECURE) {
+            fprintf(stderr, "[USB_TRACE] irq14 unmasked PRIMASK_NS=%u\n",
+                    cpu ? (unsigned)cpu->primask_ns : 0u);
+        } else {
+            fprintf(stderr, "[USB_TRACE] irq14 unmasked PRIMASK_S=%u\n",
+                    cpu ? (unsigned)cpu->primask_s : 0u);
+        }
+    }
+    *last = MM_FALSE;
 }
 
 int mm_nvic_select_routed(const struct mm_nvic *nvic, const struct mm_cpu *cpu, enum mm_sec_state *target_sec_out)
@@ -192,7 +272,13 @@ int mm_nvic_select_routed(const struct mm_nvic *nvic, const struct mm_cpu *cpu, 
         }
         tsec = mm_nvic_irq_target_sec(nvic, irq);
         if (primask_blocks_target(cpu, tsec)) {
+            if (irq == 14u) {
+                usb_trace_irq14_mask(MM_TRUE, tsec, cpu);
+            }
             continue;
+        }
+        if (irq == 14u) {
+            usb_trace_irq14_mask(MM_FALSE, tsec, cpu);
         }
         if (best_irq == 0xffffffffu || nvic->priority[irq] < best_prio) {
             best_prio = nvic->priority[irq];

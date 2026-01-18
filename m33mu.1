@@ -75,10 +75,16 @@ Force non-secure boot and disable TrustZone protections for the session.
 Attach a SPI flash image.
 .TP
 .BR --usb
-Enable USB/IP backend (default port 3240).
+Enable GadgetFS USB backend (default UDC: dummy_udc.0). Requires gadgetfs
+mounted under /dev/gadget and dummy_hcd loaded.
 .TP
-.BR --usb:port= N
-Enable USB/IP backend and set port.
+.BR --usb:udc=NAME
+Enable GadgetFS USB backend and select UDC name (e.g., dummy_udc.0). Requires
+gadgetfs mounted under /dev/gadget and dummy_hcd loaded.
+.TP
+.BR --usb:path=PATH
+Enable GadgetFS USB backend and select UDC path (e.g., /dev/gadget/dummy_udc.0).
+Requires gadgetfs mounted under /dev/gadget and dummy_hcd loaded.
 .TP
 .BR --tap[:tap0]
 Enable Ethernet TAP backend (default interface: tap0).
