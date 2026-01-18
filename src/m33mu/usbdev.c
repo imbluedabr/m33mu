@@ -1113,7 +1113,10 @@ static void usbdev_ep_in_tick(void)
                 ep->tx_len = len;
                 ep->tx_off = 0u;
                 if (ep->tx_len == 0u) {
-                    (void)write(ep->fd, 0, 0);
+                    ssize_t zlen = write(ep->fd, 0, 0);
+                    if (zlen < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                        usb_trace("ep_in zlp write error addr=0x%02x errno=%d", ep->addr, errno);
+                    }
                 }
             }
         }
