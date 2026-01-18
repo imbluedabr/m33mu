@@ -39,7 +39,7 @@ struct mm_prot_region {
 };
 
 struct mm_prot_ctx {
-    struct mm_prot_region regions[16];
+    struct mm_prot_region regions[32];
     size_t count;
     struct mm_scs *scs;
     const struct mm_target_cfg *cfg;
