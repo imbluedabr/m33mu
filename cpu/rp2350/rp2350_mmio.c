@@ -4,6 +4,8 @@
  */
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/random.h>
 #include "rp2350/cpu_config.h"
 #include "rp2350/rp2350_mmio.h"
 #include "rp2350/rp2350_usb.h"
@@ -63,6 +65,16 @@ extern void mm_system_request_reset(void);
 #define SIO_SIZE      0x1000u
 #define BOOTROM_BASE  0x00000000u
 #define BOOTROM_SIZE  0x1000u
+#define SYSINFO_BASE  0x40000000u
+#define SYSINFO_SIZE  0x1000u
+#define SYSCFG_BASE   0x40008000u
+#define SYSCFG_SIZE   0x1000u
+#define PIO0_BASE     0x50200000u
+#define PIO1_BASE     0x50300000u
+#define PIO2_BASE     0x50400000u
+#define PIO_SIZE      0x1000u
+#define TRNG_BASE     0x400f0000u
+#define TRNG_SIZE     0x1000u
 
 #define PSM_FRCE_ON    0x000u
 #define PSM_FRCE_OFF   0x004u
@@ -371,6 +383,12 @@ static struct bank_regs qmi_regs;
 static struct bank_regs watchdog;
 static struct bank_regs bootram;
 static struct bank_regs ticks;
+static struct bank_regs sysinfo;
+static struct bank_regs syscfg;
+static struct bank_regs pio0;
+static struct bank_regs pio1;
+static struct bank_regs pio2;
+static struct bank_regs trng;
 static struct rp2350_hstx_fifo hstx_fifo;
 static struct rp2350_qmi_fifo qmi_rx;
 static struct rp2350_qmi_fifo qmi_tx;
@@ -1581,6 +1599,172 @@ static mm_bool sio_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     return MM_TRUE;
 }
 
+/* SYSINFO: Read-only chip information */
+#define SYSINFO_CHIP_ID   0x00u
+#define SYSINFO_PACKAGE_SEL 0x04u
+#define SYSINFO_PLATFORM  0x08u
+#define SYSINFO_GITREF_RP2350 0x14u
+
+static mm_bool sysinfo_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    mm_u32 alias;
+    mm_u32 base_off;
+    (void)opaque;
+    if (value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > 0x1000u) return MM_FALSE;
+    (void)alias;
+    *value_out = read_slice(sysinfo.regs[base_off / 4u], base_off & 3u, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool sysinfo_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    (void)opaque;
+    (void)offset;
+    (void)size_bytes;
+    (void)value;
+    /* SYSINFO is read-only; ignore writes */
+    return MM_TRUE;
+}
+
+/* PIO: Programmable I/O (stub implementation) */
+#define PIO_CTRL      0x00u
+#define PIO_FSTAT     0x04u
+#define PIO_FDEBUG    0x08u
+#define PIO_FLEVEL    0x0Cu
+#define PIO_FSTAT_TXEMPTY_ALL 0x0F000000u
+#define PIO_FSTAT_RXEMPTY_ALL 0x00000F00u
+
+static mm_bool pio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    mm_u32 alias;
+    mm_u32 base_off;
+    mm_u32 val;
+    if (b == 0 || value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > 0x1000u) return MM_FALSE;
+    (void)alias;
+    /* Special handling for FSTAT: all FIFOs empty */
+    if (base_off == PIO_FSTAT && size_bytes == 4u) {
+        *value_out = PIO_FSTAT_TXEMPTY_ALL | PIO_FSTAT_RXEMPTY_ALL;
+        return MM_TRUE;
+    }
+    /* FLEVEL: all FIFO levels zero */
+    if (base_off == PIO_FLEVEL && size_bytes == 4u) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+    val = read_slice(b->regs[base_off / 4u], base_off & 3u, size_bytes);
+    *value_out = val;
+    return MM_TRUE;
+}
+
+static mm_bool pio_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct bank_regs *b = (struct bank_regs *)opaque;
+    mm_u32 alias;
+    mm_u32 base_off;
+    mm_u32 mask;
+    if (b == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > 0x1000u) return MM_FALSE;
+    if (alias == 0u) {
+        b->regs[base_off / 4u] = apply_write(b->regs[base_off / 4u], base_off & 3u, size_bytes, value);
+        return MM_TRUE;
+    }
+    mask = alias_value(base_off & 3u, size_bytes, value);
+    switch (alias) {
+    case 1u: b->regs[base_off / 4u] ^= mask; break;
+    case 2u: b->regs[base_off / 4u] |= mask; break;
+    case 3u: b->regs[base_off / 4u] &= ~mask; break;
+    default: break;
+    }
+    return MM_TRUE;
+}
+
+/* TRNG: True Random Number Generator */
+#define TRNG_RNG_IMR          0x100u
+#define TRNG_RNG_ISR          0x104u
+#define TRNG_RNG_ICR          0x108u
+#define TRNG_CONFIG           0x10Cu
+#define TRNG_VALID            0x110u
+#define TRNG_EHR_DATA0        0x114u
+#define TRNG_EHR_DATA5        0x128u
+#define TRNG_SOURCE_ENABLE    0x12Cu
+#define TRNG_SAMPLE_CNT1      0x130u
+#define TRNG_AUTOCORR_STAT    0x134u
+#define TRNG_SW_RESET         0x140u
+#define TRNG_BUSY             0x1B8u
+#define TRNG_RST_BITS_COUNTER 0x1BCu
+#define TRNG_RNG_VERSION      0x1C0u
+#define TRNG_RNG_BIST_CNTR0   0x1E0u
+#define TRNG_RNG_BIST_CNTR2   0x1E8u
+
+static mm_bool trng_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    mm_u32 alias;
+    mm_u32 base_off;
+    (void)opaque;
+    if (value_out == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > 0x1000u) return MM_FALSE;
+    (void)alias;
+    /* EHR_DATA0-5: Return random data */
+    if (base_off >= TRNG_EHR_DATA0 && base_off <= TRNG_EHR_DATA5 && size_bytes == 4u) {
+        mm_u32 rnd = 0;
+        (void)getrandom(&rnd, sizeof(rnd), 0);
+        *value_out = rnd;
+        return MM_TRUE;
+    }
+    /* RNG_ISR: EHR_VALID bit always set */
+    if (base_off == TRNG_RNG_ISR && size_bytes == 4u) {
+        *value_out = 1u; /* EHR_VALID = 1 */
+        return MM_TRUE;
+    }
+    /* TRNG_VALID: always valid */
+    if (base_off == TRNG_VALID && size_bytes == 4u) {
+        *value_out = 1u;
+        return MM_TRUE;
+    }
+    /* TRNG_BUSY: never busy */
+    if (base_off == TRNG_BUSY && size_bytes == 4u) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+    *value_out = read_slice(trng.regs[base_off / 4u], base_off & 3u, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool trng_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    mm_u32 alias;
+    mm_u32 base_off;
+    mm_u32 mask;
+    (void)opaque;
+    if (size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
+    if ((offset + size_bytes) > MMIO_ALIAS_SIZE) return MM_FALSE;
+    base_off = alias_base_offset(offset, &alias);
+    if ((base_off + size_bytes) > 0x1000u) return MM_FALSE;
+    if (alias == 0u) {
+        trng.regs[base_off / 4u] = apply_write(trng.regs[base_off / 4u], base_off & 3u, size_bytes, value);
+        return MM_TRUE;
+    }
+    mask = alias_value(base_off & 3u, size_bytes, value);
+    switch (alias) {
+    case 1u: trng.regs[base_off / 4u] ^= mask; break;
+    case 2u: trng.regs[base_off / 4u] |= mask; break;
+    case 3u: trng.regs[base_off / 4u] &= ~mask; break;
+    default: break;
+    }
+    return MM_TRUE;
+}
+
 static mm_bool bank_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
     struct bank_regs *b = (struct bank_regs *)opaque;
@@ -2327,6 +2511,48 @@ mm_bool mm_rp2350_register_mmio(struct mmio_bus *bus)
     reg.write = otp_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = SYSINFO_BASE;
+    reg.opaque = &sysinfo;
+    reg.read = sysinfo_read;
+    reg.write = sysinfo_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = SYSCFG_BASE;
+    reg.opaque = &syscfg;
+    reg.read = bank_read;
+    reg.write = bank_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = PIO0_BASE;
+    reg.opaque = &pio0;
+    reg.read = pio_read;
+    reg.write = pio_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = PIO1_BASE;
+    reg.opaque = &pio1;
+    reg.read = pio_read;
+    reg.write = pio_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = PIO2_BASE;
+    reg.opaque = &pio2;
+    reg.read = pio_read;
+    reg.write = pio_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.size = MMIO_ALIAS_SIZE;
+    reg.base = TRNG_BASE;
+    reg.opaque = &trng;
+    reg.read = trng_read;
+    reg.write = trng_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
     if (!mm_rp2350_usb_register_mmio(bus)) return MM_FALSE;
 
     mm_gpio_bank_set_reader(rp2350_gpio_bank_read, 0);
@@ -2368,6 +2594,15 @@ void mm_rp2350_mmio_reset(void)
     bootram.regs[BOOTRAM_BOOTLOCK_STAT / 4u] = 0xffu;
     rp2350_partition_table_init();
     memset(&ticks, 0, sizeof(ticks));
+    memset(&sysinfo, 0, sizeof(sysinfo));
+    memset(&syscfg, 0, sizeof(syscfg));
+    memset(&pio0, 0, sizeof(pio0));
+    memset(&pio1, 0, sizeof(pio1));
+    memset(&pio2, 0, sizeof(pio2));
+    memset(&trng, 0, sizeof(trng));
+    /* Initialize SYSINFO: CHIP_ID = 0x2 (RP2350), PLATFORM = 0x1 (ASIC) */
+    sysinfo.regs[SYSINFO_CHIP_ID / 4u] = 0x00000002u;
+    sysinfo.regs[SYSINFO_PLATFORM / 4u] = 0x00000001u;
     mm_rp2350_usb_reset();
     mm_rp2350_coproc_reset();
     access_ctrl_reset();
