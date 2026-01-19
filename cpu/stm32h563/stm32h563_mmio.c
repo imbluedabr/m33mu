@@ -41,6 +41,8 @@
 #include "m33mu/gpio.h"
 #include "m33mu/nvic.h"
 #include "stm32_crypto.h"
+#include "stm32_gpio.h"
+#include "stm32_gpdma.h"
 
 extern void mm_system_request_reset(void);
 
@@ -292,8 +294,10 @@ extern void mm_system_request_reset(void);
 #define IWDG_WINR 0x010u
 #define IWDG_EWCR 0x014u
 
-#define GPIO_IDR_OFFSET 0x10u
-#define GPIO_ODR_OFFSET 0x14u
+/* GPIO register offsets for local use */
+#define GPIO_IDR_OFFSET STM32_GPIO_IDR_OFFSET
+#define GPIO_ODR_OFFSET STM32_GPIO_ODR_OFFSET
+#define GPIO_MODER_OFFSET STM32_GPIO_MODER_OFFSET
 
 /* MPCBB offsets */
 #define MPCBB_CR_OFFSET      0x000u
@@ -399,108 +403,6 @@ struct flash_state {
     mm_bool swap_active;
 };
 
-/* GPIO register offsets (STM32H5) */
-#define GPIO_MODER_OFFSET   0x00u
-#define GPIO_OTYPER_OFFSET  0x04u
-#define GPIO_OSPEEDR_OFFSET 0x08u
-#define GPIO_PUPDR_OFFSET   0x0Cu
-#define GPIO_AFRL_OFFSET    0x20u
-#define GPIO_AFRH_OFFSET    0x24u
-#define GPIO_LCKR_OFFSET    0x1Cu
-#define GPIO_BRR_OFFSET     0x28u
-#define GPIO_HSLVR_OFFSET   0x2Cu
-#define GPIO_SECCFGR_OFFSET 0x30u
-#define GPIO_REG_SIZE       0x400u
-
-struct gpio_state {
-    mm_u32 regs[GPIO_REG_SIZE / 4];
-    mm_u32 afr[2]; /* AFRL and AFRH for alternate function mux */
-    mm_u8  pin_af[16]; /* computed AF per pin (0-15) */
-    mm_bool locked; /* LCKR lock sequence completed */
-};
-
-/* GPDMA channel offsets (16 channels, each 0x80 bytes) */
-#define GPDMA_SECCFGR      0x000u
-#define GPDMA_PRIVCFGR     0x004u
-#define GPDMA_RCFGLOCKR    0x008u
-#define GPDMA_MISR         0x00Cu
-#define GPDMA_SMISR        0x010u
-#define GPDMA_CH_BASE      0x050u
-#define GPDMA_CH_STRIDE    0x080u
-#define GPDMA_CH_COUNT     16u
-
-/* Per-channel register offsets from channel base */
-#define GPDMA_CxLBAR       0x000u
-#define GPDMA_CxFCR        0x00Cu
-#define GPDMA_CxSR         0x010u
-#define GPDMA_CxCR         0x014u
-#define GPDMA_CxTR1        0x040u
-#define GPDMA_CxTR2        0x044u
-#define GPDMA_CxBR1        0x048u
-#define GPDMA_CxSAR        0x04Cu
-#define GPDMA_CxDAR        0x050u
-#define GPDMA_CxTR3        0x054u
-#define GPDMA_CxBR2        0x058u
-#define GPDMA_CxLLR        0x07Cu
-
-/* GPDMA control bits */
-#define GPDMA_CxCR_EN      (1u << 0)
-#define GPDMA_CxCR_RESET   (1u << 1)
-#define GPDMA_CxCR_SUSP    (1u << 2)
-#define GPDMA_CxCR_TCIE    (1u << 8)
-#define GPDMA_CxCR_HTIE    (1u << 9)
-#define GPDMA_CxCR_DTEIE   (1u << 10)
-#define GPDMA_CxCR_ULEIE   (1u << 11)
-#define GPDMA_CxCR_USEIE   (1u << 12)
-#define GPDMA_CxCR_SUSPIE  (1u << 13)
-#define GPDMA_CxCR_TOIE    (1u << 14)
-
-/* GPDMA status bits */
-#define GPDMA_CxSR_IDLEF   (1u << 0)
-#define GPDMA_CxSR_TCF     (1u << 8)
-#define GPDMA_CxSR_HTF     (1u << 9)
-#define GPDMA_CxSR_DTEF    (1u << 10)
-#define GPDMA_CxSR_ULEF    (1u << 11)
-#define GPDMA_CxSR_USEF    (1u << 12)
-#define GPDMA_CxSR_SUSPF   (1u << 13)
-#define GPDMA_CxSR_TOF     (1u << 14)
-
-/* GPDMA flag clear bits in FCR */
-#define GPDMA_CxFCR_TCF    (1u << 8)
-#define GPDMA_CxFCR_HTF    (1u << 9)
-#define GPDMA_CxFCR_DTEF   (1u << 10)
-#define GPDMA_CxFCR_ULEF   (1u << 11)
-#define GPDMA_CxFCR_USEF   (1u << 12)
-#define GPDMA_CxFCR_SUSPF  (1u << 13)
-#define GPDMA_CxFCR_TOF    (1u << 14)
-
-struct gpdma_channel {
-    mm_u32 lbar;
-    mm_u32 fcr;
-    mm_u32 sr;
-    mm_u32 cr;
-    mm_u32 tr1;
-    mm_u32 tr2;
-    mm_u32 br1;
-    mm_u32 sar;
-    mm_u32 dar;
-    mm_u32 tr3;
-    mm_u32 br2;
-    mm_u32 llr;
-    mm_u32 remaining; /* bytes remaining in current block */
-};
-
-struct gpdma_state {
-    mm_u32 seccfgr;
-    mm_u32 privcfgr;
-    mm_u32 rcfglockr;
-    mm_u32 misr;
-    mm_u32 smisr;
-    struct gpdma_channel ch[GPDMA_CH_COUNT];
-    struct mm_nvic *nvic;
-    mm_u8 instance; /* 0 = GPDMA1, 1 = GPDMA2 */
-};
-
 struct ucpd_state {
     mm_u32 cfgr1;
     mm_u32 cr;
@@ -509,9 +411,6 @@ struct ucpd_state {
 };
 
 #include "stm32_crypto_priv.h"
-
-/* uintptr_t substitute for C90 */
-typedef unsigned long mm_uptr;
 
 static void rcc_update_ready(struct rcc_state *r);
 static void rcc_update_sysclk(struct rcc_state *r);
@@ -549,10 +448,10 @@ static struct iwdg_state iwdg;
 static struct wwdg_state wwdg;
 static struct flash_state flash_ctl;
 static struct mm_otp otp_state;
-static struct gpio_state gpio[9]; /* A..I */
-static struct gpdma_state gpdma1;
-static struct gpdma_state gpdma2;
-static void *gpio_ctx[18][4];
+static struct stm32_gpio_state gpio[9]; /* A..I */
+static struct stm32_gpdma_state gpdma1;
+static struct stm32_gpdma_state gpdma2;
+static struct stm32_gpio_ctx gpio_ctx_data[18]; /* NS + S for each bank */
 static void *rng_ctx[2][4];
 static struct hash_ctx hash_ctx[2];
 static struct aes_ctx aes_ctx[2];
@@ -570,6 +469,8 @@ static mm_u32 stm32h563_gpio_bank_read_moder(void *opaque, int bank);
 static mm_bool stm32h563_gpio_bank_clock(void *opaque, int bank);
 static mm_u32 stm32h563_gpio_bank_read_seccfgr(void *opaque, int bank);
 static void exti_gpio_update(int bank, mm_u32 old_level, mm_u32 new_level);
+static mm_bool stm32h563_gpio_clock_enabled_cb(int bank);
+static void exti_gpio_update_cb(int bank, mm_u32 old_level, mm_u32 new_level);
 static mm_bool hash_requires_secure(const struct simple_blk *tzsc);
 static mm_bool aes_requires_secure(const struct simple_blk *tzsc, mm_bool is_saes);
 static mm_bool pka_requires_secure(const struct simple_blk *tzsc);
@@ -744,22 +645,28 @@ void mm_stm32h563_mmio_reset(void)
     flash_ctl.dualbank_enabled = dualbank;
     flash_ctl.swap_active = (optsr_swap != 0u) ? MM_TRUE : MM_FALSE;
     mpcbb_init_defaults();
-    memset(&gpdma1, 0, sizeof(gpdma1));
-    memset(&gpdma2, 0, sizeof(gpdma2));
+    /* Initialize GPDMA with shared implementation */
     gpdma1.instance = 0;
+    gpdma1.num_channels = 16;
+    gpdma1.irq_base = 27; /* GPDMA1 channel IRQs start at 27 */
+    stm32_gpdma_reset(&gpdma1);
     gpdma2.instance = 1;
-    /* Initialize all DMA channels to idle */
-    for (i = 0; i < GPDMA_CH_COUNT; ++i) {
-        gpdma1.ch[i].sr = GPDMA_CxSR_IDLEF;
-        gpdma2.ch[i].sr = GPDMA_CxSR_IDLEF;
-    }
+    gpdma2.num_channels = 16;
+    gpdma2.irq_base = 43; /* GPDMA2 channel IRQs start at 43 */
+    stm32_gpdma_reset(&gpdma2);
+    /* Initialize GPIO with shared implementation */
     for (i = 0; i < sizeof(gpio) / sizeof(gpio[0]); ++i) {
-        memset(&gpio[i], 0, sizeof(gpio[i]));
-        /* Default MODER: analog mode for all pins (0xFFFFFFFF) except PA13/PA14 (debug) */
-        gpio[i].regs[GPIO_MODER_OFFSET / 4] = 0xFFFFFFFFu;
-        if (i == 0) { /* GPIOA: PA13=AF0(JTMS), PA14=AF0(JTCK) */
-            gpio[i].regs[GPIO_MODER_OFFSET / 4] = 0xABFFFFFFu;
-        }
+        stm32_gpio_reset(&gpio[i], (int)i);
+        gpio_ctx_data[i * 2].gpio = &gpio[i];
+        gpio_ctx_data[i * 2].is_secure_alias = MM_FALSE;
+        gpio_ctx_data[i * 2].bank_index = (int)i;
+        gpio_ctx_data[i * 2].clock_enabled = stm32h563_gpio_clock_enabled_cb;
+        gpio_ctx_data[i * 2].exti_update = exti_gpio_update_cb;
+        gpio_ctx_data[i * 2 + 1].gpio = &gpio[i];
+        gpio_ctx_data[i * 2 + 1].is_secure_alias = MM_TRUE;
+        gpio_ctx_data[i * 2 + 1].bank_index = (int)i;
+        gpio_ctx_data[i * 2 + 1].clock_enabled = stm32h563_gpio_clock_enabled_cb;
+        gpio_ctx_data[i * 2 + 1].exti_update = exti_gpio_update_cb;
     }
     mm_stm32h563_usb_reset();
     mm_stm32h563_eth_reset();
@@ -833,6 +740,16 @@ static mm_bool gpio_clock_enabled(const struct rcc_state *rcc, int index)
     /* AHB2ENR offset 0x8C, GPIOAEN bit0..GPIOIEN bit8 */
     mm_u32 ahb2enr = rcc->regs[0x8c / 4];
     return ((ahb2enr >> index) & 1u) != 0u;
+}
+
+static mm_bool stm32h563_gpio_clock_enabled_cb(int bank)
+{
+    return gpio_clock_enabled(&rcc, bank);
+}
+
+static void exti_gpio_update_cb(int bank, mm_u32 old_level, mm_u32 new_level)
+{
+    exti_gpio_update(bank, old_level, new_level);
 }
 
 enum rcc_bus_kind {
@@ -1581,467 +1498,6 @@ static void mpcbb_init_defaults(void)
             mpcbb[bank].regs[(MPCBB_SECCFGR_OFFSET / 4u) + word] = 0xFFFFFFFFu;
         }
     }
-}
-
-static void gpio_update_pin_af(struct gpio_state *g)
-{
-    mm_u32 afrl = g->regs[GPIO_AFRL_OFFSET / 4];
-    mm_u32 afrh = g->regs[GPIO_AFRH_OFFSET / 4];
-    int i;
-    for (i = 0; i < 8; ++i) {
-        g->pin_af[i] = (mm_u8)((afrl >> (i * 4)) & 0xFu);
-        g->pin_af[i + 8] = (mm_u8)((afrh >> (i * 4)) & 0xFu);
-    }
-}
-
-static mm_u8 gpio_get_pin_mode(const struct gpio_state *g, int pin)
-{
-    mm_u32 moder = g->regs[GPIO_MODER_OFFSET / 4];
-    return (mm_u8)((moder >> (pin * 2)) & 0x3u);
-}
-
-static mm_u32 gpio_mask_to_2bit(mm_u32 mask)
-{
-    mm_u32 out = 0;
-    int i;
-    for (i = 0; i < 16; ++i) {
-        if ((mask & (1u << i)) != 0u) {
-            out |= (3u << (i * 2));
-        }
-    }
-    return out;
-}
-
-static mm_bool gpio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
-{
-    struct gpio_state *g = ((struct gpio_state *)((void **)opaque)[0]);
-    struct rcc_state *rcc = (struct rcc_state *)((void **)opaque)[2];
-    int index = (int)(mm_uptr)((void **)opaque)[3];
-    mm_bool is_secure_alias = ((void **)opaque)[1] != 0;
-    mm_u32 seccfgr = g->regs[GPIO_SECCFGR_OFFSET / 4];
-    mm_u32 v = 0;
-    mm_u32 mask = ~seccfgr; /* pins accessible to NS */
-
-    if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (offset >= GPIO_REG_SIZE) return MM_FALSE;
-
-    if (!gpio_clock_enabled(rcc, index)) {
-        *value_out = 0;
-        return MM_TRUE;
-    }
-
-    if (offset < sizeof(g->regs)) {
-        memcpy(&v, (mm_u8 *)g->regs + offset, size_bytes);
-    } else {
-        v = 0;
-    }
-
-    if (!is_secure_alias) {
-        if (offset == GPIO_SECCFGR_OFFSET) {
-            v = 0;
-        } else if (offset == GPIO_IDR_OFFSET || offset == GPIO_ODR_OFFSET ||
-                   offset == 0x18u || offset == GPIO_LCKR_OFFSET ||
-                   offset == GPIO_AFRL_OFFSET || offset == GPIO_AFRH_OFFSET ||
-                   offset == GPIO_BRR_OFFSET || offset == GPIO_HSLVR_OFFSET) {
-            /* Data/bit set/reset/lock/AF/BRR/HSLVR: mask secure pins */
-            v &= mask;
-        } else if (offset == GPIO_MODER_OFFSET || offset == GPIO_OTYPER_OFFSET ||
-                   offset == GPIO_OSPEEDR_OFFSET || offset == GPIO_PUPDR_OFFSET) {
-            /* config registers: mask secure bits (2-bit fields for MODER/OSPEEDR/PUPDR) */
-            if (offset == GPIO_OTYPER_OFFSET) {
-                v &= mask;
-            } else {
-                mm_u32 m2 = gpio_mask_to_2bit(mask & 0xFFFFu);
-                v &= m2;
-            }
-        }
-    }
-
-    *value_out = v;
-    return MM_TRUE;
-}
-
-static void gpio_apply_brr(struct gpio_state *g, mm_u32 bits, mm_u32 mask)
-{
-    g->regs[0x14u / 4] &= ~(bits & mask);
-}
-
-static void gpio_apply_bsrr(struct gpio_state *g, mm_u32 val, mm_u32 mask)
-{
-    mm_u32 set = val & 0xFFFFu;
-    mm_u32 reset = (val >> 16) & 0xFFFFu;
-    mm_u32 odr = g->regs[0x14u / 4];
-    odr |= (set & mask);
-    odr &= ~(reset & mask);
-    g->regs[0x14u / 4] = odr;
-}
-
-static void gpio_sync_odr(struct gpio_state *g, int bank, mm_u32 old_odr)
-{
-    mm_u32 new_odr = g->regs[GPIO_ODR_OFFSET / 4];
-    if (new_odr != old_odr) {
-        g->regs[GPIO_IDR_OFFSET / 4] = new_odr;
-        exti_gpio_update(bank, old_odr, new_odr);
-    }
-}
-
-static mm_bool gpio_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
-{
-    struct gpio_state *g = ((struct gpio_state *)((void **)opaque)[0]);
-    struct rcc_state *rcc = (struct rcc_state *)((void **)opaque)[2];
-    int index = (int)(mm_uptr)((void **)opaque)[3];
-    mm_bool is_secure_alias = ((void **)opaque)[1] != 0;
-    mm_u32 seccfgr = g->regs[GPIO_SECCFGR_OFFSET / 4];
-    mm_u32 mask = ~seccfgr;
-
-    if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (offset >= GPIO_REG_SIZE) return MM_FALSE;
-
-    if (!gpio_clock_enabled(rcc, index)) {
-        return MM_TRUE; /* WI if disabled */
-    }
-
-    /* Non-secure alias write handling */
-    if (!is_secure_alias) {
-        if (offset == GPIO_SECCFGR_OFFSET) {
-            /* SECCFGR is Secure-only: WI */
-            return MM_TRUE;
-        }
-        /* Mask out secure pins */
-        if (offset == 0x18u) { /* BSRR */
-            mm_u32 old_odr = g->regs[GPIO_ODR_OFFSET / 4];
-            gpio_apply_bsrr(g, value, mask & 0xFFFFu);
-            gpio_sync_odr(g, index, old_odr);
-            return MM_TRUE;
-        } else if (offset == GPIO_BRR_OFFSET) {
-            mm_u32 old_odr = g->regs[GPIO_ODR_OFFSET / 4];
-            gpio_apply_brr(g, value & 0xFFFFu, mask & 0xFFFFu);
-            gpio_sync_odr(g, index, old_odr);
-            return MM_TRUE;
-        } else if (offset == GPIO_AFRL_OFFSET || offset == GPIO_AFRH_OFFSET) {
-            /* AF registers: mask 4 bits per secure pin */
-            mm_u32 af_mask = 0;
-            int base_pin = (offset == GPIO_AFRL_OFFSET) ? 0 : 8;
-            int i;
-            for (i = 0; i < 8; ++i) {
-                if ((mask & (1u << (base_pin + i))) != 0u) {
-                    af_mask |= (0xFu << (i * 4));
-                }
-            }
-            value &= af_mask;
-            g->regs[offset / 4] = (g->regs[offset / 4] & ~af_mask) | value;
-            gpio_update_pin_af(g);
-            return MM_TRUE;
-        } else {
-            /* General regs: apply mask */
-            if (offset == GPIO_MODER_OFFSET || offset == GPIO_OSPEEDR_OFFSET ||
-                offset == GPIO_PUPDR_OFFSET) {
-                /* 2 bits per pin */
-                mm_u32 m2 = gpio_mask_to_2bit(mask & 0xFFFFu);
-                value &= m2;
-                g->regs[offset / 4] = (g->regs[offset / 4] & ~m2) | value;
-                return MM_TRUE;
-            } else if (offset == GPIO_OTYPER_OFFSET) {
-                value &= mask;
-                g->regs[offset / 4] = (g->regs[offset / 4] & ~mask) | value;
-                return MM_TRUE;
-            }
-        }
-    }
-
-    if (offset == 0x18u) { /* BSRR */
-        mm_u32 old_odr = g->regs[GPIO_ODR_OFFSET / 4];
-        gpio_apply_bsrr(g, value, 0xFFFFu);
-        gpio_sync_odr(g, index, old_odr);
-        return MM_TRUE;
-    }
-    if (offset == GPIO_BRR_OFFSET) {
-        mm_u32 old_odr = g->regs[GPIO_ODR_OFFSET / 4];
-        gpio_apply_brr(g, value & 0xFFFFu, 0xFFFFu);
-        gpio_sync_odr(g, index, old_odr);
-        return MM_TRUE;
-    }
-
-    if (offset == GPIO_ODR_OFFSET) {
-        mm_u32 old_odr = g->regs[GPIO_ODR_OFFSET / 4];
-        g->regs[offset / 4] = value;
-        gpio_sync_odr(g, index, old_odr);
-        return MM_TRUE;
-    }
-
-    if (offset == GPIO_AFRL_OFFSET || offset == GPIO_AFRH_OFFSET) {
-        g->regs[offset / 4] = value;
-        gpio_update_pin_af(g);
-        return MM_TRUE;
-    }
-
-    if (offset == GPIO_LCKR_OFFSET) {
-        /* Lock sequence: write LCKK=1, then LCKK=0, then LCKK=1, then read */
-        static mm_u32 lock_seq = 0;
-        mm_u32 lckk = (value >> 16) & 1u;
-        if (g->locked) {
-            return MM_TRUE; /* Already locked, ignore writes */
-        }
-        if (lock_seq == 0 && lckk == 1u) {
-            lock_seq = 1;
-        } else if (lock_seq == 1 && lckk == 0u) {
-            lock_seq = 2;
-        } else if (lock_seq == 2 && lckk == 1u) {
-            lock_seq = 3;
-            g->locked = MM_TRUE;
-            g->regs[GPIO_LCKR_OFFSET / 4] = value | (1u << 16);
-            return MM_TRUE;
-        } else {
-            lock_seq = 0;
-        }
-        g->regs[GPIO_LCKR_OFFSET / 4] = value;
-        return MM_TRUE;
-    }
-
-    if (offset < sizeof(g->regs)) {
-        g->regs[offset / 4] = value;
-    }
-    return MM_TRUE;
-}
-
-static mm_u32 gpdma_ch_read_reg(const struct gpdma_channel *ch, mm_u32 ch_offset)
-{
-    switch (ch_offset) {
-    case GPDMA_CxLBAR: return ch->lbar;
-    case GPDMA_CxFCR:  return 0; /* FCR is write-only */
-    case GPDMA_CxSR:   return ch->sr;
-    case GPDMA_CxCR:   return ch->cr;
-    case GPDMA_CxTR1:  return ch->tr1;
-    case GPDMA_CxTR2:  return ch->tr2;
-    case GPDMA_CxBR1:  return ch->br1;
-    case GPDMA_CxSAR:  return ch->sar;
-    case GPDMA_CxDAR:  return ch->dar;
-    case GPDMA_CxTR3:  return ch->tr3;
-    case GPDMA_CxBR2:  return ch->br2;
-    case GPDMA_CxLLR:  return ch->llr;
-    default: return 0;
-    }
-}
-
-static mm_bool gpdma_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
-{
-    struct gpdma_state *d = (struct gpdma_state *)opaque;
-    mm_u32 v = 0;
-
-    if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-
-    if (offset == GPDMA_SECCFGR) {
-        v = d->seccfgr;
-    } else if (offset == GPDMA_PRIVCFGR) {
-        v = d->privcfgr;
-    } else if (offset == GPDMA_RCFGLOCKR) {
-        v = d->rcfglockr;
-    } else if (offset == GPDMA_MISR) {
-        v = d->misr;
-    } else if (offset == GPDMA_SMISR) {
-        v = d->smisr;
-    } else if (offset >= GPDMA_CH_BASE) {
-        mm_u32 ch_region = offset - GPDMA_CH_BASE;
-        mm_u32 ch_idx = ch_region / GPDMA_CH_STRIDE;
-        mm_u32 ch_offset = ch_region % GPDMA_CH_STRIDE;
-        if (ch_idx < GPDMA_CH_COUNT) {
-            v = gpdma_ch_read_reg(&d->ch[ch_idx], ch_offset);
-        }
-    }
-
-    *value_out = v;
-    return MM_TRUE;
-}
-
-static void gpdma_execute_transfer(struct gpdma_state *d, mm_u32 ch_idx);
-
-static void gpdma_ch_write_reg(struct gpdma_state *d, mm_u32 ch_idx,
-                               mm_u32 ch_offset, mm_u32 value)
-{
-    struct gpdma_channel *ch = &d->ch[ch_idx];
-
-    switch (ch_offset) {
-    case GPDMA_CxLBAR:
-        ch->lbar = value & 0xFFFF0000u; /* bits 31:16 */
-        break;
-    case GPDMA_CxFCR:
-        /* Flag clear register: write 1 to clear corresponding SR bits */
-        if (value & GPDMA_CxFCR_TCF)   ch->sr &= ~GPDMA_CxSR_TCF;
-        if (value & GPDMA_CxFCR_HTF)   ch->sr &= ~GPDMA_CxSR_HTF;
-        if (value & GPDMA_CxFCR_DTEF)  ch->sr &= ~GPDMA_CxSR_DTEF;
-        if (value & GPDMA_CxFCR_ULEF)  ch->sr &= ~GPDMA_CxSR_ULEF;
-        if (value & GPDMA_CxFCR_USEF)  ch->sr &= ~GPDMA_CxSR_USEF;
-        if (value & GPDMA_CxFCR_SUSPF) ch->sr &= ~GPDMA_CxSR_SUSPF;
-        if (value & GPDMA_CxFCR_TOF)   ch->sr &= ~GPDMA_CxSR_TOF;
-        break;
-    case GPDMA_CxCR:
-        if (value & GPDMA_CxCR_RESET) {
-            /* Channel reset */
-            memset(ch, 0, sizeof(*ch));
-            ch->sr = GPDMA_CxSR_IDLEF;
-        } else {
-            mm_bool was_enabled = (ch->cr & GPDMA_CxCR_EN) != 0u;
-            ch->cr = value;
-            if (!was_enabled && (value & GPDMA_CxCR_EN)) {
-                /* Channel just enabled - start transfer */
-                ch->sr &= ~GPDMA_CxSR_IDLEF;
-                ch->remaining = ch->br1 & 0xFFFFu;
-                gpdma_execute_transfer(d, ch_idx);
-            }
-            if (value & GPDMA_CxCR_SUSP) {
-                ch->sr |= GPDMA_CxSR_SUSPF;
-            }
-        }
-        break;
-    case GPDMA_CxTR1:
-        ch->tr1 = value;
-        break;
-    case GPDMA_CxTR2:
-        ch->tr2 = value;
-        break;
-    case GPDMA_CxBR1:
-        ch->br1 = value;
-        ch->remaining = value & 0xFFFFu;
-        break;
-    case GPDMA_CxSAR:
-        ch->sar = value;
-        break;
-    case GPDMA_CxDAR:
-        ch->dar = value;
-        break;
-    case GPDMA_CxTR3:
-        ch->tr3 = value;
-        break;
-    case GPDMA_CxBR2:
-        ch->br2 = value;
-        break;
-    case GPDMA_CxLLR:
-        ch->llr = value;
-        break;
-    default:
-        break;
-    }
-}
-
-/* Execute DMA transfer for a channel (memory-to-memory supported) */
-static void gpdma_execute_transfer(struct gpdma_state *d, mm_u32 ch_idx)
-{
-    struct gpdma_channel *ch = &d->ch[ch_idx];
-    struct mm_memmap *map = mm_memmap_current();
-    mm_u32 src_width, dst_width, count;
-    mm_u32 sinc, dinc;
-    mm_u32 sar, dar;
-    mm_u32 i;
-
-    if ((ch->cr & GPDMA_CxCR_EN) == 0u) {
-        return;
-    }
-
-    /* TR1: bits 1:0 = SDW (source data width), bits 17:16 = DDW (dest width) */
-    src_width = 1u << ((ch->tr1 >> 0) & 0x3u);
-    dst_width = 1u << ((ch->tr1 >> 16) & 0x3u);
-    /* TR1: bit 3 = SINC, bit 19 = DINC */
-    sinc = (ch->tr1 & (1u << 3)) ? src_width : 0u;
-    dinc = (ch->tr1 & (1u << 19)) ? dst_width : 0u;
-
-    count = ch->remaining;
-    sar = ch->sar;
-    dar = ch->dar;
-
-    /* Execute transfer (simplified: no burst, no request signal) */
-    for (i = 0; i < count && (ch->cr & GPDMA_CxCR_SUSP) == 0u; ) {
-        mm_u32 val = 0;
-        mm_u32 xfer_size = (src_width < dst_width) ? src_width : dst_width;
-
-        if (!mm_memmap_read(map, MM_NONSECURE, sar, xfer_size, &val)) {
-            ch->sr |= GPDMA_CxSR_DTEF;
-            break;
-        }
-        if (!mm_memmap_write(map, MM_NONSECURE, dar, xfer_size, val)) {
-            ch->sr |= GPDMA_CxSR_DTEF;
-            break;
-        }
-
-        sar += sinc;
-        dar += dinc;
-        i += xfer_size;
-
-        /* Half transfer check */
-        if (i >= count / 2 && (ch->sr & GPDMA_CxSR_HTF) == 0u) {
-            ch->sr |= GPDMA_CxSR_HTF;
-            if ((ch->cr & GPDMA_CxCR_HTIE) && d->nvic) {
-                mm_nvic_set_pending(d->nvic, 27 + d->instance * 16 + ch_idx, MM_TRUE);
-            }
-        }
-    }
-
-    ch->sar = sar;
-    ch->dar = dar;
-    ch->remaining = count - i;
-
-    if (ch->remaining == 0 && (ch->sr & GPDMA_CxSR_DTEF) == 0u) {
-        /* Transfer complete */
-        ch->sr |= GPDMA_CxSR_TCF | GPDMA_CxSR_IDLEF;
-        ch->cr &= ~GPDMA_CxCR_EN;
-        d->misr |= (1u << ch_idx);
-
-        if ((ch->cr & GPDMA_CxCR_TCIE) && d->nvic) {
-            /* Trigger interrupt (GPDMA1 channels start at IRQ 27) */
-            mm_nvic_set_pending(d->nvic, 27 + d->instance * 16 + ch_idx, MM_TRUE);
-        }
-
-        /* Linked list handling */
-        if (ch->llr != 0u) {
-            mm_u32 lli_addr = ch->lbar | ((ch->llr >> 2) << 2);
-            mm_u32 lli_data[4];
-            mm_u32 lli_idx;
-            mm_bool lli_ok = MM_TRUE;
-
-            for (lli_idx = 0; lli_idx < 4 && lli_ok; ++lli_idx) {
-                if (!mm_memmap_read(map, MM_NONSECURE,
-                                    lli_addr + lli_idx * 4, 4, &lli_data[lli_idx])) {
-                    lli_ok = MM_FALSE;
-                }
-            }
-
-            if (lli_ok) {
-                ch->tr1 = lli_data[0];
-                ch->tr2 = lli_data[1];
-                ch->br1 = lli_data[2];
-                ch->sar = lli_data[3];
-                /* More fields would be loaded for full LLI support */
-                ch->remaining = ch->br1 & 0xFFFFu;
-                ch->sr &= ~GPDMA_CxSR_IDLEF;
-                ch->cr |= GPDMA_CxCR_EN;
-                gpdma_execute_transfer(d, ch_idx);
-            }
-        }
-    }
-}
-
-static mm_bool gpdma_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
-{
-    struct gpdma_state *d = (struct gpdma_state *)opaque;
-
-    if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-
-    if (offset == GPDMA_SECCFGR) {
-        d->seccfgr = value;
-    } else if (offset == GPDMA_PRIVCFGR) {
-        d->privcfgr = value;
-    } else if (offset == GPDMA_RCFGLOCKR) {
-        /* Lock bits can only be set, not cleared */
-        d->rcfglockr |= value;
-    } else if (offset >= GPDMA_CH_BASE) {
-        mm_u32 ch_region = offset - GPDMA_CH_BASE;
-        mm_u32 ch_idx = ch_region / GPDMA_CH_STRIDE;
-        mm_u32 ch_offset = ch_region % GPDMA_CH_STRIDE;
-        if (ch_idx < GPDMA_CH_COUNT) {
-            gpdma_ch_write_reg(d, ch_idx, ch_offset, value);
-        }
-    }
-
-    return MM_TRUE;
 }
 
 static mm_bool flash_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
@@ -2825,10 +2281,10 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     reg.base = WWDG_SEC_BASE;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
-    /* GPDMA1/GPDMA2 (non-secure and secure aliases) */
+    /* GPDMA1/GPDMA2 (non-secure and secure aliases) - using shared implementation */
     reg.size = 0x1000u;
-    reg.read = gpdma_read;
-    reg.write = gpdma_write;
+    reg.read = stm32_gpdma_read;
+    reg.write = stm32_gpdma_write;
     reg.base = 0x40020000u; /* GPDMA1 */
     reg.opaque = &gpdma1;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
@@ -2841,7 +2297,7 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     reg.base = 0x50021000u; /* SEC_GPDMA2 */
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
-    /* GPIO A..I: NS alias 0x4202xxxx, Secure alias 0x5202xxxx */
+    /* GPIO A..I: NS alias 0x4202xxxx, Secure alias 0x5202xxxx - using shared implementation */
     {
         mm_u32 base_ns = 0x42020000u;
         mm_u32 base_s  = 0x52020000u;
@@ -2849,23 +2305,15 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
         for (i = 0; i < 9; ++i) {
             /* NS */
             reg.base = base_ns + (mm_u32)(i * 0x400u);
-            reg.size = 0x400u;
-            gpio_ctx[i * 2][0] = &gpio[i];
-            gpio_ctx[i * 2][1] = (void *)0; /* not secure alias */
-            gpio_ctx[i * 2][2] = &rcc;
-            gpio_ctx[i * 2][3] = (void *)(mm_uptr)i;
-            reg.opaque = gpio_ctx[i * 2];
-            reg.read = gpio_read;
-            reg.write = gpio_write;
+            reg.size = STM32_GPIO_REG_SIZE;
+            reg.opaque = &gpio_ctx_data[i * 2];
+            reg.read = stm32_gpio_read;
+            reg.write = stm32_gpio_write;
             if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
             /* Secure */
             reg.base = base_s + (mm_u32)(i * 0x400u);
-            gpio_ctx[i * 2 + 1][0] = &gpio[i];
-            gpio_ctx[i * 2 + 1][1] = (void *)1; /* secure alias */
-            gpio_ctx[i * 2 + 1][2] = &rcc;
-            gpio_ctx[i * 2 + 1][3] = (void *)(mm_uptr)i;
-            reg.opaque = gpio_ctx[i * 2 + 1];
+            reg.opaque = &gpio_ctx_data[i * 2 + 1];
             if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
         }
     }
@@ -2907,8 +2355,8 @@ void mm_stm32h563_rng_set_nvic(struct mm_nvic *nvic)
 
 void mm_stm32h563_gpdma_set_nvic(struct mm_nvic *nvic)
 {
-    gpdma1.nvic = nvic;
-    gpdma2.nvic = nvic;
+    stm32_gpdma_set_nvic(&gpdma1, nvic);
+    stm32_gpdma_set_nvic(&gpdma2, nvic);
 }
 
 mm_u8 mm_stm32h563_gpio_get_af(int bank, int pin)
@@ -2916,7 +2364,7 @@ mm_u8 mm_stm32h563_gpio_get_af(int bank, int pin)
     if (bank < 0 || bank >= 9 || pin < 0 || pin >= 16) {
         return 0;
     }
-    return gpio[bank].pin_af[pin];
+    return stm32_gpio_get_pin_af(&gpio[bank], pin);
 }
 
 mm_u8 mm_stm32h563_gpio_get_mode(int bank, int pin)
@@ -2924,5 +2372,5 @@ mm_u8 mm_stm32h563_gpio_get_mode(int bank, int pin)
     if (bank < 0 || bank >= 9 || pin < 0 || pin >= 16) {
         return 0;
     }
-    return gpio_get_pin_mode(&gpio[bank], pin);
+    return stm32_gpio_get_pin_mode(&gpio[bank], pin);
 }
