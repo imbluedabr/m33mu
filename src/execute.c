@@ -1981,6 +1981,24 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_u32 prod = cpu.r[d.rn] * cpu.r[d.rm];
                                             cpu.r[d.rd] = cpu.r[d.ra] - prod;
                                         } break;
+                        case MM_OP_SMMUL:
+                        case MM_OP_SMMLA:
+                        case MM_OP_SMMLS: {
+                                              mm_i64 prod = (mm_i64)(mm_i32)cpu.r[d.rn] * (mm_i64)(mm_i32)cpu.r[d.rm];
+                                              mm_i64 result;
+                                              if (d.kind == MM_OP_SMMLA) {
+                                                  result = prod + ((mm_i64)(mm_i32)cpu.r[d.ra] << 32);
+                                              } else if (d.kind == MM_OP_SMMLS) {
+                                                  result = (mm_i64)(mm_i32)cpu.r[d.ra] << 32;
+                                                  result = result - prod;
+                                              } else {
+                                                  result = prod;
+                                              }
+                                              if (d.imm != 0u) {
+                                                  result += 0x80000000LL;
+                                              }
+                                              cpu.r[d.rd] = (mm_u32)(result >> 32);
+                                          } break;
                         case MM_OP_MUL_W: {
                                               mm_u32 res = cpu.r[d.rn] * cpu.r[d.rm];
                                               mm_bool setflags = (d.imm & 1u) ? MM_TRUE : MM_FALSE;

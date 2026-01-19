@@ -577,6 +577,15 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_SMLATB:
         case ARM_INS_SMLATT:
             return dec->kind == MM_OP_SMLA;
+        case ARM_INS_SMMUL:
+        case ARM_INS_SMMULR:
+            return dec->kind == MM_OP_SMMUL;
+        case ARM_INS_SMMLA:
+        case ARM_INS_SMMLAR:
+            return dec->kind == MM_OP_SMMLA;
+        case ARM_INS_SMMLS:
+        case ARM_INS_SMMLSR:
+            return dec->kind == MM_OP_SMMLS;
 #ifdef ARM_INS_BXNS
         case ARM_INS_BXNS: return dec->kind == MM_OP_BXNS;
 #endif
@@ -617,7 +626,26 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_VSTMIA:
         case ARM_INS_VSTMDB:
             return dec->kind == MM_OP_VSTM;
+        case ARM_INS_SETEND:
+            /* SETEND is deprecated in ARMv8 and not supported in Cortex-M.
+             * Whitelist to avoid warnings - it's intentionally not implemented. */
+            return MM_TRUE;
         default:
+            /* Unmapped instruction in cross_check_kind.
+             * If m33mu returned UNDEFINED, this might be a gap in coverage.
+             * Print a warning to help identify missing implementations. */
+            if (dec->kind == MM_OP_UNDEFINED) {
+                static mm_bool warned = MM_FALSE;
+                if (!warned) {
+                    fprintf(stderr, "[CAPSTONE] WARNING: unmapped instruction capstone_id=%u decoded as MM_OP_UNDEFINED\n",
+                            (unsigned)insn->id);
+                    fprintf(stderr, "[CAPSTONE] Expected assembly: %s %s\n",
+                            insn->mnemonic, insn->op_str);
+                    fprintf(stderr, "[CAPSTONE] This may indicate missing instruction support in m33mu.\n");
+                    fprintf(stderr, "[CAPSTONE] Further warnings will be suppressed.\n");
+                    warned = MM_TRUE;
+                }
+            }
             return MM_TRUE;
     }
 }

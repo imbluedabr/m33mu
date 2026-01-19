@@ -1002,6 +1002,42 @@ static struct mm_decoded decode_32(mm_u32 insn)
         }
     }
 
+    /* SMMUL / SMMLA / SMMLS (Thumb-2 signed most significant word multiply) */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfb50u || (hw1 & 0xfff0u) == 0xfb60u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 ra = (mm_u8)((hw2 >> 12) & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 round = (mm_u8)((hw2 >> 4) & 0x1u);
+            if ((hw2 & 0x00f0u) == ((mm_u32)round << 4)) {
+                if (rn != 15u && rd != 15u && rm != 15u) {
+                    if (ra == 15u) {
+                        d.kind = MM_OP_SMMUL;
+                        d.rn = rn;
+                        d.rm = rm;
+                        d.rd = rd;
+                        d.imm = round;
+                        d.undefined = MM_FALSE;
+                        return d;
+                    } else {
+                        mm_bool is_smmls = ((hw1 & 0xfff0u) == 0xfb60u) ? MM_TRUE : MM_FALSE;
+                        d.kind = is_smmls ? MM_OP_SMMLS : MM_OP_SMMLA;
+                        d.rn = rn;
+                        d.rm = rm;
+                        d.rd = rd;
+                        d.ra = ra;
+                        d.imm = round;
+                        d.undefined = MM_FALSE;
+                        return d;
+                    }
+                }
+            }
+        }
+    }
+
     /* CLZ (Thumb-2): 1111 1010 1011 Rm | 1111 0000 1000 Rd */
     {
         mm_u16 hw1 = (mm_u16)(insn >> 16);

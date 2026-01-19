@@ -214,6 +214,13 @@ static int capstone_should_skip(const char *mnemonic, const char *op_str)
             return 1;
         }
     }
+    if (strcmp(mnemonic, "smmul") == 0 || strcmp(mnemonic, "smmulr") == 0 ||
+        strcmp(mnemonic, "smmla") == 0 || strcmp(mnemonic, "smmlar") == 0 ||
+        strcmp(mnemonic, "smmls") == 0 || strcmp(mnemonic, "smmlsr") == 0) {
+        if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;
+        }
+    }
     if (strcmp(mnemonic, "sdiv") == 0 || strcmp(mnemonic, "udiv") == 0) {
         if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
             return 1;
