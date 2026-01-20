@@ -186,6 +186,7 @@ static mm_bool ta100_spi_trace_enabled(void)
     return enabled;
 }
 
+#ifdef M33MU_HAS_WOLFSSL
 static mm_bool ta100_ecc_enabled(void)
 {
     static mm_bool init = MM_FALSE;
@@ -197,6 +198,7 @@ static mm_bool ta100_ecc_enabled(void)
     }
     return enabled;
 }
+#endif
 
 static void ta100_trace_dump(const char *tag, const mm_u8 *buf, mm_u32 len)
 {
