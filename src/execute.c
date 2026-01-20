@@ -446,6 +446,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                             itstate_val = (mm_u8)((it_cond << 4) | (d.imm & 0x0fu));
                             cpu.xpsr = itstate_set(cpu.xpsr, itstate_val);
                             break;
+                        case MM_OP_NOP:
+                        case MM_OP_NOP_W:
+                            /* NOP instructions - no operation */
+                            break;
                         case MM_OP_DSB:
                         case MM_OP_DMB:
                         case MM_OP_ISB:
