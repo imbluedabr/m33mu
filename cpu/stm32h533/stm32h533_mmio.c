@@ -38,6 +38,7 @@
 #include "m33mu/memmap.h"
 #include "m33mu/flash_persist.h"
 #include "m33mu/otp.h"
+#include "m33mu/spi_bus.h"
 #include "m33mu/gpio.h"
 #include "m33mu/nvic.h"
 #include "stm32_crypto.h"
@@ -1495,6 +1496,7 @@ static void mpcbb_init_defaults(void)
 static void exti_gpio_update_cb(int bank, mm_u32 old_level, mm_u32 new_level)
 {
     exti_gpio_update(bank, old_level, new_level);
+    mm_spi_bus_poll_all();
 }
 
 static mm_bool flash_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)

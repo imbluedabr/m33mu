@@ -38,6 +38,7 @@
 #include "m33mu/flash_persist.h"
 #include "m33mu/gpio.h"
 #include "m33mu/nvic.h"
+#include "m33mu/spi_bus.h"
 #include "stm32_crypto.h"
 #include "stm32_gpio.h"
 
@@ -863,6 +864,7 @@ static mm_bool stm32l552_gpio_clock_enabled_cb(int bank)
 static void exti_gpio_update_cb(int bank, mm_u32 old_level, mm_u32 new_level)
 {
     exti_gpio_update(bank, old_level, new_level);
+    mm_spi_bus_poll_all();
 }
 
 static mm_bool rng_clock_enabled(const struct rcc_state *rcc)

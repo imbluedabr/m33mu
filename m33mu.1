@@ -94,6 +94,9 @@ Enable Ethernet VDE backend (default socket: /var/run/vde.ctl).
 .TP
 .BR --tpm:SPIx:cs=GPIONAME[:file=PATH]
 Attach a TPM TIS device (optional NV backing file).
+.TP
+.BR --ta100:SPIx:cs=GPIONAME[:file=PATH][:profile=NAME][:serial=HEX]
+Attach a Microchip TA-100 Trust Anchor secure element. The device emulates a TA-100 over SPI with 4KB NV storage (128B config zone + 3968B data/key zone). Supports cryptographic operations (RNG, ECC P-256 key generation, ECDSA signing, SHA-256) via WolfSSL. Optional NV backing file (default: ta100.bin), profile name, and 4-byte serial number override (hex). Example: --ta100:SPI2:cs=PB5:file=/tmp/ta100.bin
 .SH ENVIRONMENT
 .TP
 .B CAPSTONE_PC

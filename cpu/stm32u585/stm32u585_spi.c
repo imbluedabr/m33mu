@@ -151,6 +151,11 @@ static void spi_start_transfer(struct spi_inst *s)
     s->eot_pending = MM_FALSE;
     s->tsize_rem = (tsize == 0u) ? 0xFFFFFFFFu : tsize;
     s->regs[SPI_SR / 4] &= ~(SR_EOT | SR_TXTF | SR_TXC);
+    
+    /* Poll CS state to allow devices to detect CS transitions that happened
+     * between SPI transactions (e.g., CS deassert after previous command,
+     * followed by CS assert for this new command) */
+    mm_spi_bus_poll_cs(s->bus_index);
 }
 
 static mm_u8 spi_xfer_byte(struct spi_inst *s, mm_u8 out)
@@ -180,6 +185,8 @@ static void spi_handle_tx(struct spi_inst *s, mm_u32 value, mm_u32 size_bytes)
     if (s->transfer_active && s->tsize_rem == 0u) {
         s->transfer_active = MM_FALSE;
         s->eot_pending = MM_TRUE;
+        /* Poll CS at end of transfer to let devices see CS deassert */
+        mm_spi_bus_poll_cs(s->bus_index);
         mm_spi_bus_end(s->bus_index);
     }
     update_sr(s);

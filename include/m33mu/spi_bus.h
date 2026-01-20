@@ -39,5 +39,7 @@ struct mm_spi_device {
 mm_bool mm_spi_bus_register_device(const struct mm_spi_device *dev);
 mm_u8 mm_spi_bus_xfer(int bus, mm_u8 out);
 void mm_spi_bus_end(int bus);
+void mm_spi_bus_poll_cs(int bus);
+void mm_spi_bus_poll_all(void);
 
 #endif /* M33MU_SPI_BUS_H */

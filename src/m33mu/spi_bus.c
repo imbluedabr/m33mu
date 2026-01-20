@@ -46,6 +46,7 @@ static struct mm_spi_device *spi_bus_select(int bus)
 {
     size_t i;
     struct mm_spi_device *fallback = 0;
+    mm_u8 cs;
     for (i = 0; i < g_spi_device_count; ++i) {
         struct mm_spi_device *dev = &g_spi_devices[i];
         if (dev->bus != bus) {
@@ -57,7 +58,8 @@ static struct mm_spi_device *spi_bus_select(int bus)
             }
             continue;
         }
-        if (dev->cs_level(dev->opaque) == 0u) {
+        cs = dev->cs_level(dev->opaque);
+        if (cs == 0u) {
             return dev;
         }
     }
@@ -83,6 +85,37 @@ void mm_spi_bus_end(int bus)
         }
         if (dev->end != 0) {
             dev->end(dev->opaque);
+        }
+    }
+}
+
+void mm_spi_bus_poll_cs(int bus)
+{
+    size_t i;
+    /* Poll all devices on this bus to check for CS state changes.
+     * This allows devices to detect CS transitions that happen between
+     * SPI byte transfers. We call the cs_level callback which may trigger
+     * internal processing if CS state changed. */
+    for (i = 0; i < g_spi_device_count; ++i) {
+        struct mm_spi_device *dev = &g_spi_devices[i];
+        if (dev->bus != bus) {
+            continue;
+        }
+        if (dev->cs_level != 0) {
+            /* Simply poll CS level - the device's internal logic will
+             * compare against stored state and take action if needed */
+            (void)dev->cs_level(dev->opaque);
+        }
+    }
+}
+
+void mm_spi_bus_poll_all(void)
+{
+    size_t i;
+    for (i = 0; i < g_spi_device_count; ++i) {
+        struct mm_spi_device *dev = &g_spi_devices[i];
+        if (dev->cs_level != 0) {
+            (void)dev->cs_level(dev->opaque);
         }
     }
 }

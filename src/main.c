@@ -58,6 +58,7 @@
 #ifdef M33MU_HAS_LIBTPMS
 #include "m33mu/tpm_tis.h"
 #endif
+#include "m33mu/ta100.h"
 #include "tui.h"
 #include <string.h>
 #include <time.h>
@@ -3741,6 +3742,8 @@ int main(int argc, char **argv)
     struct mm_tpm_tis_cfg tpm_cfgs[4];
     int tpm_count = 0;
 #endif
+    struct mm_ta100_cfg ta100_cfgs[4];
+    int ta100_count = 0;
     mm_u32 strcmp_trace_start = 0;
     mm_u32 strcmp_trace_end = 0;
     mm_u32 strcmp_entry = 0;
@@ -4004,6 +4007,16 @@ int main(int argc, char **argv)
             }
             tpm_count++;
 #endif
+        } else if (strncmp(argv[i], "--ta100:", 8) == 0) {
+            if (ta100_count >= (int)(sizeof(ta100_cfgs) / sizeof(ta100_cfgs[0]))) {
+                fprintf(stderr, "too many ta100 configs\n");
+                return 1;
+            }
+            if (!mm_ta100_parse_spec(argv[i] + 8, &ta100_cfgs[ta100_count])) {
+                fprintf(stderr, "invalid ta100 spec: %s\n", argv[i]);
+                return 1;
+            }
+            ta100_count++;
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "unknown option: %s\n", argv[i]);
             return 1;
@@ -4045,6 +4058,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_HAS_LIBTPMS
                         "[--tpm:SPIx:cs=GPIONAME[:file=<path>]] "
 #endif
+                        "[--ta100:SPIx:cs=GPIONAME[:file=<path>][:profile=<name>][:serial=<hex>]] "
                         "<image.bin[:offset]|image.elf|image.hex|image.uf2> [more images...]\n",
                 argv[0]);
         fprintf(stderr, "supported CPUs:");
@@ -4141,6 +4155,13 @@ int main(int argc, char **argv)
         }
     }
 #endif
+
+    for (i = 0; i < ta100_count; ++i) {
+        if (!mm_ta100_register_cfg(&ta100_cfgs[i])) {
+            fprintf(stderr, "failed to register ta100\n");
+            return 1;
+        }
+    }
 
     {
         mm_u8 *spiflash_data = 0;
@@ -4379,6 +4400,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_HAS_LIBTPMS
             mm_tpm_tis_reset_all();
 #endif
+            mm_ta100_reset_all();
             mm_memmap_configure_flash(&map, &cfg, flash, MM_TRUE);
             mm_memmap_configure_flash(&map, &cfg, flash, MM_FALSE);
             mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE);
@@ -5470,6 +5492,7 @@ cleanup:
 #ifdef M33MU_HAS_LIBTPMS
     mm_tpm_tis_shutdown_all();
 #endif
+    mm_ta100_shutdown_all();
     mm_usbdev_stop();
     mm_eth_backend_stop();
     if (opt_capstone) {
