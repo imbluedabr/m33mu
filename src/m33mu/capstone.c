@@ -469,7 +469,18 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         return MM_FALSE;
     }
     switch (insn->id) {
-        case ARM_INS_NOP: return dec->kind == MM_OP_NOP;
+        case ARM_INS_NOP: 
+            return (dec->kind == MM_OP_NOP || dec->kind == MM_OP_NOP_W);
+        case ARM_INS_YIELD: 
+            return (dec->kind == MM_OP_YIELD || dec->kind == MM_OP_YIELD_W);
+        case ARM_INS_WFE: 
+            return (dec->kind == MM_OP_WFE || dec->kind == MM_OP_WFE_W);
+        case ARM_INS_WFI: 
+            return (dec->kind == MM_OP_WFI || dec->kind == MM_OP_WFI_W);
+        case ARM_INS_SEV: 
+            return (dec->kind == MM_OP_SEV || dec->kind == MM_OP_SEV_W);
+        case ARM_INS_SEVL: 
+            return dec->kind == MM_OP_SEVL_W;
         case ARM_INS_IT: return dec->kind == MM_OP_IT;
         case ARM_INS_B: return (dec->kind == MM_OP_B_COND || dec->kind == MM_OP_B_UNCOND || dec->kind == MM_OP_B_COND_WIDE || dec->kind == MM_OP_B_UNCOND_WIDE);
         case ARM_INS_BL: return dec->kind == MM_OP_BL;
@@ -480,10 +491,6 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_BKPT: return dec->kind == MM_OP_BKPT;
         case ARM_INS_UDF: return dec->kind == MM_OP_UDF;
         case ARM_INS_SVC: return dec->kind == MM_OP_SVC;
-        case ARM_INS_WFE: return dec->kind == MM_OP_WFE;
-        case ARM_INS_WFI: return dec->kind == MM_OP_WFI;
-        case ARM_INS_SEV: return dec->kind == MM_OP_SEV;
-        case ARM_INS_YIELD: return dec->kind == MM_OP_YIELD;
         case ARM_INS_MOV:
             if (dec->kind == MM_OP_MOVW || dec->kind == MM_OP_MOVT) {
                 return MM_TRUE;
@@ -586,6 +593,14 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_SMMLS:
         case ARM_INS_SMMLSR:
             return dec->kind == MM_OP_SMMLS;
+        case ARM_INS_SMLAWB:
+            return dec->kind == MM_OP_SMLAWB;
+        case ARM_INS_SMLAWT:
+            return dec->kind == MM_OP_SMLAWT;
+        case ARM_INS_SMULWB:
+            return dec->kind == MM_OP_SMULWB;
+        case ARM_INS_SMULWT:
+            return dec->kind == MM_OP_SMULWT;
 #ifdef ARM_INS_BXNS
         case ARM_INS_BXNS: return dec->kind == MM_OP_BXNS;
 #endif

@@ -789,6 +789,25 @@ static struct mm_decoded decode_32(mm_u32 insn)
         return d;
     }
 
+    /* Wide hints (NOP.W, YIELD.W, WFE.W, WFI.W, SEV.W, SEVL.W) - 32-bit
+     * Pattern: 1111 0011 1010 1111 1000 0000 hint:4 0000
+     * Encoding: 0xf3af8000 with bits[7:4] = hint
+     */
+    if ((insn & 0xffffff0fu) == 0xf3af8000u) {
+        mm_u8 const hint = (mm_u8)((insn >> 4) & 0xfu);
+        switch (hint) {
+        case 0x0u: d.kind = MM_OP_NOP_W; break;
+        case 0x1u: d.kind = MM_OP_YIELD_W; break;
+        case 0x2u: d.kind = MM_OP_WFE_W; break;
+        case 0x3u: d.kind = MM_OP_WFI_W; break;
+        case 0x4u: d.kind = MM_OP_SEV_W; break;
+        case 0x5u: d.kind = MM_OP_SEVL_W; break;
+        default: return d; /* UNDEFINED */
+        }
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
     /* REV/REV16/REVSH (Thumb-2 wide encodings share hw1 with RBIT/CLZ). */
     {
         mm_u16 hw1 = (mm_u16)(insn >> 16);
@@ -1233,6 +1252,45 @@ static struct mm_decoded decode_32(mm_u32 insn)
                         d.rd = rd;
                         d.ra = ra;
                         d.imm = round;
+                        d.undefined = MM_FALSE;
+                        return d;
+                    }
+                }
+            }
+        }
+    }
+
+    /* SMLAWB, SMLAWT, SMULWB, SMULWT - DSP signed multiply word by halfword
+     * Pattern: 1111 1011 0011 Rn:4 Ra:4 Rd:4 000 M:1 Rm:4
+     * M=0: SMLAWB/SMULWB (bottom halfword), M=1: SMLAWT/SMULWT (top halfword)
+     * Ra=1111 distinguishes SMULW* (no accumulate) from SMLAW* (with accumulate)
+     * UNPREDICTABLE: Rd/Rn/Rm/Ra = SP or PC, but Capstone accepts SP, so we do too
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfb30u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 ra = (mm_u8)((hw2 >> 12) & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 m_bit = (mm_u8)((hw2 >> 4) & 0x1u);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            if ((hw2 & 0x00f0u) == ((mm_u32)m_bit << 4)) {
+                /* PC is always UNDEFINED, but accept SP for Capstone compatibility */
+                if (rn != 15u && rd != 15u && rm != 15u) {
+                    if (ra == 15u) {
+                        d.kind = m_bit ? MM_OP_SMULWT : MM_OP_SMULWB;
+                        d.rn = rn;
+                        d.rm = rm;
+                        d.rd = rd;
+                        d.undefined = MM_FALSE;
+                        return d;
+                    } else if (ra != 15u) {
+                        d.kind = m_bit ? MM_OP_SMLAWT : MM_OP_SMLAWB;
+                        d.rn = rn;
+                        d.rm = rm;
+                        d.rd = rd;
+                        d.ra = ra;
                         d.undefined = MM_FALSE;
                         return d;
                     }
