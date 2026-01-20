@@ -626,10 +626,59 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_VSTMIA:
         case ARM_INS_VSTMDB:
             return dec->kind == MM_OP_VSTM;
+        
+        /* Priority 1 DSP instructions */
+        case ARM_INS_SMLAD: return dec->kind == MM_OP_SMLAD;
+        case ARM_INS_SMLADX: return dec->kind == MM_OP_SMLADX;
+        case ARM_INS_SMLALD: return dec->kind == MM_OP_SMLALD;
+        case ARM_INS_SMLALDX: return dec->kind == MM_OP_SMLALDX;
+        case ARM_INS_SMLSD: return dec->kind == MM_OP_SMLSD;
+        case ARM_INS_SMLSDX: return dec->kind == MM_OP_SMLSDX;
+        case ARM_INS_QADD: return dec->kind == MM_OP_QADD;
+        case ARM_INS_QSUB: return dec->kind == MM_OP_QSUB;
+        case ARM_INS_QDADD: return dec->kind == MM_OP_QDADD;
+        case ARM_INS_QDSUB: return dec->kind == MM_OP_QDSUB;
+        case ARM_INS_PKHBT: return dec->kind == MM_OP_PKHBT;
+        case ARM_INS_PKHTB: return dec->kind == MM_OP_PKHTB;
+        case ARM_INS_SSAT: return dec->kind == MM_OP_SSAT;
+        case ARM_INS_USAT: return dec->kind == MM_OP_USAT;
+        case ARM_INS_SMULBB:
+        case ARM_INS_SMULBT:
+        case ARM_INS_SMULTB:
+        case ARM_INS_SMULTT:
+            return dec->kind == MM_OP_SMULBB;
+        
+        /* Instructions intentionally not implemented */
         case ARM_INS_SETEND:
-            /* SETEND is deprecated in ARMv8 and not supported in Cortex-M.
-             * Whitelist to avoid warnings - it's intentionally not implemented. */
+            /* SETEND is deprecated in ARMv8 and not supported in Cortex-M */
             return MM_TRUE;
+        
+        /* Coprocessor instructions - map to our decoders */
+        case ARM_INS_STC:
+        case ARM_INS_STCL:
+            return dec->kind == MM_OP_STC;
+        case ARM_INS_STC2:
+        case ARM_INS_STC2L:
+            return dec->kind == MM_OP_STC2;
+        case ARM_INS_LDC:
+        case ARM_INS_LDCL:
+            return dec->kind == MM_OP_LDC;
+        case ARM_INS_LDC2:
+        case ARM_INS_LDC2L:
+            return dec->kind == MM_OP_LDC2;
+        case ARM_INS_CDP:
+        case ARM_INS_CDP2:
+        case ARM_INS_MCR:
+        case ARM_INS_MCR2:
+        case ARM_INS_MRC:
+        case ARM_INS_MRC2:
+            return dec->kind == MM_OP_MCR_MRC || dec->kind == MM_OP_CDP;
+        case ARM_INS_MCRR:
+        case ARM_INS_MCRR2:
+        case ARM_INS_MRRC:
+        case ARM_INS_MRRC2:
+            return dec->kind == MM_OP_MCRR_MRRC;
+        
         default:
             /* Unmapped instruction in cross_check_kind.
              * If m33mu returned UNDEFINED, this might be a gap in coverage.

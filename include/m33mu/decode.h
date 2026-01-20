@@ -123,6 +123,14 @@ enum mm_op_kind {
     MM_OP_LDRSB_IMM,
     MM_OP_LDRSH_REG,
     MM_OP_LDRSH_IMM,
+    MM_OP_LDRSHT,
+    MM_OP_STRHT,
+    MM_OP_LDRHT,
+    MM_OP_LDRSBT,
+    MM_OP_LDRT,
+    MM_OP_STRT,
+    MM_OP_LDRBT,
+    MM_OP_STRBT,
     MM_OP_CLZ,
     MM_OP_RBIT,
     MM_OP_PUSH,
@@ -185,6 +193,29 @@ enum mm_op_kind {
     MM_OP_SMMUL,
     MM_OP_SMMLA,
     MM_OP_SMMLS,
+    MM_OP_SMMLSR,
+    MM_OP_SMLAWB,
+    MM_OP_SMLAWT,
+    MM_OP_SMULWB,
+    MM_OP_SMULWT,
+
+    /* DSP instructions (ARMv7-M DSP extension) - Priority 1 */
+    MM_OP_SMLAD,   /* Signed dual multiply-accumulate */
+    MM_OP_SMLADX,  /* Signed dual multiply-accumulate (exchange) */
+    MM_OP_SMLALD,  /* Signed dual multiply-accumulate long */
+    MM_OP_SMLALDX, /* Signed dual multiply-accumulate long (exchange) */
+    MM_OP_SMLSD,   /* Signed dual multiply-subtract */
+    MM_OP_SMLSDX,  /* Signed dual multiply-subtract (exchange) */
+    MM_OP_QADD,    /* Saturating add */
+    MM_OP_QSUB,    /* Saturating subtract */
+    MM_OP_QDADD,   /* Saturating double and add */
+    MM_OP_QDSUB,   /* Saturating double and subtract */
+    MM_OP_PKHBT,   /* Pack halfword (bottom-top) */
+    MM_OP_PKHTB,   /* Pack halfword (top-bottom) */
+    MM_OP_SSAT,    /* Signed saturate */
+    MM_OP_USAT,    /* Unsigned saturate */
+    MM_OP_SMULBB,  /* Signed halfword multiply (all 4 variants: BB/BT/TB/TT) */
+
     MM_OP_ORN_REG,
     MM_OP_ORN_IMM,
     MM_OP_RSB_IMM,
@@ -200,6 +231,10 @@ enum mm_op_kind {
     MM_OP_MCR_MRC,
     MM_OP_MCRR_MRRC,
     MM_OP_CDP,
+    MM_OP_STC,
+    MM_OP_STC2,
+    MM_OP_LDC,
+    MM_OP_LDC2,
     MM_OP_VADD,
     MM_OP_VSUB,
     MM_OP_VMUL,

@@ -24,8 +24,10 @@
 #include "m33mu/exception.h"
 #include "m33mu/table_branch.h"
 #include "m33mu/tz.h"
+#include "m33mu/tt.h"
 #include "m33mu/target_hal.h"
 #include "m33mu/mem_prot.h"
+#include "m33mu/dsp_helpers.h"
 #include "rp2350/rp2350_mmio.h"
 #include "rp2350/rp2350_coproc.h"
 #include <stdio.h>
@@ -444,8 +446,6 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                             itstate_val = (mm_u8)((it_cond << 4) | (d.imm & 0x0fu));
                             cpu.xpsr = itstate_set(cpu.xpsr, itstate_val);
                             break;
-                        case MM_OP_NOP:
-                            break;
                         case MM_OP_DSB:
                         case MM_OP_DMB:
                         case MM_OP_ISB:
@@ -546,6 +546,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     (void)peek;
                                                 }
                                             } break;
+                        case MM_OP_STC:
+                        case MM_OP_STC2:
+                        case MM_OP_LDC:
+                        case MM_OP_LDC2:
                         case MM_OP_CDP: {
                                             mm_u8 op1 = (mm_u8)(d.imm & 0x0fu);
                                             mm_u8 op2 = (mm_u8)((d.imm >> 4) & 0x7u);
@@ -1981,6 +1985,150 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_u32 prod = cpu.r[d.rn] * cpu.r[d.rm];
                                             cpu.r[d.rd] = cpu.r[d.ra] - prod;
                                         } break;
+                        case MM_OP_SMLAD:
+                        case MM_OP_SMLADX: {
+                                              mm_u32 rn_val = cpu.r[d.rn];
+                                              mm_u32 rm_val = cpu.r[d.rm];
+                                              mm_i16 rn_lo = (mm_i16)(rn_val & 0xffffu);
+                                              mm_i16 rn_hi = (mm_i16)(rn_val >> 16);
+                                              mm_i16 rm_lo = (mm_i16)(rm_val & 0xffffu);
+                                              mm_i16 rm_hi = (mm_i16)(rm_val >> 16);
+                                              mm_i32 prod1, prod2;
+                                              mm_i64 sum;
+                                              if (d.kind == MM_OP_SMLADX) {
+                                                  prod1 = (mm_i32)rn_lo * (mm_i32)rm_hi;
+                                                  prod2 = (mm_i32)rn_hi * (mm_i32)rm_lo;
+                                              } else {
+                                                  prod1 = (mm_i32)rn_lo * (mm_i32)rm_lo;
+                                                  prod2 = (mm_i32)rn_hi * (mm_i32)rm_hi;
+                                              }
+                                              sum = (mm_i64)prod1 + (mm_i64)prod2 + (mm_i64)(mm_i32)cpu.r[d.ra];
+                                              cpu.r[d.rd] = (mm_u32)sum;
+                                              if (sum != (mm_i64)(mm_i32)cpu.r[d.rd]) {
+                                                  cpu.q_flag = MM_TRUE;
+                                              }
+                                          } break;
+                        case MM_OP_SMLALD:
+                        case MM_OP_SMLALDX: {
+                                               mm_u32 rn_val = cpu.r[d.rn];
+                                               mm_u32 rm_val = cpu.r[d.rm];
+                                               mm_i16 rn_lo = (mm_i16)(rn_val & 0xffffu);
+                                               mm_i16 rn_hi = (mm_i16)(rn_val >> 16);
+                                               mm_i16 rm_lo = (mm_i16)(rm_val & 0xffffu);
+                                               mm_i16 rm_hi = (mm_i16)(rm_val >> 16);
+                                               mm_i32 prod1, prod2;
+                                               mm_i64 accum, sum;
+                                               if (d.kind == MM_OP_SMLALDX) {
+                                                   prod1 = (mm_i32)rn_lo * (mm_i32)rm_hi;
+                                                   prod2 = (mm_i32)rn_hi * (mm_i32)rm_lo;
+                                               } else {
+                                                   prod1 = (mm_i32)rn_lo * (mm_i32)rm_lo;
+                                                   prod2 = (mm_i32)rn_hi * (mm_i32)rm_hi;
+                                               }
+                                               accum = ((mm_i64)cpu.r[d.ra] << 32) | (mm_i64)cpu.r[d.rd];
+                                               sum = accum + (mm_i64)prod1 + (mm_i64)prod2;
+                                               cpu.r[d.rd] = (mm_u32)(sum & 0xffffffffLL);
+                                               cpu.r[d.ra] = (mm_u32)(sum >> 32);
+                                           } break;
+                        case MM_OP_PKHBT:
+                        case MM_OP_PKHTB: {
+                                             mm_u32 rn_val = cpu.r[d.rn];
+                                             mm_u32 rm_val = cpu.r[d.rm];
+                                             mm_u32 result;
+                                             if (d.kind == MM_OP_PKHBT) {
+                                                 mm_u32 shifted = rm_val << d.imm;
+                                                 result = (rn_val & 0xffffu) | (shifted & 0xffff0000u);
+                                             } else {
+                                                 mm_u32 shifted;
+                                                 if (d.imm == 0u) {
+                                                     shifted = (mm_u32)((mm_i32)rm_val >> 31);
+                                                 } else {
+                                                     shifted = (mm_u32)((mm_i32)rm_val >> d.imm);
+                                                 }
+                                                 result = (rn_val & 0xffff0000u) | (shifted & 0xffffu);
+                                             }
+                                             cpu.r[d.rd] = result;
+                                         } break;
+                        case MM_OP_QADD:
+                        case MM_OP_QSUB: {
+                                            mm_u32 result;
+                                            if (d.kind == MM_OP_QADD) {
+                                                result = mm_qadd(cpu.r[d.rn], cpu.r[d.rm], &cpu.q_flag);
+                                            } else {
+                                                result = mm_qsub(cpu.r[d.rn], cpu.r[d.rm], &cpu.q_flag);
+                                            }
+                                            cpu.r[d.rd] = result;
+                                        } break;
+                        case MM_OP_QDADD:
+                        case MM_OP_QDSUB: {
+                                             mm_u32 result;
+                                             if (d.kind == MM_OP_QDADD) {
+                                                 result = mm_qdadd(cpu.r[d.rn], cpu.r[d.rm], &cpu.q_flag);
+                                             } else {
+                                                 result = mm_qdsub(cpu.r[d.rn], cpu.r[d.rm], &cpu.q_flag);
+                                             }
+                                             cpu.r[d.rd] = result;
+                                         } break;
+                        case MM_OP_SMLSD:
+                        case MM_OP_SMLSDX: {
+                                              mm_u32 rn_val = cpu.r[d.rn];
+                                              mm_u32 rm_val = cpu.r[d.rm];
+                                              mm_i16 rn_lo = (mm_i16)(rn_val & 0xffffu);
+                                              mm_i16 rn_hi = (mm_i16)(rn_val >> 16);
+                                              mm_i16 rm_lo = (mm_i16)(rm_val & 0xffffu);
+                                              mm_i16 rm_hi = (mm_i16)(rm_val >> 16);
+                                              mm_i32 prod1, prod2;
+                                              mm_i64 diff;
+                                              if (d.kind == MM_OP_SMLSDX) {
+                                                  prod1 = (mm_i32)rn_lo * (mm_i32)rm_hi;
+                                                  prod2 = (mm_i32)rn_hi * (mm_i32)rm_lo;
+                                              } else {
+                                                  prod1 = (mm_i32)rn_lo * (mm_i32)rm_lo;
+                                                  prod2 = (mm_i32)rn_hi * (mm_i32)rm_hi;
+                                              }
+                                              diff = (mm_i64)prod1 - (mm_i64)prod2 + (mm_i64)(mm_i32)cpu.r[d.ra];
+                                              cpu.r[d.rd] = (mm_u32)diff;
+                                              if (diff != (mm_i64)(mm_i32)cpu.r[d.rd]) {
+                                                  cpu.q_flag = MM_TRUE;
+                                              }
+                                          } break;
+                        case MM_OP_SMULBB: {
+                                              mm_u32 rn_val = cpu.r[d.rn];
+                                              mm_u32 rm_val = cpu.r[d.rm];
+                                              mm_u8 xy = (mm_u8)(d.imm & 0x3u);
+                                              mm_i16 rn_half = (xy & 0x2u) ? (mm_i16)(rn_val >> 16) : (mm_i16)(rn_val & 0xffffu);
+                                              mm_i16 rm_half = (xy & 0x1u) ? (mm_i16)(rm_val >> 16) : (mm_i16)(rm_val & 0xffffu);
+                                              mm_i32 result = (mm_i32)rn_half * (mm_i32)rm_half;
+                                              cpu.r[d.rd] = (mm_u32)result;
+                                          } break;
+                        case MM_OP_SSAT:
+                        case MM_OP_USAT: {
+                                            mm_u32 imm = d.imm;
+                                            mm_u8 sat_to = (mm_u8)(imm & 0xffu);
+                                            mm_u8 shift_imm = (mm_u8)((imm >> 8) & 0x1fu);
+                                            mm_u8 shift_type = (mm_u8)((imm >> 16) & 0x3u);
+                                            mm_i32 operand = (mm_i32)cpu.r[d.rn];
+                                            mm_i64 shifted;
+                                            mm_u32 result;
+                                            if (shift_type == 0x0u) {
+                                                shifted = (mm_i64)operand << shift_imm;
+                                            } else if (shift_type == 0x2u) {
+                                                if (shift_imm == 0u) {
+                                                    shifted = operand >> 31;
+                                                } else {
+                                                    shifted = operand >> shift_imm;
+                                                }
+                                            } else {
+                                                shifted = operand;
+                                            }
+                                            if (d.kind == MM_OP_SSAT) {
+                                                mm_u32 n = sat_to + 1;
+                                                result = (mm_u32)mm_sat_s32(shifted, n, &cpu.q_flag);
+                                            } else {
+                                                result = mm_sat_u32(shifted, sat_to, &cpu.q_flag);
+                                            }
+                                            cpu.r[d.rd] = result;
+                                        } break;
                         case MM_OP_SMMUL:
                         case MM_OP_SMMLA:
                         case MM_OP_SMMLS: {
@@ -1998,6 +2146,32 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                   result += 0x80000000LL;
                                               }
                                               cpu.r[d.rd] = (mm_u32)(result >> 32);
+                                          } break;
+                        case MM_OP_SMLAWB:
+                        case MM_OP_SMLAWT:
+                        case MM_OP_SMULWB:
+                        case MM_OP_SMULWT: {
+                                              mm_i32 rn_val = (mm_i32)cpu.r[d.rn];
+                                              mm_u32 rm_val = cpu.r[d.rm];
+                                              mm_i16 rm_half;
+                                              mm_i64 product;
+                                              mm_i32 result;
+                                              if (d.kind == MM_OP_SMLAWT || d.kind == MM_OP_SMULWT) {
+                                                  rm_half = (mm_i16)(rm_val >> 16);
+                                              } else {
+                                                  rm_half = (mm_i16)rm_val;
+                                              }
+                                              product = (mm_i64)rn_val * (mm_i64)rm_half;
+                                              result = (mm_i32)(product >> 16);
+                                              if (d.kind == MM_OP_SMLAWB || d.kind == MM_OP_SMLAWT) {
+                                                  mm_i32 ra_val = (mm_i32)cpu.r[d.ra];
+                                                  mm_i64 sum = (mm_i64)result + (mm_i64)ra_val;
+                                                  result = (mm_i32)sum;
+                                                  if (sum != (mm_i64)result) {
+                                                      cpu.q_flag = 1;
+                                                  }
+                                              }
+                                              cpu.r[d.rd] = (mm_u32)result;
                                           } break;
                         case MM_OP_MUL_W: {
                                               mm_u32 res = cpu.r[d.rn] * cpu.r[d.rm];
@@ -2102,6 +2276,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 break;
                                             }
                                             switch (sysm) {
+                                                case 0x00: /* APSR */
+                                                    val = cpu.xpsr & 0xf80f0000u; /* NZCV + Q + GE */
+                                                    val |= (cpu.q_flag ? (1u << 27) : 0u);
+                                                    val |= ((mm_u32)cpu.ge_flags << 16);
+                                                    break;
                                                 case 0x03: val = cpu.xpsr; break; /* XPSR */
                                                 case 0x05: val = cpu.xpsr & 0x1ffu; break; /* IPSR */
                                                 case 0x08: val = mm_cpu_get_active_sp(&cpu); break; /* MSP */
@@ -2130,6 +2309,16 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_u32 val = cpu.r[d.rm];
                                             mm_bool unpriv = !mm_cpu_get_privileged(&cpu);
                                             switch (sysm) {
+                                                case 0x00: /* APSR */
+                                                    /* Only NZCVQ and GE flags can be written via APSR */
+                                                    if (mask & 0x8) { /* _nzcvq */
+                                                        cpu.xpsr = (cpu.xpsr & ~0xf8000000u) | (val & 0xf8000000u);
+                                                        cpu.q_flag = (val & (1u << 27)) ? MM_TRUE : MM_FALSE;
+                                                    }
+                                                    if (mask & 0x4) { /* _g */
+                                                        cpu.ge_flags = (mm_u8)((val >> 16) & 0xfu);
+                                                    }
+                                                    break;
                                                 case 0x08: /* MSP */
                                                     if (cpu.sec_state == MM_NONSECURE && cpu.mode == MM_THREAD && unpriv) {
                                                         break;
@@ -2891,8 +3080,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                         case MM_OP_TTT:
                         case MM_OP_TTA:
                         case MM_OP_TTAT: {
-                                             /* TODO: model full CMSE attribute queries; return zero for now. */
-                                             cpu.r[d.rd] = 0u;
+                                             mm_u32 addr = cpu.r[d.rn];
+                                             mm_bool alt = (d.kind == MM_OP_TTA || d.kind == MM_OP_TTAT);
+                                             mm_bool forceunpriv = (d.kind == MM_OP_TTT || d.kind == MM_OP_TTAT);
+                                             cpu.r[d.rd] = mm_tt_resp(&cpu, &scs, addr, alt, forceunpriv);
                                          } break;
                         case MM_OP_LDRSH_REG: {
                                                   mm_u32 addr = cpu.r[d.rn] + (cpu.r[d.rm] << (d.imm & 0x3u));

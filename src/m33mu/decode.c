@@ -1002,6 +1002,209 @@ static struct mm_decoded decode_32(mm_u32 insn)
         }
     }
 
+    /* SMLAD / SMLADX (Thumb-2 signed dual multiply-accumulate)
+     * SMLAD:  1111 1011 0010 Rn | Ra Rd 0000 Rm
+     * SMLADX: 1111 1011 0010 Rn | Ra Rd 0001 Rm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfb20u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 ra = (mm_u8)((hw2 >> 12) & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 m_bit = (mm_u8)((hw2 >> 4) & 0x1u);
+            if ((hw2 & 0x00f0u) == ((mm_u32)m_bit << 4) && ra != 15u && rn != 15u && rd != 15u && rm != 15u) {
+                d.kind = m_bit ? MM_OP_SMLADX : MM_OP_SMLAD;
+                d.rn = rn;
+                d.rm = rm;
+                d.rd = rd;
+                d.ra = ra;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* SMLALD / SMLALDX (Thumb-2 signed dual multiply-accumulate long)
+     * SMLALD:  1111 1011 1100 Rn | RdLo RdHi 1100 Rm
+     * SMLALDX: 1111 1011 1100 Rn | RdLo RdHi 1101 Rm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfbc0u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rdlo = (mm_u8)((hw2 >> 12) & 0x0fu);
+            mm_u8 rdhi = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 m_bit = (mm_u8)((hw2 >> 4) & 0x1u);
+            if ((hw2 & 0x00f0u) == (0x00c0u | ((mm_u32)m_bit << 4)) && rn != 15u && rdlo != 15u && rdhi != 15u && rm != 15u) {
+                d.kind = m_bit ? MM_OP_SMLALDX : MM_OP_SMLALD;
+                d.rn = rn;
+                d.rm = rm;
+                d.rd = rdlo;
+                d.ra = rdhi;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* PKHBT / PKHTB (Thumb-2 pack halfwords)
+     * PKHBT: 1110 1010 1100 Rn | imm3 Rd tb imm2 type Rm
+     * PKHTB: Same encoding, tb bit = 1
+     * type field encodes shift: 00=LSL#0, 10=LSL#imm (for PKHBT), 01/10=ASR (for PKHTB)
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xeac0u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 tb = (mm_u8)((hw2 >> 5) & 0x1u);
+            mm_u8 imm3 = (mm_u8)((hw2 >> 12) & 0x7u);
+            mm_u8 imm2 = (mm_u8)((hw2 >> 6) & 0x3u);
+            mm_u8 shift = (mm_u8)((imm3 << 2) | imm2);
+            if (rn != 15u && rd != 15u && rm != 15u) {
+                d.kind = tb ? MM_OP_PKHTB : MM_OP_PKHBT;
+                d.rn = rn;
+                d.rm = rm;
+                d.rd = rd;
+                d.imm = shift;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* QADD / QSUB (Thumb-2 saturating add/subtract)
+     * QADD: 1111 1010 1000 Rn | 1111 Rd 1000 Rm
+     * QSUB: 1111 1010 1000 Rn | 1111 Rd 1010 Rm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfa80u && (hw2 & 0xf000u) == 0xf000u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 op = (mm_u8)((hw2 >> 4) & 0x0fu);
+            if (rn != 15u && rd != 15u && rm != 15u && (op == 0x8u || op == 0xau)) {
+                d.kind = (op == 0x8u) ? MM_OP_QADD : MM_OP_QSUB;
+                d.rn = rn;
+                d.rm = rm;
+                d.rd = rd;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* QDADD / QDSUB (Thumb-2 saturating double and add/subtract)
+     * QDADD: 1111 1010 1000 Rn | 1111 Rd 1001 Rm
+     * QDSUB: 1111 1010 1000 Rn | 1111 Rd 1011 Rm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfa80u && (hw2 & 0xf000u) == 0xf000u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 op = (mm_u8)((hw2 >> 4) & 0x0fu);
+            if (rn != 15u && rd != 15u && rm != 15u && (op == 0x9u || op == 0xbu)) {
+                d.kind = (op == 0x9u) ? MM_OP_QDADD : MM_OP_QDSUB;
+                d.rn = rn;
+                d.rm = rm;
+                d.rd = rd;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* SMLSD / SMLSDX (Thumb-2 signed dual multiply-subtract)
+     * SMLSD:  1111 1011 0100 Rn | Ra Rd 0000 Rm
+     * SMLSDX: 1111 1011 0100 Rn | Ra Rd 0001 Rm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfb40u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 ra = (mm_u8)((hw2 >> 12) & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 m_bit = (mm_u8)((hw2 >> 4) & 0x1u);
+            if ((hw2 & 0x00f0u) == ((mm_u32)m_bit << 4) && ra != 15u && rn != 15u && rd != 15u && rm != 15u) {
+                d.kind = m_bit ? MM_OP_SMLSDX : MM_OP_SMLSD;
+                d.rn = rn;
+                d.rm = rm;
+                d.rd = rd;
+                d.ra = ra;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* SMULBB/BT/TB/TT (Thumb-2 signed halfword multiply)
+     * SMULxy: 1111 1011 0001 Rn | 1111 Rd 00xy Rm
+     * x selects Rn halfword: 0=bottom, 1=top
+     * y selects Rm halfword: 0=bottom, 1=top
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfb10u && (hw2 & 0xf0c0u) == 0xf000u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 xy = (mm_u8)((hw2 >> 4) & 0x3u);
+            if (rn != 15u && rd != 15u && rm != 15u) {
+                d.kind = MM_OP_SMULBB;
+                d.rn = rn;
+                d.rm = rm;
+                d.rd = rd;
+                d.imm = xy;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* SSAT / USAT (Thumb-2 saturate to N bits)
+     * SSAT: 1111 0011 00sh Rn | 0 imm3 Rd imm2 sh sat_imm
+     * USAT: 1111 0011 10sh Rn | 0 imm3 Rd imm2 sh sat_imm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xff00u) == 0xf300u && (hw2 & 0x8000u) == 0x0000u) {
+            mm_u8 opcode = (mm_u8)((hw1 >> 6) & 0x3u);  /* bits [7:6]: 00=SSAT, 10=USAT */
+            mm_u8 sh_hi = (mm_u8)((hw1 >> 5) & 0x1u);
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 imm3 = (mm_u8)((hw2 >> 12) & 0x7u);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 imm2 = (mm_u8)((hw2 >> 6) & 0x3u);
+            mm_u8 sh_lo = (mm_u8)((hw2 >> 5) & 0x1u);
+            mm_u8 sat_imm = (mm_u8)(hw2 & 0x1fu);
+            mm_u8 shift_type = (mm_u8)((sh_hi << 1) | sh_lo);
+            mm_u8 shift_imm = (mm_u8)((imm3 << 2) | imm2);
+            if ((opcode == 0x0u || opcode == 0x2u) && rn != 15u && rd != 15u && shift_type <= 0x2u) {
+                d.kind = (opcode == 0x0u) ? MM_OP_SSAT : MM_OP_USAT;
+                d.rn = rn;
+                d.rd = rd;
+                d.imm = (shift_type << 16) | (shift_imm << 8) | sat_imm;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
     /* SMMUL / SMMLA / SMMLS (Thumb-2 signed most significant word multiply) */
     {
         mm_u16 hw1 = (mm_u16)(insn >> 16);
@@ -1071,11 +1274,26 @@ static struct mm_decoded decode_32(mm_u32 insn)
         d.undefined = MM_FALSE;
         return d;
     }
-    /* LDRSH (immediate) Thumb-2, T2: 1111 1001 0011 Rn | 1 P U W imm8 */
+    /* LDRSH (immediate) Thumb-2, T2: 1111 1001 0011 Rn | 1 P U W imm8 
+     * Also handles LDRSHT when P=0, W=1, bits[11:8]=0xe (unprivileged) */
     if ((insn & 0xfff00000u) == 0xf9300000u && (insn & 0x00000800u) == 0x00000800u) {
         mm_u8 p = (mm_u8)((insn >> 10) & 1u);
         mm_u8 u = (mm_u8)((insn >> 9) & 1u);
         mm_u8 w = (mm_u8)((insn >> 8) & 1u);
+        
+        /* Check for unprivileged variant (P=0, W=1, bits[11:8]=0xe) */
+        if (p == 0u && w == 1u && ((insn >> 8) & 0xfu) == 0xeu) {
+            mm_u8 rn = (mm_u8)((insn >> 16) & 0x0fu);
+            mm_u8 rt = (mm_u8)((insn >> 12) & 0x0fu);
+            mm_u32 imm8 = insn & 0xffu;
+            d.kind = MM_OP_LDRSHT;
+            d.rn = rn;
+            d.rd = rt;
+            d.imm = imm8;
+            d.undefined = MM_FALSE;
+            return d;
+        }
+        
         if (p == 1u && w == 0u) {
             mm_u8 rn = (mm_u8)((insn >> 16) & 0x0fu);
             mm_u8 rt = (mm_u8)((insn >> 12) & 0x0fu);
@@ -1650,7 +1868,8 @@ static struct mm_decoded decode_32(mm_u32 insn)
             return d;
         }
     }
-    /* LDRSB (immediate) Thumb-2, T2: 1111 1001 0001 Rn | 1 P U W imm8 */
+    /* LDRSB (immediate) Thumb-2, T2: 1111 1001 0001 Rn | 1 P U W imm8 
+     * Also handles LDRSBT when P=0, W=1, bits[11:8]=0xe (unprivileged) */
     {
         mm_u16 hw1 = (mm_u16)(insn >> 16);
         mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
@@ -1658,6 +1877,20 @@ static struct mm_decoded decode_32(mm_u32 insn)
             mm_u8 p = (mm_u8)((hw2 >> 10) & 1u);
             mm_u8 u = (mm_u8)((hw2 >> 9) & 1u);
             mm_u8 w = (mm_u8)((hw2 >> 8) & 1u);
+            
+            /* Check for unprivileged variant (P=0, W=1, bits[11:8]=0xe) */
+            if (p == 0u && w == 1u && ((hw2 >> 8) & 0xfu) == 0xeu) {
+                mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+                mm_u8 rt = (mm_u8)((hw2 >> 12) & 0x0fu);
+                mm_u32 imm8 = hw2 & 0x00ffu;
+                d.kind = MM_OP_LDRSBT;
+                d.rn = rn;
+                d.rd = rt;
+                d.imm = imm8;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+            
             if (p == 1u && w == 0u) { /* pre-indexed, no writeback => simple offset */
                 mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
                 mm_u8 rt = (mm_u8)((hw2 >> 12) & 0x0fu);
@@ -1838,7 +2071,8 @@ static struct mm_decoded decode_32(mm_u32 insn)
         return d;
     }
 
-    /* STR/LDR offset (Thumb-2) (encoding T3: imm8, P=1, W=0) */
+    /* STR/LDR offset (Thumb-2) (encoding T3: imm8, P=1, W=0)
+     * Also handles STRT/LDRT when bits[11:8]=0xe (unprivileged) */
     if ((insn & 0xfff00f00u) == 0xf8400c00u) {
         mm_u8 u = (mm_u8)((insn >> 9) & 1u);
         mm_u8 imm8 = (mm_u8)(insn & 0xffu);
@@ -1858,6 +2092,25 @@ static struct mm_decoded decode_32(mm_u32 insn)
         d.rn = (mm_u8)((insn >> 16) & 0x0fu);
         d.rd = (mm_u8)((insn >> 12) & 0x0fu);
         d.imm = (mm_u32)offset;
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    /* STRT/LDRT - unprivileged immediate offset (bits[11:8]=0xe) */
+    if ((insn & 0xfff00f00u) == 0xf8400e00u) {
+        mm_u8 imm8 = (mm_u8)(insn & 0xffu);
+        d.kind = MM_OP_STRT;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rd = (mm_u8)((insn >> 12) & 0x0fu);
+        d.imm = (mm_u32)imm8;
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xfff00f00u) == 0xf8500e00u) {
+        mm_u8 imm8 = (mm_u8)(insn & 0xffu);
+        d.kind = MM_OP_LDRT;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rd = (mm_u8)((insn >> 12) & 0x0fu);
+        d.imm = (mm_u32)imm8;
         d.undefined = MM_FALSE;
         return d;
     }
@@ -1944,7 +2197,8 @@ static struct mm_decoded decode_32(mm_u32 insn)
         return d;
     }
 
-    /* STRB/LDRB (immediate) Thumb-2 (T3/T4). */
+    /* STRB/LDRB (immediate) Thumb-2 (T3/T4). 
+     * Also handles STRBT/LDRBT when P=0, W=1, bits[11:8]=0xe (unprivileged) */
     if ((insn & 0xff000000u) == 0xf8000000u) {
         mm_u8 op1 = (mm_u8)((insn >> 20) & 0x7u);
         mm_u8 l = (mm_u8)((insn >> 20) & 1u);
@@ -1958,6 +2212,15 @@ static struct mm_decoded decode_32(mm_u32 insn)
         if (op1 > 1u) {
             /* Not a byte load/store immediate form. */
         } else {
+        /* Check for unprivileged variant (P=0, W=1, bits[11:8]=0xe) */
+        if (p == 0u && w == 1u && ((insn >> 8) & 0xfu) == 0xeu) {
+            d.kind = (l != 0u) ? MM_OP_LDRBT : MM_OP_STRBT;
+            d.rn = rn;
+            d.rd = rt;
+            d.imm = (mm_u32)imm8;
+            d.undefined = MM_FALSE;
+            return d;
+        }
         if (u == 0u) {
             offset = -(mm_i32)imm8;
         }
@@ -2114,9 +2377,7 @@ static struct mm_decoded decode_32(mm_u32 insn)
     }
 
     /* VFP single load/store (VLDR/VSTR). */
-    if ((insn & 0xff000f00u) == 0xed000a00u ||
-        (insn & 0xff000f00u) == 0xed000200u ||
-        (insn & 0xff000f00u) == 0xed000300u) {
+    if ((insn & 0xff000f00u) == 0xed000a00u) {
         if ((insn & (1u << 21)) == 0u) {
         mm_bool load = ((insn >> 20) & 1u) != 0u;
         mm_bool u = ((insn >> 23) & 1u) != 0u;
@@ -2385,6 +2646,115 @@ static struct mm_decoded decode_32(mm_u32 insn)
             d.rd = (mm_u8)((insn >> 12) & 0x0fu);
             d.undefined = MM_FALSE;
             return d;
+        }
+    }
+
+    /* STC / STC2 (Store Coprocessor), Thumb-2
+     * STC (T1):  1110 110P UDWL Rn | CRd coproc imm8
+     * STC2 (T2): 1111 110P UDWL Rn | CRd coproc imm8
+     * 
+     * Constraints:
+     * - L bit (bit 20/hw1[4]) must be 0 for STC (1 for LDC)
+     * - P=0, U=0, D=1, W=0 → MCRR/MCRR2 (not STC)
+     * - P=0, U=0, D=0, W=0 → UNDEFINED
+     * - coproc = 101x: STC→FP redirect, STC2→UNDEFINED
+     * - Rn = 15 (PC) → UNPREDICTABLE
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        mm_bool is_stc2 = (hw1 & 0xfe00u) == 0xfc00u;
+        mm_bool is_stc = (hw1 & 0xfe00u) == 0xec00u;
+        mm_u8 lbit = (mm_u8)((hw1 >> 4) & 0x1u);  /* L bit: 0=STC, 1=LDC */
+        
+        if ((is_stc || is_stc2) && (lbit == 0)) {  /* Only match STC when L=0 */
+            mm_u8 p = (mm_u8)((hw1 >> 8) & 0x1u);
+            mm_u8 u = (mm_u8)((hw1 >> 7) & 0x1u);
+            mm_u8 dbit = (mm_u8)((hw1 >> 6) & 0x1u);  /* D bit (L suffix) */
+            mm_u8 w = (mm_u8)((hw1 >> 5) & 0x1u);
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 crd = (mm_u8)((hw2 >> 12) & 0x0fu);
+            mm_u8 coproc = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 imm8 = (mm_u8)(hw2 & 0xffu);
+            
+            /* Check for special case encodings */
+            if (p == 0 && u == 0 && dbit == 1 && w == 0) {
+                /* This is MCRR/MCRR2, not STC - let it fall through */
+            } else if (p == 0 && u == 0 && dbit == 0 && w == 0) {
+                /* UNDEFINED encoding */
+                d.undefined = MM_TRUE;
+                return d;
+            } else if ((coproc & 0xeu) == 0xau) {  /* 101x = p10/p11 */
+                /* STC/STC2 with p10/p11: redirects to FP or UNDEFINED */
+                d.undefined = MM_TRUE;
+                return d;
+            } else if (rn == 15) {
+                /* Rn = PC is UNPREDICTABLE */
+                d.undefined = MM_TRUE;
+                return d;
+            } else {
+                /* Valid STC/STC2 encoding */
+                d.kind = is_stc2 ? MM_OP_STC2 : MM_OP_STC;
+                d.rn = rn;
+                d.rd = crd;
+                d.ra = coproc;
+                d.imm = (mm_u32)imm8 | ((mm_u32)p << 8) | ((mm_u32)u << 9) | 
+                        ((mm_u32)dbit << 10) | ((mm_u32)w << 11);
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* LDC / LDC2 (Load Coprocessor), Thumb-2  
+     * LDC (T1):  1110 110P UDWL Rn | CRd coproc imm8
+     * LDC2 (T2): 1111 110P UDWL Rn | CRd coproc imm8
+     * (L bit is set, distinguishing from STC)
+     * Same constraints as STC
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        mm_bool is_ldc2 = (hw1 & 0xfe00u) == 0xfc00u;
+        mm_bool is_ldc = (hw1 & 0xfe00u) == 0xec00u;
+        
+        if ((is_ldc || is_ldc2) && ((hw1 >> 4) & 0x1u)) {  /* L bit must be 1 for LDC */
+            mm_u8 p = (mm_u8)((hw1 >> 8) & 0x1u);
+            mm_u8 u = (mm_u8)((hw1 >> 7) & 0x1u);
+            mm_u8 dbit = (mm_u8)((hw1 >> 6) & 0x1u);
+            mm_u8 w = (mm_u8)((hw1 >> 5) & 0x1u);
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 crd = (mm_u8)((hw2 >> 12) & 0x0fu);
+            mm_u8 coproc = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 imm8 = (mm_u8)(hw2 & 0xffu);
+            
+            /* Check for special case encodings */
+            if (p == 0 && u == 0 && dbit == 1 && w == 0) {
+                /* This is MRRC/MRRC2, not LDC - let it fall through */
+            } else if (p == 0 && u == 0 && dbit == 0 && w == 0) {
+                /* UNDEFINED */
+                d.undefined = MM_TRUE;
+                return d;
+            } else if ((coproc & 0xeu) == 0xau) {  /* 101x = p10/p11 */
+                /* LDC/LDC2 with p10/p11: redirects to FP or UNDEFINED */
+                d.undefined = MM_TRUE;
+                return d;
+            } else if (rn == 15) {
+                /* Rn = PC: allowed for literal loads, but mark as such */
+                /* For now, treat as UNPREDICTABLE */
+                d.undefined = MM_TRUE;
+                return d;
+            } else {
+                /* Valid LDC/LDC2 */
+                d.kind = is_ldc2 ? MM_OP_LDC2 : MM_OP_LDC;
+                d.rn = rn;
+                d.rd = crd;
+                d.ra = coproc;
+                d.imm = (mm_u32)imm8 | ((mm_u32)p << 8) | ((mm_u32)u << 9) | 
+                        ((mm_u32)dbit << 10) | ((mm_u32)w << 11);
+                d.undefined = MM_FALSE;
+                return d;
+            }
         }
     }
 

@@ -46,6 +46,10 @@ struct mm_cpu {
     mm_u32 r[16];  /* r0-r15 */
     mm_u32 xpsr;
 
+    /* DSP flags in APSR (ARMv7-M with DSP extension) */
+    mm_u8 ge_flags;   /* GE[3:0] - APSR bits 19:16 for SIMD >= comparisons */
+    mm_bool q_flag;   /* Q - APSR bit 27 - sticky saturation overflow */
+
     mm_u32 s[32];  /* s0-s31 */
     mm_u32 fpscr;
     mm_bool fp_active;

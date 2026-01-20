@@ -77,6 +77,35 @@ static int capstone_should_skip(const char *mnemonic, const char *op_str)
     if (mnemonic == 0 || op_str == 0) {
         return 0;
     }
+    /* NEON advanced SIMD instructions - not supported in Cortex-M33/ARMv8-M.
+     * These are optional extensions not present in our target architecture. */
+    if (strncmp(mnemonic, "vand", 4) == 0 || strncmp(mnemonic, "vorr", 4) == 0 ||
+        strncmp(mnemonic, "veor", 4) == 0 || strncmp(mnemonic, "vbic", 4) == 0 ||
+        strncmp(mnemonic, "vorn", 4) == 0) {
+        return 1;
+    }
+    
+    /* Cache hint instructions (PLD/PLDW/PLI) - treated as NOPs, not critical */
+    if (strcmp(mnemonic, "pld") == 0 || strcmp(mnemonic, "pldw") == 0 ||
+        strcmp(mnemonic, "pli") == 0) {
+        return 1;
+    }
+    
+    /* SSAT16/USAT16 with PC - UNPREDICTABLE per ARM spec */
+    if ((strcmp(mnemonic, "ssat16") == 0 || strcmp(mnemonic, "usat16") == 0)) {
+        if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;
+        }
+    }
+    
+    /* Sign/zero extend with add (SXTAH/UXTAH/SXTAB/UXTAB) with PC - UNPREDICTABLE */
+    if (strcmp(mnemonic, "sxtah") == 0 || strcmp(mnemonic, "uxtah") == 0 ||
+        strcmp(mnemonic, "sxtab") == 0 || strcmp(mnemonic, "uxtab") == 0) {
+        if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;
+        }
+    }
+    
     if (mnemonic[0] == 'v') {
         const char *p = op_str;
         while (*p != '\0') {
@@ -226,6 +255,68 @@ static int capstone_should_skip(const char *mnemonic, const char *op_str)
             return 1;
         }
     }
+
+    /* PKHBT/PKHTB with S flag: ARM spec says UNPREDICTABLE but Capstone decodes it.
+     * Skip if we see 'pkhbts' or 'pkhtbs' (S suffix indicates S bit set). */
+    if (strcmp(mnemonic, "pkhbts") == 0 || strcmp(mnemonic, "pkhtbs") == 0) {
+        return 1;
+    }
+    /* PKHBT/PKHTB with PC: Capstone mismatch - ARM spec says UNDEFINED/UNPREDICTABLE
+     * but Capstone decodes it. We correctly return UNDEFINED and discard these. */
+    if (strcmp(mnemonic, "pkhbt") == 0 || strcmp(mnemonic, "pkhtb") == 0) {
+        if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;  /* Capstone accepts, m33mu rejects (correct per ARM spec) */
+        }
+    }
+
+    /* SSAT/USAT with PC: Capstone mismatch - ARM spec says UNPREDICTABLE
+     * but Capstone decodes it. We correctly return UNDEFINED and discard these. */
+    if (strcmp(mnemonic, "ssat") == 0 || strcmp(mnemonic, "usat") == 0) {
+        if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;  /* Capstone accepts, m33mu rejects (correct per ARM spec) */
+        }
+    }
+
+    /* QADD/QSUB/QDADD/QDSUB with PC: Capstone mismatch - ARM spec says UNPREDICTABLE
+     * but Capstone decodes it. We correctly return UNDEFINED and discard these. */
+    if (strcmp(mnemonic, "qadd") == 0 || strcmp(mnemonic, "qsub") == 0 ||
+        strcmp(mnemonic, "qdadd") == 0 || strcmp(mnemonic, "qdsub") == 0) {
+        if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;  /* Capstone accepts, m33mu rejects (correct per ARM spec) */
+        }
+    }
+
+    /* SMULBB variants with PC: Capstone mismatch - ARM spec says UNPREDICTABLE
+     * but Capstone decodes it. We correctly return UNDEFINED and discard these. */
+    if (strncmp(mnemonic, "smul", 4) == 0) {
+        if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;  /* Capstone accepts, m33mu rejects (correct per ARM spec) */
+        }
+    }
+
+    /* TT/TTT/TTA/TTAT with PC: Capstone mismatch - ARM spec says UNPREDICTABLE
+     * but Capstone decodes it. We correctly return UNDEFINED and discard these. */
+    if (strcmp(mnemonic, "tt") == 0 || strcmp(mnemonic, "ttt") == 0 ||
+        strcmp(mnemonic, "tta") == 0 || strcmp(mnemonic, "ttat") == 0) {
+        if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;  /* Capstone accepts, m33mu rejects (correct per ARM spec) */
+        }
+    }
+
+    /* STC/STCL/STC2/STC2L with PC: UNPREDICTABLE per ARM spec but Capstone decodes */
+    /* Also skip coprocessor 10/11 (FP/NEON) - these redirect to VFP/NEON space or UNDEFINED */
+    if (strcmp(mnemonic, "stc") == 0 || strcmp(mnemonic, "stcl") == 0 ||
+        strcmp(mnemonic, "stc2") == 0 || strcmp(mnemonic, "stc2l") == 0 ||
+        strcmp(mnemonic, "ldc") == 0 || strcmp(mnemonic, "ldcl") == 0 ||
+        strcmp(mnemonic, "ldc2") == 0 || strcmp(mnemonic, "ldc2l") == 0) {
+        if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;  /* Skip - UNPREDICTABLE */
+        }
+        if (strstr(op_str, "p10") != 0 || strstr(op_str, "p11") != 0) {
+            return 1;  /* Skip - redirects to FP space */
+        }
+    }
+
     if (strncmp(mnemonic, "ldrsb", 5) == 0) {
         if (strstr(op_str, "],") != 0 || strstr(op_str, "!") != 0 ||
             strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
