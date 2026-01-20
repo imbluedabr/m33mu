@@ -795,16 +795,19 @@ static struct mm_decoded decode_32(mm_u32 insn)
      */
     if ((insn & 0xffffff0fu) == 0xf3af8000u) {
         mm_u8 const hint = (mm_u8)((insn >> 4) & 0xfu);
-        switch (hint) {
-        case 0x0u: d.kind = MM_OP_NOP_W; break;
-        case 0x1u: d.kind = MM_OP_YIELD_W; break;
-        case 0x2u: d.kind = MM_OP_WFE_W; break;
-        case 0x3u: d.kind = MM_OP_WFI_W; break;
-        case 0x4u: d.kind = MM_OP_SEV_W; break;
-        case 0x5u: d.kind = MM_OP_SEVL_W; break;
-        default: return d; /* UNDEFINED */
+        if (hint <= 0x5u) {
+            switch (hint) {
+            case 0x0u: d.kind = MM_OP_NOP_W; break;
+            case 0x1u: d.kind = MM_OP_YIELD_W; break;
+            case 0x2u: d.kind = MM_OP_WFE_W; break;
+            case 0x3u: d.kind = MM_OP_WFI_W; break;
+            case 0x4u: d.kind = MM_OP_SEV_W; break;
+            case 0x5u: d.kind = MM_OP_SEVL_W; break;
+            }
+            d.undefined = MM_FALSE;
+            return d;
         }
-        d.undefined = MM_FALSE;
+        /* hint > 5 is UNDEFINED for this pattern */
         return d;
     }
 

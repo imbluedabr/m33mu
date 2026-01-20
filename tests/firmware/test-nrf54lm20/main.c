@@ -130,6 +130,7 @@ static void spim20_transfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
     SPIM_EVENTS_END(SPIM20_BASE) = 0u;
     SPIM_TASKS_START(SPIM20_BASE) = 1u;
     while (SPIM_EVENTS_END(SPIM20_BASE) == 0u) {
+        __asm volatile("wfi");
     }
     (void)SPIM_RXD_AMOUNT(SPIM20_BASE);
     (void)SPIM_TXD_AMOUNT(SPIM20_BASE);
@@ -146,7 +147,7 @@ static void grtc_wait_us(uint32_t us)
 {
     uint64_t start = grtc_syscounter_get();
     while ((uint64_t)(grtc_syscounter_get() - start) < (uint64_t)us) {
-        __asm volatile("nop");
+        __asm volatile("wfi");
     }
 }
 
@@ -155,17 +156,20 @@ static void clock_test(void)
     CLOCK_EVENTS_XOSTARTED(CLOCK_BASE) = 0u;
     CLOCK_TASKS_XOSTART(CLOCK_BASE) = 1u;
     while (CLOCK_EVENTS_XOSTARTED(CLOCK_BASE) == 0u) {
+        __asm volatile("wfi");
     }
 
     CLOCK_EVENTS_PLLSTARTED(CLOCK_BASE) = 0u;
     CLOCK_TASKS_PLLSTART(CLOCK_BASE) = 1u;
     while (CLOCK_EVENTS_PLLSTARTED(CLOCK_BASE) == 0u) {
+        __asm volatile("wfi");
     }
 
     CLOCK_LFCLK_SRC(CLOCK_BASE) = 0u;
     CLOCK_EVENTS_LFCLKSTARTED(CLOCK_BASE) = 0u;
     CLOCK_TASKS_LFCLKSTART(CLOCK_BASE) = 1u;
     while (CLOCK_EVENTS_LFCLKSTARTED(CLOCK_BASE) == 0u) {
+        __asm volatile("wfi");
     }
 
     printf("CLOCK XO RUN=%lu STAT=%lu\n",
@@ -217,12 +221,14 @@ static void grtc_test(void)
     GRTC_CC0_CCEN(GRTC_BASE) = 1u;
     GRTC_EVENTS_COMPARE0(GRTC_BASE) = 0u;
     while (GRTC_EVENTS_COMPARE0(GRTC_BASE) == 0u) {
+        __asm volatile("wfi");
     }
     printf("GRTC COMPARE0 fired\n");
 
     GRTC_INTERVAL(GRTC_BASE) = 500u;
     GRTC_EVENTS_COMPARE0(GRTC_BASE) = 0u;
     while (GRTC_EVENTS_COMPARE0(GRTC_BASE) == 0u) {
+        __asm volatile("wfi");
     }
     printf("GRTC COMPARE0 interval fired\n");
 }

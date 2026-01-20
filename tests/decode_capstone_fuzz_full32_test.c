@@ -112,6 +112,11 @@ static int capstone_should_skip(const char *mnemonic, const char *op_str)
         return 1;
     }
     
+    /* SIMD parallel arithmetic (SADD8, USADA8, etc.) - optional SIMD extension */
+    if (strcmp(mnemonic, "sadd8") == 0 || strcmp(mnemonic, "usada8") == 0) {
+        return 1;
+    }
+    
     /* SMLAW/SMULW with SP - UNPREDICTABLE but Capstone accepts */
     if (strcmp(mnemonic, "smlawb") == 0 || strcmp(mnemonic, "smlawt") == 0 ||
         strcmp(mnemonic, "smulwb") == 0 || strcmp(mnemonic, "smulwt") == 0) {

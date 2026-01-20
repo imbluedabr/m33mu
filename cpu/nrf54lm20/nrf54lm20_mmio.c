@@ -772,6 +772,16 @@ static mm_bool grtc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
 
     if (offset >= GRTC_EVENTS_COMPARE0 && offset < (GRTC_EVENTS_COMPARE0 + GRTC_CC_COUNT * 4u)) {
         ch = (offset - GRTC_EVENTS_COMPARE0) / 4u;
+        if (grtc->running) {
+            mm_u32 active = (grtc->cc_active_mask >> ch) & 1u;
+            mm_u32 set = (grtc->events_compare_mask >> ch) & 1u;
+            if (active && !set) {
+                if (grtc->syscounter < grtc->cc[ch]) {
+                    grtc->syscounter = grtc->cc[ch];
+                }
+                (void)grtc_set_compare_event(grtc, ch);
+            }
+        }
         reg = (grtc->events_compare_mask >> ch) & 1u;
         *value_out = read_slice(reg, offset & 3u, size_bytes);
         return MM_TRUE;
@@ -801,6 +811,9 @@ static mm_bool grtc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
         rel = offset - GRTC_SYSCOUNTER_BASE;
         sub = rel % GRTC_SYSCOUNTER_STRIDE;
         if (sub == GRTC_SYSCOUNTERL) {
+            if (grtc->running) {
+                grtc->syscounter += 1000u;
+            }
             reg = (mm_u32)(grtc->syscounter & 0xFFFFFFFFu);
         } else if (sub == GRTC_SYSCOUNTERH) {
             reg = (mm_u32)((grtc->syscounter >> 32) & 0x000FFFFFu);
@@ -1088,6 +1101,8 @@ void mm_nrf54lm20_mmio_reset(void)
     memset(&grtc_state, 0, sizeof(grtc_state));
     osc_state.regs[OSC_PLL_FREQ / 4] = 0x3u;
     osc_state.regs[OSC_PLL_CURRENTFREQ / 4] = 0x3u;
+    grtc_state.running = MM_TRUE;
+    grtc_state.regs[GRTC_MODE / 4] |= (1u << 1);
     grtc_state.regs[GRTC_STATUS_LFTIMER / 4] = 1u;
     grtc_state.regs[GRTC_STATUS_PWM / 4] = 1u;
     grtc_state.regs[GRTC_STATUS_CLKOUT / 4] = 1u;
@@ -1108,12 +1123,14 @@ void mm_nrf54lm20_grtc_tick(mm_u64 cycles)
     mm_u32 ch;
     mm_u32 interval;
     mm_bool fired;
-
     if (!grtc_state.running) return;
     hz = mm_nrf54lm20_cpu_hz();
     if (hz == 0u) return;
     div = hz / 1000000ull;
     if (div == 0u) return;
+    if (div > 1u) {
+        div = 1u;
+    }
 
     grtc_state.accum_cycles += cycles;
     ticks = grtc_state.accum_cycles / div;
