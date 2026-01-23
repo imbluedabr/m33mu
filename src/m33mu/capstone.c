@@ -534,7 +534,9 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
                                    dec->kind == MM_OP_STRH_POST_IMM || dec->kind == MM_OP_STRH_PRE_IMM);
         case ARM_INS_LDRD: return dec->kind == MM_OP_LDRD;
         case ARM_INS_STRD: return dec->kind == MM_OP_STRD;
-        case ARM_INS_LDRSB: return (dec->kind == MM_OP_LDRSB_IMM || dec->kind == MM_OP_LDRSB_REG);
+        case ARM_INS_LDRSB: return (dec->kind == MM_OP_LDRSB_IMM ||
+                                    dec->kind == MM_OP_LDRSB_POST_IMM ||
+                                    dec->kind == MM_OP_LDRSB_REG);
         case ARM_INS_LDRSH: return (dec->kind == MM_OP_LDRSH_IMM || dec->kind == MM_OP_LDRSH_REG);
         case ARM_INS_DSB: return dec->kind == MM_OP_DSB;
         case ARM_INS_DMB: return dec->kind == MM_OP_DMB;
@@ -1039,7 +1041,8 @@ static mm_bool cross_check_operands(const struct mm_fetch_result *fetch, const c
                 long imm_expected = signed_imm32(dec->imm);
                 if (dec->kind == MM_OP_LDR_POST_IMM || dec->kind == MM_OP_STR_POST_IMM ||
                     dec->kind == MM_OP_LDRB_POST_IMM || dec->kind == MM_OP_STRB_POST_IMM ||
-                    dec->kind == MM_OP_LDRH_POST_IMM || dec->kind == MM_OP_STRH_POST_IMM) {
+                    dec->kind == MM_OP_LDRH_POST_IMM || dec->kind == MM_OP_STRH_POST_IMM ||
+                    dec->kind == MM_OP_LDRSB_POST_IMM) {
                     expect_wb = MM_TRUE;
                     expect_post = MM_TRUE;
                 } else if (dec->kind == MM_OP_LDR_PRE_IMM || dec->kind == MM_OP_STR_PRE_IMM ||

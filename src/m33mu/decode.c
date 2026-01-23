@@ -1965,6 +1965,19 @@ static struct mm_decoded decode_32(mm_u32 insn)
                 d.undefined = MM_FALSE;
                 return d;
             }
+            if (p == 0u && w == 1u) { /* post-indexed */
+                mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+                mm_u8 rt = (mm_u8)((hw2 >> 12) & 0x0fu);
+                mm_u32 imm8 = hw2 & 0x00ffu;
+                mm_u32 off = u ? imm8 : (0u - imm8);
+                if (rt == 15u) return d;
+                d.kind = MM_OP_LDRSB_POST_IMM;
+                d.rn = rn;
+                d.rd = rt;
+                d.imm = off;
+                d.undefined = MM_FALSE;
+                return d;
+            }
         }
     }
 

@@ -160,6 +160,8 @@ static void spi_start_transfer(struct spi_inst *s)
 
 static mm_u8 spi_xfer_byte(struct spi_inst *s, mm_u8 out)
 {
+    /* Poll CS before each byte to detect transitions */
+    mm_spi_bus_poll_cs(s->bus_index);
     return mm_spi_bus_xfer(s->bus_index, out);
 }
 

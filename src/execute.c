@@ -3062,6 +3062,16 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                   }
                                                   cpu.r[d.rd] = (val & 0x80u) ? (val | 0xffffff80u) : (val & 0xffu);
                                               } break;
+                        case MM_OP_LDRSB_POST_IMM: {
+                                                      mm_u32 base = cpu.r[d.rn];
+                                                      mm_u32 val = 0;
+                                                      if (!mm_memmap_read(&map, cpu.sec_state, base, 1u, &val)) {
+                                                          if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, base, MM_FALSE)) done = MM_TRUE;
+                                                          return MM_EXEC_CONTINUE;
+                                                      }
+                                                      cpu.r[d.rd] = (val & 0x80u) ? (val | 0xffffff80u) : (val & 0xffu);
+                                                      cpu.r[d.rn] = base + d.imm;
+                                                  } break;
                         case MM_OP_LDRSH_IMM: {
                                                   mm_u32 addr = cpu.r[d.rn] + d.imm;
                                                   mm_u32 val = 0;

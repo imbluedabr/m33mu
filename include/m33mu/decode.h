@@ -121,6 +121,7 @@ enum mm_op_kind {
     MM_OP_LDRH_REG,
     MM_OP_LDRSB_REG,
     MM_OP_LDRSB_IMM,
+    MM_OP_LDRSB_POST_IMM,
     MM_OP_LDRSH_REG,
     MM_OP_LDRSH_IMM,
     MM_OP_LDRSHT,

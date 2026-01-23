@@ -162,24 +162,9 @@ set(M33MU_HAS_WOLFSSL FALSE)
 
 if(M33MU_ENABLE_WOLFSSL)
   if(PKG_CONFIG_FOUND)
-    if(EXISTS "/usr/lib/x86_64-linux-gnu/pkgconfig/wolfssl.pc")
-      execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env PKG_CONFIG_LIBDIR=/usr/lib/x86_64-linux-gnu/pkgconfig
-                ${PKG_CONFIG_EXECUTABLE} --cflags-only-I wolfssl
-        OUTPUT_VARIABLE _WOLFSSL_CFLAGS
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-      )
-      execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env PKG_CONFIG_LIBDIR=/usr/lib/x86_64-linux-gnu/pkgconfig
-                ${PKG_CONFIG_EXECUTABLE} --libs-only-L wolfssl
-        OUTPUT_VARIABLE _WOLFSSL_LFLAGS
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-      )
-    else()
-      pkg_check_modules(PC_WOLFSSL QUIET wolfssl)
-      set(_WOLFSSL_CFLAGS "${PC_WOLFSSL_CFLAGS_OTHER}")
-      set(_WOLFSSL_LFLAGS "${PC_WOLFSSL_LDFLAGS_OTHER}")
-    endif()
+    pkg_check_modules(PC_WOLFSSL QUIET wolfssl)
+    set(_WOLFSSL_CFLAGS "${PC_WOLFSSL_CFLAGS_OTHER}")
+    set(_WOLFSSL_LFLAGS "${PC_WOLFSSL_LDFLAGS_OTHER}")
   endif()
 
   if(_WOLFSSL_CFLAGS)
@@ -189,23 +174,50 @@ if(M33MU_ENABLE_WOLFSSL)
       list(APPEND _WOLFSSL_INCLUDE_DIRS "${_inc_dir}")
     endforeach()
   endif()
+  if(_WOLFSSL_LFLAGS)
+    string(REGEX MATCHALL "-L[^ ]+" _WOLFSSL_LIBRARY_FLAGS "${_WOLFSSL_LFLAGS}")
+    foreach(_lib_flag IN LISTS _WOLFSSL_LIBRARY_FLAGS)
+      string(REPLACE "-L" "" _lib_dir "${_lib_flag}")
+      list(APPEND _WOLFSSL_LIBRARY_DIRS "${_lib_dir}")
+    endforeach()
+  endif()
+  if(EXISTS "/usr/include/wolfssl/options.h")
+    list(PREPEND _WOLFSSL_INCLUDE_DIRS "/usr/include")
+  endif()
+  if(EXISTS "/usr/lib/x86_64-linux-gnu/libwolfssl.so" OR
+     EXISTS "/usr/lib/x86_64-linux-gnu/libwolfssl.a")
+    list(PREPEND _WOLFSSL_LIBRARY_DIRS "/usr/lib/x86_64-linux-gnu")
+  endif()
 
-  find_path(WOLFSSL_INCLUDE_DIR
-    NAMES wolfssl/options.h wolfssl/ssl.h
-    HINTS ${_WOLFSSL_INCLUDE_DIRS} ${PC_WOLFSSL_INCLUDE_DIRS}
-  )
+  if(EXISTS "/usr/include/wolfssl/options.h")
+    set(WOLFSSL_INCLUDE_DIR "/usr/include" CACHE PATH "" FORCE)
+  endif()
+  if(NOT WOLFSSL_INCLUDE_DIR)
+    find_path(WOLFSSL_INCLUDE_DIR
+      NAMES wolfssl/options.h wolfssl/ssl.h
+      HINTS ${_WOLFSSL_INCLUDE_DIRS} ${PC_WOLFSSL_INCLUDE_DIRS}
+    )
+  endif()
   set(_WOLFSSL_SUFFIXES_SAVE ${CMAKE_FIND_LIBRARY_SUFFIXES})
   set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
-  find_library(WOLFSSL_LIBRARY_STATIC
-    NAMES wolfssl
-    HINTS ${PC_WOLFSSL_LIBRARY_DIRS}
-  )
+  if(EXISTS "/usr/lib/x86_64-linux-gnu/libwolfssl.a")
+    set(WOLFSSL_LIBRARY_STATIC "/usr/lib/x86_64-linux-gnu/libwolfssl.a" CACHE FILEPATH "" FORCE)
+  else()
+    find_library(WOLFSSL_LIBRARY_STATIC
+      NAMES wolfssl
+      HINTS ${_WOLFSSL_LIBRARY_DIRS} ${PC_WOLFSSL_LIBRARY_DIRS}
+    )
+  endif()
   set(CMAKE_FIND_LIBRARY_SUFFIXES ${_WOLFSSL_SUFFIXES_SAVE})
   unset(_WOLFSSL_SUFFIXES_SAVE)
-  find_library(WOLFSSL_LIBRARY_SHARED
-    NAMES wolfssl
-    HINTS ${PC_WOLFSSL_LIBRARY_DIRS}
-  )
+  if(EXISTS "/usr/lib/x86_64-linux-gnu/libwolfssl.so")
+    set(WOLFSSL_LIBRARY_SHARED "/usr/lib/x86_64-linux-gnu/libwolfssl.so" CACHE FILEPATH "" FORCE)
+  else()
+    find_library(WOLFSSL_LIBRARY_SHARED
+      NAMES wolfssl
+      HINTS ${_WOLFSSL_LIBRARY_DIRS} ${PC_WOLFSSL_LIBRARY_DIRS}
+    )
+  endif()
   if(WOLFSSL_LIBRARY_STATIC)
     set(WOLFSSL_LIBRARY ${WOLFSSL_LIBRARY_STATIC})
   else()
