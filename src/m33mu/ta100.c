@@ -84,6 +84,7 @@
 #define TA_RSAENC_PLAIN_TEXT_MAX_SIZE2048 190u
 #define TA_RSAENC_CIPHER_TEXT_SIZE2048 256u
 
+#ifdef M33MU_HAS_WOLFSSL
 static const unsigned char ta100_rsa_modulus[256] = {
     0x92, 0x50, 0x9e, 0xf1, 0x95, 0xa4, 0x15, 0xfd, 0x0e, 0x70, 0xc5, 0x68, 0x1e, 0xc6, 0x9a, 0x8b,
     0x7e, 0x9d, 0x35, 0x3d, 0xe2, 0x5e, 0x9a, 0xba, 0x29, 0xb3, 0x03, 0xcb, 0x54, 0x64, 0x71, 0xde,
@@ -206,6 +207,7 @@ static const unsigned char ta100_rsa_pkcs1_der[] = {
   0x00
 };
 static const unsigned int ta100_rsa_pkcs1_der_len = 1189;
+#endif
 
 /* TA100 write modes (subset) */
 #define TA_WRITE_ENTIRE_ELEMENT 0x01u
@@ -1114,6 +1116,7 @@ static int ta100_find_handle(struct mm_ta100 *ta, mm_u16 handle)
     return -1;
 }
 
+#ifdef M33MU_HAS_WOLFSSL
 static int ta100_find_rsa_pub_handle(struct mm_ta100 *ta, int priv_idx)
 {
     mm_u32 i;
@@ -1128,6 +1131,7 @@ static int ta100_find_rsa_pub_handle(struct mm_ta100 *ta, int priv_idx)
     }
     return -1;
 }
+#endif
 
 /* TA100 Info command (opcode 0x00) */
 static void ta100_op_info(struct mm_ta100 *ta, mm_u8 mode, mm_u32 param2)
@@ -1719,6 +1723,7 @@ static void ta100_op_write(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len
 
 static void ta100_op_aes(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len)
 {
+#ifdef M33MU_HAS_WOLFSSL
     mm_u8 mode = cmd[TA100_PKT_PARAM1_OFFSET];
     mm_u16 param2_hi = ((mm_u16)cmd[TA100_PKT_PARAM2_OFFSET] << 8) |
                        cmd[TA100_PKT_PARAM2_OFFSET + 1];
@@ -1727,7 +1732,6 @@ static void ta100_op_aes(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len)
 
     (void)cmd_len;
 
-#ifdef M33MU_HAS_WOLFSSL
     if ((mode & TA_AES_ACTION_MASK) == TA_AES_ACTION_KEY_LOAD) {
         mm_u16 key_handle = param2_lo;
         int idx = ta100_find_handle(ta, key_handle);
@@ -1841,13 +1845,18 @@ static void ta100_op_aes(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len)
         ta100_build_response(ta, TA100_STATUS_SUCCESS, rsp, rsp_len);
         return;
     }
-#endif
-
     ta100_build_response(ta, TA100_STATUS_EXEC_ERROR, 0, 0);
+#else
+    (void)ta;
+    (void)cmd;
+    (void)cmd_len;
+    ta100_build_response(ta, TA100_STATUS_EXEC_ERROR, 0, 0);
+#endif
 }
 
 static void ta100_op_sign(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len)
 {
+#ifdef M33MU_HAS_WOLFSSL
     mm_u8 mode = cmd[TA100_PKT_PARAM1_OFFSET];
     mm_u16 msg_handle = ((mm_u16)cmd[TA100_PKT_PARAM2_OFFSET] << 8) |
                         cmd[TA100_PKT_PARAM2_OFFSET + 1];
@@ -2002,10 +2011,17 @@ static void ta100_op_sign(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len)
 #endif
 
     ta100_build_response(ta, TA100_STATUS_EXEC_ERROR, 0, 0);
+#else
+    (void)ta;
+    (void)cmd;
+    (void)cmd_len;
+    ta100_build_response(ta, TA100_STATUS_EXEC_ERROR, 0, 0);
+#endif
 }
 
 static void ta100_op_verify(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len)
 {
+#ifdef M33MU_HAS_WOLFSSL
     mm_u8 mode = cmd[TA100_PKT_PARAM1_OFFSET];
     mm_u16 msg_handle = ((mm_u16)cmd[TA100_PKT_PARAM2_OFFSET] << 8) |
                         cmd[TA100_PKT_PARAM2_OFFSET + 1];
@@ -2180,10 +2196,17 @@ static void ta100_op_verify(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_le
 #endif
 
     ta100_build_response(ta, TA100_STATUS_EXEC_ERROR, 0, 0);
+#else
+    (void)ta;
+    (void)cmd;
+    (void)cmd_len;
+    ta100_build_response(ta, TA100_STATUS_EXEC_ERROR, 0, 0);
+#endif
 }
 
 static void ta100_op_rsaenc(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len)
 {
+#ifdef M33MU_HAS_WOLFSSL
     mm_u8 mode = cmd[TA100_PKT_PARAM1_OFFSET];
     mm_u16 in_len = ((mm_u16)cmd[TA100_PKT_PARAM2_OFFSET] << 8) |
                     cmd[TA100_PKT_PARAM2_OFFSET + 1];
@@ -2291,6 +2314,12 @@ static void ta100_op_rsaenc(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_le
 #endif
 
     ta100_build_response(ta, TA100_STATUS_EXEC_ERROR, 0, 0);
+#else
+    (void)ta;
+    (void)cmd;
+    (void)cmd_len;
+    ta100_build_response(ta, TA100_STATUS_EXEC_ERROR, 0, 0);
+#endif
 }
 
 static void ta100_cmd_info(struct mm_ta100 *ta)
