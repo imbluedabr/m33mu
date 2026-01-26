@@ -48,6 +48,10 @@
 #include "mcxw71c/mcxw71c_usart.h"
 #include "mcxw71c/mcxw71c_spi.h"
 #include "mcxw71c/cpu_config.h"
+#include "mcxn947/mcxn947_mmio.h"
+#include "mcxn947/mcxn947_timers.h"
+#include "mcxn947/mcxn947_flexcomm.h"
+#include "mcxn947/cpu_config.h"
 #include "nrf5340/nrf5340_mmio.h"
 #include "nrf5340/nrf5340_timers.h"
 #include "nrf5340/nrf5340_uart_spi.h"
@@ -240,6 +244,41 @@ static const struct mm_cpu_entry cpu_table[] = {
             MCXW71C_TIMER_INIT,
             MCXW71C_TIMER_RESET,
             MCXW71C_TIMER_TICK
+        }
+    },
+    {
+        "mcxn947",
+        {
+            MCXN947_FLASH_BASE_S,
+            MCXN947_FLASH_SIZE,
+            MCXN947_FLASH_BASE_NS,
+            MCXN947_FLASH_SIZE,
+            MCXN947_RAM_BASE_S,
+            MCXN947_RAM_SIZE,
+            MCXN947_RAM_BASE_NS,
+            MCXN947_RAM_SIZE,
+            1,
+            MCXN947_RAM_REGIONS,
+            MCXN947_RAM_REGION_COUNT,
+            MCXN947_MPCBB_BLOCK_SIZE,
+            mm_mcxn947_mpcbb_block_secure,
+            MCXN947_FLAGS,
+            MCXN947_SOC_RESET,
+            MCXN947_SOC_REGISTER,
+            MCXN947_FLASH_BIND,
+            MCXN947_CLOCK_GET_HZ,
+            MCXN947_USART_INIT,
+            MCXN947_USART_RESET,
+            MCXN947_USART_POLL,
+            MCXN947_SPI_INIT,
+            MCXN947_SPI_RESET,
+            MCXN947_SPI_POLL,
+            0,
+            0,
+            0,
+            MCXN947_TIMER_INIT,
+            MCXN947_TIMER_RESET,
+            MCXN947_TIMER_TICK
         }
     },
     {

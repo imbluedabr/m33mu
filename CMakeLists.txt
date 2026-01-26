@@ -491,6 +491,7 @@ add_custom_target(firmware-build
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32u585 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32l552 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-mcxw app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-mcxn947 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-nrf5340 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-nrf54lm20 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-fpu-instructions app.bin
@@ -578,6 +579,15 @@ add_custom_target(test-mcxw-tui
           --spiflash:SPI0:file=tests/firmware/test-mcxw/spi_flash.bin:size=2097152:mmap=0x01000000:cs=PA0
   DEPENDS m33mu
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
+
+add_custom_target(test-mcxn947
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-mcxn947 app.bin
+  COMMAND $<TARGET_FILE:m33mu> --cpu mcxn947 tests/firmware/test-mcxn947/app.bin
+          --uart-stdout
+  DEPENDS m33mu
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  COMMENT "Running MCXN947 emulator test with FLEXCOMM peripherals"
 )
 
 add_custom_target(test-nrf5340

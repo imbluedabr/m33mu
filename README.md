@@ -29,6 +29,7 @@ These are the current valid `--cpu` option values:
 - stm32u585
 - stm32l552
 - mcxw71c
+- mcxn947
 - nrf5340
 - nrf54lm20
 - rp2350
@@ -89,6 +90,7 @@ cmake --build build --target test-stm32h5
 cmake --build build --target test-stm32u5
 cmake --build build --target test-stm32l5
 cmake --build build --target test-mcxw
+cmake --build build --target test-mcxn947
 ```
 
 Build firmware fixtures (arm-none-eabi toolchain required):
