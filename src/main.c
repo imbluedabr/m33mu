@@ -39,6 +39,7 @@
 #include "m33mu/execute.h"
 #include "m33mu/core_sys.h"
 #include "m33mu/trace.h"
+#include "mcxn947/mcxn947_romapi.h"
 #include "rp2350/rp2350_mmio.h"
 #include "stm32h533/stm32h533_mmio.h"
 #include "stm32h563/stm32h563_mmio.h"
@@ -545,11 +546,11 @@ static void launch_gdb_tui(const struct mm_tui *tui)
     }
     if (elf != 0) {
         snprintf(cmd, sizeof(cmd),
-                 "exec arm-none-eabi-gdb -q -ex \"file %s\" -ex \"tar rem:%d\" -ex \"tui enable\" -ex \"focus cmd\"",
+                 "exec arm-none-eabi-gdb -n -q -ex \"file %s\" -ex \"tar rem:%d\" -ex \"tui enable\" -ex \"focus cmd\"",
                  elf, port);
     } else {
         snprintf(cmd, sizeof(cmd),
-                 "exec arm-none-eabi-gdb -q -ex \"tar rem:%d\" -ex \"tui enable\" -ex \"focus cmd\"",
+                 "exec arm-none-eabi-gdb -n -q -ex \"tar rem:%d\" -ex \"tui enable\" -ex \"focus cmd\"",
                  port);
     }
     if (fork() == 0) {
@@ -2793,6 +2794,10 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             result = MM_TRUE;
             goto out;
         }
+        if (mm_mcxn947_romapi_handle(cpu, map)) {
+            result = MM_TRUE;
+            goto out;
+        }
 
         f = mm_fetch_t32_memmap(cpu, map, cpu->sec_state);
         if (f.fault) {
@@ -4521,6 +4526,12 @@ int main(int argc, char **argv)
             mm_memmap_set_interceptor(&map, prot_mux_interceptor, 0);
             mm_prot_add_region(&prot, cfg.flash_base_s, cfg.flash_size_s, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
             mm_prot_add_region(&prot, cfg.flash_base_ns, cfg.flash_size_ns, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
+            if (cpu_name != 0 && strcmp(cpu_name, "mcxn947") == 0) {
+                mm_prot_add_region(&prot, cfg.flash_base_ns, cfg.flash_size_ns,
+                                   MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
+                mm_prot_add_region(&prot, 0x1303fc00u, 0x00000200u, MM_PROT_PERM_READ, MM_SECURE);
+                mm_prot_add_region(&prot, 0x1303fc00u, 0x00000200u, MM_PROT_PERM_READ, MM_NONSECURE);
+            }
             if (cpu_name != 0 &&
                 (strcmp(cpu_name, "stm32h563") == 0 || strcmp(cpu_name, "stm32h533") == 0)) {
                 mm_prot_add_region(&prot, 0x0CFFF000u, 0x800u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
@@ -4554,6 +4565,12 @@ int main(int argc, char **argv)
             if (cfg.core_count > 1u) {
                 mm_prot_add_region(&prot1, cfg.flash_base_s, cfg.flash_size_s, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
                 mm_prot_add_region(&prot1, cfg.flash_base_ns, cfg.flash_size_ns, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                if (cpu_name != 0 && strcmp(cpu_name, "mcxn947") == 0) {
+                    mm_prot_add_region(&prot1, cfg.flash_base_ns, cfg.flash_size_ns,
+                                       MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
+                    mm_prot_add_region(&prot1, 0x1303fc00u, 0x00000200u, MM_PROT_PERM_READ, MM_SECURE);
+                    mm_prot_add_region(&prot1, 0x1303fc00u, 0x00000200u, MM_PROT_PERM_READ, MM_NONSECURE);
+                }
                 if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
                     mm_prot_add_region(&prot1, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
                     mm_prot_add_region(&prot1, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
@@ -5172,6 +5189,13 @@ handle_pending:
                     }
 
                     if (mm_rp2350_bootrom_handle(&cpu, &map)) {
+                        if (trace_started) {
+                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                            mm_trace_end_step(&cpu);
+                        }
+                        continue;
+                    }
+                    if (mm_mcxn947_romapi_handle(&cpu, &map)) {
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);

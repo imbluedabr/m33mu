@@ -15,6 +15,8 @@
 #define FLEXCOMM_BASE_START 0x40092000u
 #define FLEXCOMM_BASE_STRIDE 0x1000u
 #define FLEXCOMM_SIZE 0x1000u
+#define FLEXCOMM_LPSPI_BASE_START 0x400B4000u
+#define FLEXCOMM_LPSPI_BASE_STRIDE 0x1000u
 
 /* FLEXCOMM mode selection register */
 #define FLEXCOMM_PSELID 0xFF8u
@@ -99,6 +101,17 @@ static mm_bool flexcomm_clocked(const struct flexcomm_inst *fc)
     return MM_TRUE;
 }
 
+static void flexcomm_uart_ensure_open(struct flexcomm_inst *fc)
+{
+    if (fc == 0) return;
+    if (fc->uart_io.fd >= 0) return;
+    if (mm_uart_io_open(&fc->uart_io, fc->base)) {
+        if (mm_tui_is_active()) {
+            mm_tui_attach_uart(fc->uart_label, fc->uart_io.name);
+        }
+    }
+}
+
 /* UART-specific functions */
 static void uart_update_status(struct flexcomm_inst *fc)
 {
@@ -137,6 +150,7 @@ static mm_bool uart_write(struct flexcomm_inst *fc, mm_u32 offset, mm_u32 size_b
     if (offset == LPUART_DATA && size_bytes == 4) {
         mm_u32 ctrl = fc->regs[LPUART_CTRL / 4];
         if ((ctrl & CTRL_TE) != 0u) {
+            flexcomm_uart_ensure_open(fc);
             mm_uart_io_queue_tx(&fc->uart_io, (mm_u8)(value & 0xffu));
             (void)mm_uart_io_flush(&fc->uart_io);
             fc->regs[LPUART_STAT / 4] |= STAT_TDRE | STAT_TC;
@@ -284,6 +298,14 @@ static mm_bool flexcomm_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm
     /* Dispatch based on mode */
     switch (mode) {
     case PERSEL_UART:
+        if (offset == LPUART_CTRL && size_bytes == 4) {
+            mm_u32 prev = fc->regs[LPUART_CTRL / 4];
+            memcpy((mm_u8 *)fc->regs + offset, &value, size_bytes);
+            if (((prev | value) & (CTRL_RE | CTRL_TE)) != 0u) {
+                flexcomm_uart_ensure_open(fc);
+            }
+            return MM_TRUE;
+        }
         return uart_write(fc, offset, size_bytes, value);
     case PERSEL_SPI:
         return spi_write(fc, offset, size_bytes, value);
@@ -355,11 +377,12 @@ void mm_mcxn947_flexcomm_init(struct mmio_bus *bus, struct mm_nvic *nvic)
         reg.base = fc->base + 0x10000000u;
         mmio_bus_register_region(bus, &reg);
 
-        /* Open UART I/O for potential use */
-        if (mm_uart_io_open(&fc->uart_io, fc->base)) {
-            if (mm_tui_is_active()) {
-                mm_tui_attach_uart(fc->uart_label, fc->uart_io.name);
-            }
+        if (i >= 4) {
+            mm_u32 lpspi_base = FLEXCOMM_LPSPI_BASE_START + (mm_u32)(i - 4) * FLEXCOMM_LPSPI_BASE_STRIDE;
+            reg.base = lpspi_base;
+            mmio_bus_register_region(bus, &reg);
+            reg.base = lpspi_base + 0x10000000u;
+            mmio_bus_register_region(bus, &reg);
         }
     }
 }

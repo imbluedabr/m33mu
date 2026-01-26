@@ -1,0 +1,13 @@
+#ifndef M33MU_MCXN947_ROMAPI_H
+#define M33MU_MCXN947_ROMAPI_H
+
+#include "m33mu/types.h"
+#include "m33mu/mmio.h"
+#include "m33mu/memmap.h"
+#include "m33mu/cpu.h"
+
+mm_bool mm_mcxn947_romapi_register_mmio(struct mmio_bus *bus);
+void mm_mcxn947_romapi_reset(void);
+mm_bool mm_mcxn947_romapi_handle(struct mm_cpu *cpu, struct mm_memmap *map);
+
+#endif /* M33MU_MCXN947_ROMAPI_H */

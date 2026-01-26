@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "mcxn947/mcxn947_mmio.h"
+#include "mcxn947/mcxn947_romapi.h"
 #include "m33mu/memmap.h"
 #include "m33mu/mmio.h"
 #include "m33mu/gpio.h"
@@ -52,6 +53,30 @@
 #define PORT_PCR_MUX_SHIFT 8
 #define PORT_PCR_MUX_MASK (0xFu << PORT_PCR_MUX_SHIFT)
 
+#define SCG_BASE 0x40044000u
+#define SCG_SEC_BASE 0x50044000u
+#define SCG_SIZE 0x804u
+
+#define SCG_VERID 0x000u
+#define SCG_PARAM 0x004u
+#define SCG_CSR 0x010u
+#define SCG_RCCR 0x014u
+#define SCG_SOSCCSR 0x100u
+#define SCG_SIRCCSR 0x200u
+#define SCG_FIRCCSR 0x300u
+#define SCG_APLLCSR 0x500u
+#define SCG_SPLLCSR 0x600u
+#define SCG_UPLLCSR 0x700u
+
+#define FMU_BASE 0x40043000u
+#define FMU_SEC_BASE 0x50043000u
+#define FMU_SIZE 0x30u
+
+#define FMU_FSTAT 0x00u
+#define FMU_FCNFG 0x04u
+#define FMU_FCTRL 0x08u
+#define FMU_FCCOB0 0x10u
+
 #define TRDC_BASE 0x400C7000u
 #define TRDC_SEC_BASE 0x500C7000u
 #define TRDC_SIZE 0x1CCu
@@ -93,6 +118,14 @@ struct port_state {
     mm_u32 last_pdir;
 };
 
+struct scg_state {
+    mm_u32 regs[SCG_SIZE / 4u];
+};
+
+struct fmu_state {
+    mm_u32 regs[FMU_SIZE / 4u];
+};
+
 struct trdc_state {
     mm_u32 regs[TRDC_SIZE / 4u];
     mm_u32 nse_words[4][2];
@@ -101,6 +134,8 @@ struct trdc_state {
 static struct gpio_bank gpio_banks[6];
 static struct syscon_state syscon;
 static struct port_state ports[6];
+static struct scg_state scg;
+static struct fmu_state fmu;
 static struct trdc_state trdc;
 static struct mm_nvic *g_gpio_nvic = 0;
 
@@ -464,6 +499,66 @@ static mm_bool mcxn947_rcc_clock_list_line(void *opaque, int line, char *out, si
     return MM_TRUE;
 }
 
+static mm_bool scg_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct scg_state *s = (struct scg_state *)opaque;
+    if (s == 0 || value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > SCG_SIZE) return MM_FALSE;
+    memcpy(value_out, (mm_u8 *)s->regs + offset, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool scg_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct scg_state *s = (struct scg_state *)opaque;
+    const mm_u32 scs_mask = 0x0F000000u;
+    const mm_u32 apll_lock = (1u << 24);
+    const mm_u32 apll_en = (1u << 0) | (1u << 1);
+    if (s == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > SCG_SIZE) return MM_FALSE;
+    if (size_bytes != 4) return MM_FALSE;
+
+    if (offset == SCG_VERID || offset == SCG_PARAM) {
+        return MM_TRUE;
+    }
+    s->regs[offset / 4u] = value;
+    if (offset == SCG_RCCR) {
+        mm_u32 csr = s->regs[SCG_CSR / 4u] & ~scs_mask;
+        s->regs[SCG_CSR / 4u] = csr | (value & scs_mask);
+    } else if (offset == SCG_APLLCSR) {
+        if ((value & apll_en) != 0u) {
+            s->regs[offset / 4u] |= apll_lock;
+        } else {
+            s->regs[offset / 4u] &= ~apll_lock;
+        }
+    }
+    return MM_TRUE;
+}
+
+static mm_bool fmu_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct fmu_state *f = (struct fmu_state *)opaque;
+    if (f == 0 || value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > FMU_SIZE) return MM_FALSE;
+    memcpy(value_out, (mm_u8 *)f->regs + offset, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool fmu_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct fmu_state *f = (struct fmu_state *)opaque;
+    if (f == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > FMU_SIZE) return MM_FALSE;
+    if (size_bytes != 4) return MM_FALSE;
+
+    if (offset == FMU_FSTAT) {
+        f->regs[FMU_FSTAT / 4u] &= ~value;
+        return MM_TRUE;
+    }
+    f->regs[offset / 4u] = value;
+    return MM_TRUE;
+}
+
 static mm_u32 trdc_mem_nblks(int mem)
 {
     mm_u32 glbcfg;
@@ -572,13 +667,30 @@ void mm_mcxn947_mmio_reset(void)
     memset(gpio_banks, 0, sizeof(gpio_banks));
     memset(&syscon, 0, sizeof(syscon));
     memset(ports, 0, sizeof(ports));
+    memset(&scg, 0, sizeof(scg));
+    memset(&fmu, 0, sizeof(fmu));
     memset(&trdc, 0, sizeof(trdc));
     g_gpio_nvic = 0;
 
-    /* Initialize SYSCON reset states: clocks off (0), resets asserted (0) */
-    /* Reset values from SVD: clocks start enabled */
-    syscon.regs[SYSCON_AHBCLKCTRL0 / 4] = 0x00000603u; /* ROM, SRAM enabled by default */
-    syscon.regs[SYSCON_PRESETCTRL0 / 4] = 0x00000000u; /* All resets asserted */
+    /* Initialize SYSCON reset states */
+    syscon.regs[SYSCON_AHBCLKCTRL0 / 4] = 0x001FFE603u; /* ROM/SRAM + PORT0-5 + GPIO0-5 enabled */
+    syscon.regs[SYSCON_PRESETCTRL0 / 4] = 0x001FFE000u; /* Release PORT0-5 + GPIO0-5 resets */
+
+    scg.regs[SCG_VERID / 4u] = 0x00000000u;
+    scg.regs[SCG_PARAM / 4u] = 0x000001FEu;
+    scg.regs[SCG_CSR / 4u] = 0x03000000u;
+    scg.regs[SCG_RCCR / 4u] = 0x03000000u;
+    scg.regs[SCG_SOSCCSR / 4u] = 0x00000000u;
+    scg.regs[SCG_SIRCCSR / 4u] = 0x01000020u;
+    scg.regs[SCG_FIRCCSR / 4u] = 0x03000031u;
+    scg.regs[SCG_APLLCSR / 4u] = 0x00000000u;
+    scg.regs[SCG_SPLLCSR / 4u] = 0x00000000u;
+    scg.regs[SCG_UPLLCSR / 4u] = 0x00000000u;
+
+    fmu.regs[FMU_FSTAT / 4u] = 0x00000080u;
+    fmu.regs[FMU_FCNFG / 4u] = 0x00000000u;
+    fmu.regs[FMU_FCTRL / 4u] = 0x00000000u;
+    fmu.regs[FMU_FCCOB0 / 4u] = 0x00000000u;
 
     trdc.regs[TRDC_MBC0_MEM0_GLBCFG / 4u] = 0x000F0040u;
     trdc.regs[TRDC_MBC0_MEM1_GLBCFG / 4u] = 0x000D0008u;
@@ -593,12 +705,24 @@ void mm_mcxn947_mmio_reset(void)
     trdc.regs[(TRDC_MBC0_MEMN_GLBAC0 / 4u) + 6u] = 0x80001100u;
     trdc.regs[(TRDC_MBC0_MEMN_GLBAC0 / 4u) + 7u] = 0x80000000u;
 
+    {
+        mm_u32 words = trdc_mem_words(0);
+        mm_u32 i;
+        if (words > (mm_u32)(sizeof(trdc.nse_words[0]) / sizeof(trdc.nse_words[0][0]))) {
+            words = (mm_u32)(sizeof(trdc.nse_words[0]) / sizeof(trdc.nse_words[0][0]));
+        }
+        for (i = 0; i < words; ++i) {
+            trdc.nse_words[0][i] = 0xffffffffu;
+        }
+    }
+
     mm_gpio_bank_set_reader(mcxn947_gpio_bank_read, 0);
     mm_gpio_bank_set_moder_reader(mcxn947_gpio_bank_read_moder, 0);
     mm_gpio_bank_set_clock_reader(mcxn947_gpio_bank_clock, 0);
     mm_gpio_bank_set_seccfgr_reader(mcxn947_gpio_bank_read_seccfgr, 0);
     mm_gpio_set_bank_info_reader(mcxn947_gpio_bank_info, 0);
     mm_rcc_set_clock_list_reader(mcxn947_rcc_clock_list_line, 0);
+    mm_mcxn947_romapi_reset();
 }
 
 mm_bool mm_mcxn947_syscon_clock_on(mm_u32 reg_offset)
@@ -640,6 +764,8 @@ mm_bool mm_mcxn947_register_mmio(struct mmio_bus *bus)
 {
     struct mmio_region reg;
     if (bus == 0) return MM_FALSE;
+
+    if (!mm_mcxn947_romapi_register_mmio(bus)) return MM_FALSE;
 
     /* SYSCON */
     reg.base = SYSCON_BASE;
@@ -731,6 +857,26 @@ mm_bool mm_mcxn947_register_mmio(struct mmio_bus *bus)
     reg.opaque = &ports[5];
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
     reg.base = PORT5_BASE + 0x10000000u;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* SCG */
+    reg.base = SCG_BASE;
+    reg.size = SCG_SIZE;
+    reg.opaque = &scg;
+    reg.read = scg_read;
+    reg.write = scg_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = SCG_SEC_BASE;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* FMU (Flash) */
+    reg.base = FMU_BASE;
+    reg.size = FMU_SIZE;
+    reg.opaque = &fmu;
+    reg.read = fmu_read;
+    reg.write = fmu_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = FMU_SEC_BASE;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     /* TRDC (MBC) */
