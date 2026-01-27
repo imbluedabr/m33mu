@@ -15,6 +15,8 @@ void mm_nrf5340_flash_bind(struct mm_memmap *map,
                            mm_u32 flags);
 mm_u64 mm_nrf5340_cpu_hz(void);
 mm_bool mm_nrf5340_clock_hf_running(void);
+mm_bool mm_nrf5340_clock_lf_running(void);
+void mm_nrf5340_rtc_tick(mm_u64 cycles);
 void mm_nrf5340_mmio_reset(void);
 
 #endif /* M33MU_NRF5340_MMIO_H */

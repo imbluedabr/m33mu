@@ -191,6 +191,8 @@ void mm_nrf5340_timers_reset(void)
 void mm_nrf5340_timers_tick(mm_u64 cycles)
 {
     size_t i;
+    /* Advance LFCLK-driven RTC alongside HF timers. */
+    mm_nrf5340_rtc_tick(cycles);
     for (i = 0; i < 3; ++i) {
         struct timer_state *t = &timers[i];
         mm_u64 ticks;

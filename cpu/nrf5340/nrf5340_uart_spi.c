@@ -190,6 +190,17 @@ static void serial_uarte_try_rx(struct serial_inst *s)
     }
 }
 
+static void serial_uarte_ensure_open(struct serial_inst *s)
+{
+    if (s == 0 || !s->has_uarte) return;
+    if (s->io.fd >= 0) return;
+    if (mm_uart_io_open(&s->io, s->base)) {
+        if (mm_tui_is_active()) {
+            mm_tui_attach_uart(s->label, s->io.name);
+        }
+    }
+}
+
 static void serial_uarte_start_tx(struct serial_inst *s)
 {
     mm_u32 tx_cnt;
@@ -198,6 +209,7 @@ static void serial_uarte_start_tx(struct serial_inst *s)
     if (s == 0) return;
     if (!mm_nrf5340_clock_hf_running()) return;
     if ((s->regs[ENABLE / 4] & 0xFu) != ENABLE_UARTE) return;
+    serial_uarte_ensure_open(s);
 
     tx_cnt = s->regs[TXD_MAXCNT / 4];
     tx_ptr = s->regs[TXD_PTR / 4];
@@ -247,6 +259,7 @@ static mm_bool serial_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u
 
     if (offset == UARTE_TASKS_STARTRX && size_bytes == 4) {
         if ((value & 1u) != 0u) {
+            serial_uarte_ensure_open(s);
             s->rx_running = MM_TRUE;
             s->regs[RXD_AMOUNT / 4] = 0u;
             serial_uarte_try_rx(s);
@@ -261,6 +274,7 @@ static mm_bool serial_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u
     }
     if (offset == UARTE_TASKS_STARTTX && size_bytes == 4) {
         if ((value & 1u) != 0u) {
+            serial_uarte_ensure_open(s);
             serial_uarte_start_tx(s);
         }
         return MM_TRUE;
@@ -293,6 +307,19 @@ static mm_bool serial_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u
             s->regs[offset / 4] = 0u;
         } else {
             s->regs[offset / 4] = value;
+        }
+        return MM_TRUE;
+    }
+
+    if (offset == ENABLE && size_bytes == 4) {
+        s->regs[offset / 4] = value;
+        if (s->has_uarte) {
+            mm_u32 mode = value & 0xFu;
+            if (mode == ENABLE_UARTE) {
+                serial_uarte_ensure_open(s);
+            } else if (s->io.fd >= 0) {
+                mm_uart_io_close(&s->io);
+            }
         }
         return MM_TRUE;
     }
@@ -336,11 +363,6 @@ static void serial_register_all(struct mmio_bus *bus, struct mm_nvic *nvic)
         if (s->has_uarte) {
             mm_uart_io_init(&s->io);
             sprintf(s->label, "UARTE%u", (unsigned)i);
-            if (mm_uart_io_open(&s->io, s->base)) {
-                if (mm_tui_is_active()) {
-                    mm_tui_attach_uart(s->label, s->io.name);
-                }
-            }
         }
 
         reg.base = bases[i];

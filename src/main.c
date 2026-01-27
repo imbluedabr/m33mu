@@ -4541,6 +4541,12 @@ int main(int argc, char **argv)
                 mm_prot_add_region(&prot, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
                 mm_prot_add_region(&prot, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
             }
+            if (cpu_name != 0 && strcmp(cpu_name, "nrf5340") == 0) {
+                mm_prot_add_region(&prot, 0x00000000u, cfg.flash_size_ns,
+                                   MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
+                mm_prot_add_region(&prot, 0x00000000u, cfg.flash_size_ns,
+                                   MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
+            }
             if (cfg.ram_regions != 0 && cfg.ram_region_count > 0u) {
                 mm_u32 ri;
                 for (ri = 0; ri < cfg.ram_region_count; ++ri) {
@@ -4574,6 +4580,12 @@ int main(int argc, char **argv)
                 if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
                     mm_prot_add_region(&prot1, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
                     mm_prot_add_region(&prot1, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                }
+                if (cpu_name != 0 && strcmp(cpu_name, "nrf5340") == 0) {
+                    mm_prot_add_region(&prot1, 0x00000000u, cfg.flash_size_ns,
+                                       MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_SECURE);
+                    mm_prot_add_region(&prot1, 0x00000000u, cfg.flash_size_ns,
+                                       MM_PROT_PERM_READ | MM_PROT_PERM_WRITE | MM_PROT_PERM_EXEC, MM_NONSECURE);
                 }
                 if (cfg.ram_regions != 0 && cfg.ram_region_count > 0u) {
                     mm_u32 ri;
