@@ -797,8 +797,9 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
         if (v & (1u << 27)) scs->pend_sv = MM_FALSE;
         if (v & (1u << 26)) scs->pend_st = MM_TRUE;
         if (v & (1u << 25)) scs->pend_st = MM_FALSE;
-        if (ctx->sec == MM_NONSECURE) scs->icsr_ns = v & ~(0x3u << 25);
-        else scs->icsr_s = v & ~(0x3u << 25);
+        /* ICSR pend control bits [28:25] are write-only control bits. */
+        if (ctx->sec == MM_NONSECURE) scs->icsr_ns = v & ~(0xFu << 25);
+        else scs->icsr_s = v & ~(0xFu << 25);
         return MM_TRUE;
     }
     case 0x8:

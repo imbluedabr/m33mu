@@ -209,6 +209,27 @@ static mm_bool primask_blocks_target(const struct mm_cpu *cpu, enum mm_sec_state
     return cpu->primask_s != 0u;
 }
 
+static mm_u8 basepri_for_target(const struct mm_cpu *cpu, enum mm_sec_state target_sec)
+{
+    if (cpu == 0) {
+        return 0u;
+    }
+    return (target_sec == MM_NONSECURE) ? (mm_u8)(cpu->basepri_ns & 0xFFu)
+                                        : (mm_u8)(cpu->basepri_s & 0xFFu);
+}
+
+static mm_bool basepri_blocks_target(const struct mm_cpu *cpu, enum mm_sec_state target_sec, mm_u8 irq_prio)
+{
+    mm_u8 basepri = basepri_for_target(cpu, target_sec);
+    if (basepri == 0u) {
+        return MM_FALSE;
+    }
+    if (irq_prio == 0u) {
+        return MM_FALSE;
+    }
+    return (irq_prio >= basepri) ? MM_TRUE : MM_FALSE;
+}
+
 static mm_bool usb_trace_enabled(void)
 {
     static int cached = -1;
@@ -275,6 +296,9 @@ int mm_nvic_select_routed(const struct mm_nvic *nvic, const struct mm_cpu *cpu, 
             if (irq == 14u) {
                 usb_trace_irq14_mask(MM_TRUE, tsec, cpu);
             }
+            continue;
+        }
+        if (basepri_blocks_target(cpu, tsec, nvic->priority[irq])) {
             continue;
         }
         if (irq == 14u) {

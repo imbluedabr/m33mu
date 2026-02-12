@@ -2197,6 +2197,56 @@ static mm_bool primask_blocks_current(const struct mm_cpu *cpu)
     return cpu->primask_s != 0u;
 }
 
+static mm_u8 basepri_for_sec(const struct mm_cpu *cpu, enum mm_sec_state sec)
+{
+    if (cpu == 0) {
+        return 0u;
+    }
+    return (sec == MM_NONSECURE) ? (mm_u8)(cpu->basepri_ns & 0xFFu)
+                                 : (mm_u8)(cpu->basepri_s & 0xFFu);
+}
+
+static mm_u8 system_exc_priority(const struct mm_cpu *cpu,
+                                 const struct mm_scs *scs,
+                                 mm_u32 exc_num)
+{
+    mm_u32 shpr3;
+    enum mm_sec_state sec;
+    if (cpu == 0 || scs == 0) {
+        return 0xFFu;
+    }
+    sec = cpu->sec_state;
+    shpr3 = (sec == MM_NONSECURE) ? scs->shpr3_ns : scs->shpr3_s;
+    switch (exc_num) {
+    case MM_VECT_PENDSV:
+        return (mm_u8)((shpr3 >> 16) & 0xFFu);
+    case MM_VECT_SYSTICK:
+        return (mm_u8)((shpr3 >> 24) & 0xFFu);
+    default:
+        return 0x00u;
+    }
+}
+
+static mm_bool basepri_blocks_system_exc(const struct mm_cpu *cpu,
+                                         const struct mm_scs *scs,
+                                         mm_u32 exc_num)
+{
+    mm_u8 basepri;
+    mm_u8 prio;
+    if (cpu == 0 || scs == 0) {
+        return MM_FALSE;
+    }
+    basepri = basepri_for_sec(cpu, cpu->sec_state);
+    if (basepri == 0u) {
+        return MM_FALSE;
+    }
+    prio = system_exc_priority(cpu, scs, exc_num);
+    if (prio == 0u) {
+        return MM_FALSE;
+    }
+    return (prio >= basepri) ? MM_TRUE : MM_FALSE;
+}
+
 static mm_bool prot_mux_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_state sec, mm_u32 addr, mm_u32 size_bytes)
 {
     (void)opaque;
@@ -2729,12 +2779,13 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         trace_started = MM_TRUE;
     }
 
-    if (scs->pend_st) {
-        if (primask_blocks_current(cpu)) {
+    if (scs->pend_sv) {
+        if (primask_blocks_current(cpu) ||
+            basepri_blocks_system_exc(cpu, scs, MM_VECT_PENDSV)) {
             result = MM_TRUE;
             goto out;
         }
-        if (!enter_exception(cpu, map, scs, MM_VECT_SYSTICK, cpu->r[15] & ~1u, cpu->xpsr)) {
+        if (!enter_exception(cpu, map, scs, MM_VECT_PENDSV, cpu->r[15] & ~1u, cpu->xpsr)) {
             if (done) *done = MM_TRUE;
         } else {
             itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
@@ -2742,12 +2793,13 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         result = MM_TRUE;
         goto out;
     }
-    if (scs->pend_sv) {
-        if (primask_blocks_current(cpu)) {
+    if (scs->pend_st) {
+        if (primask_blocks_current(cpu) ||
+            basepri_blocks_system_exc(cpu, scs, MM_VECT_SYSTICK)) {
             result = MM_TRUE;
             goto out;
         }
-        if (!enter_exception(cpu, map, scs, MM_VECT_PENDSV, cpu->r[15] & ~1u, cpu->xpsr)) {
+        if (!enter_exception(cpu, map, scs, MM_VECT_SYSTICK, cpu->r[15] & ~1u, cpu->xpsr)) {
             if (done) *done = MM_TRUE;
         } else {
             itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
@@ -3043,7 +3095,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     frame[3] = cpu->r[3];
     frame[4] = cpu->r[12];
     frame[5] = cpu->r[14];
-    frame[6] = fault_pc | 1u;
+    frame[6] = fault_pc & ~1u;
     frame[7] = fault_xpsr | 0x01000000u; /* Preserve full xPSR/IT/flags/IPSR; ensure T */
 
     pre_mode = cpu->mode;
@@ -3290,7 +3342,7 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     frame[3] = cpu->r[3];
     frame[4] = cpu->r[12];
     frame[5] = cpu->r[14];
-    frame[6] = fault_pc | 1u;
+    frame[6] = fault_pc & ~1u;
     frame[7] = fault_xpsr | (1u << 24); /* ensure Thumb; keep IPSR from preempted ctx */
 
     /* Select stack based on pre-fault thread CONTROL.SPSEL (Handler always MSP). */
@@ -3515,7 +3567,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     frame[3] = cpu->r[3];
     frame[4] = cpu->r[12];
     frame[5] = cpu->r[14];
-    frame[6] = return_pc | 1u;
+    frame[6] = return_pc & ~1u;
     frame[7] = xpsr_in | 0x01000000u; /* preserve full xPSR/IT/flags/IPSR; ensure T */
 
     fp_stack = (!tail_chain) && fpu_stack_active(cpu, scs);
@@ -5108,16 +5160,18 @@ int main(int argc, char **argv)
 
                 /* Handle pending system exceptions (SysTick, PendSV). */
 handle_pending:
-                if (cpu.mode == MM_THREAD && scs.pend_st) {
-                    if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {
+                if (cpu.mode == MM_THREAD && scs.pend_sv &&
+                    !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_PENDSV)) {
+                    if (!enter_exception(&cpu, &map, &scs, MM_VECT_PENDSV, cpu.r[15] & ~1u, cpu.xpsr)) {
                         done = MM_TRUE;
                     } else {
                         itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                     }
                     continue;
                 }
-                if (cpu.mode == MM_THREAD && scs.pend_sv) {
-                    if (!enter_exception(&cpu, &map, &scs, MM_VECT_PENDSV, cpu.r[15] & ~1u, cpu.xpsr)) {
+                if (cpu.mode == MM_THREAD && scs.pend_st &&
+                    !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_SYSTICK)) {
+                    if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {
                         done = MM_TRUE;
                     } else {
                         itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
