@@ -112,3 +112,41 @@ struct mm_fetch_result mm_fetch_t32_memmap(struct mm_cpu *cpu, const struct mm_m
     cpu->r[15] = (res.pc_fetch + 2u) | 1u;
     return res;
 }
+
+struct mm_fetch_result mm_fetch_t32_memmap_at(const struct mm_memmap *map, enum mm_sec_state sec, mm_u32 pc)
+{
+    struct mm_fetch_result res;
+    mm_u32 hw1;
+
+    res.insn = 0;
+    res.len = 0;
+    res.fault = MM_TRUE;
+    res.fault_addr = 0;
+    res.pc_fetch = pc & ~1u;
+
+    if (map == 0) {
+        return res;
+    }
+
+    if (!mm_memmap_fetch_read16(map, sec, res.pc_fetch, &hw1)) {
+        res.fault_addr = res.pc_fetch;
+        return res;
+    }
+
+    if (t32_is_32bit_prefix((mm_u16)hw1)) {
+        mm_u32 hw2;
+        if (!mm_memmap_fetch_read16(map, sec, res.pc_fetch + 2u, &hw2)) {
+            res.fault_addr = res.pc_fetch + 2u;
+            return res;
+        }
+        res.insn = ((mm_u32)hw1 << 16) | hw2;
+        res.len = 4;
+        res.fault = MM_FALSE;
+        return res;
+    }
+
+    res.insn = hw1;
+    res.len = 2;
+    res.fault = MM_FALSE;
+    return res;
+}

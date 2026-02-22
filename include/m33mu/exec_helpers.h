@@ -116,4 +116,7 @@ mm_u32 mm_adcs_reg(mm_u32 rn_value, mm_u32 rm_value, mm_u32 *xpsr_inout, mm_bool
 void mm_umul64(mm_u32 a, mm_u32 b, mm_u32 *lo_out, mm_u32 *hi_out);
 void mm_smul64(mm_u32 a, mm_u32 b, mm_u32 *lo_out, mm_u32 *hi_out);
 
+/* Fast test for VFP instructions. */
+mm_bool mm_is_vfp_insn_fast(mm_u32 insn);
+
 #endif /* M33MU_EXEC_HELPERS_H */

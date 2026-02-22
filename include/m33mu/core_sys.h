@@ -24,10 +24,17 @@
 
 #include "m33mu/mmio.h"
 
-/* Register dummy MMIO regions for generic Cortex-M33 core blocks so debugger
- * reads to NVIC/SysTick/MPU/ITM/DWT/FPB/SAU do not fault. Actual behavior
- * is minimal (reads return zero, writes are accepted).
- */
-mm_bool mm_core_sys_register(struct mmio_bus *bus);
+struct mm_dwt {
+    mm_u64 *vcycles;
+    mm_u32 ctrl;
+    mm_u32 cyccnt_base;
+};
+
+struct mm_core_sys {
+    struct mm_dwt dwt;
+};
+
+/* Register minimal MMIO regions for core blocks (ITM/DWT/FPB). */
+mm_bool mm_core_sys_register(struct mmio_bus *bus, struct mm_core_sys *core);
 
 #endif /* M33MU_CORE_SYS_H */

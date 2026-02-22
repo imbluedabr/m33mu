@@ -28,6 +28,8 @@
 #include "m33mu/mmio.h"
 #include "m33mu/cpu.h"
 
+struct mm_code_cache;
+
 enum mm_access_type {
     MM_ACCESS_READ = 0,
     MM_ACCESS_WRITE = 1,
@@ -62,6 +64,7 @@ struct mm_memmap {
     mm_u32 ram_base_ns;
     mm_u32 ram_size_ns;
     struct mmio_bus mmio;
+    struct mm_code_cache *code_cache;
     mm_access_interceptor interceptor;
     void *interceptor_opaque;
     mm_flash_write_cb flash_write;
@@ -72,6 +75,7 @@ void mm_memmap_init(struct mm_memmap *map, struct mmio_region *regions, size_t r
 struct mm_memmap *mm_memmap_current(void);
 void mm_memmap_set_interceptor(struct mm_memmap *map, mm_access_interceptor fn, void *opaque);
 void mm_memmap_set_flash_writer(struct mm_memmap *map, mm_flash_write_cb fn, void *opaque);
+void mm_memmap_set_code_cache(struct mm_memmap *map, struct mm_code_cache *cc);
 mm_bool mm_memmap_configure_flash(struct mm_memmap *map, const struct mm_target_cfg *cfg, const mm_u8 *backing, mm_bool secure_view);
 mm_bool mm_memmap_configure_ram(struct mm_memmap *map, const struct mm_target_cfg *cfg, mm_u8 *backing, mm_bool secure_view);
 

@@ -254,6 +254,50 @@ void mm_smul64(mm_u32 a, mm_u32 b, mm_u32 *lo_out, mm_u32 *hi_out)
     if (hi_out != 0) *hi_out = (mm_u32)((mm_u64)prod >> 32);
 }
 
+mm_bool mm_is_vfp_insn_fast(mm_u32 insn)
+{
+    if ((insn & 0xff000f00u) == 0xed000a00u) {
+        return MM_TRUE; /* VLDR/VSTR */
+    }
+    if ((insn & 0xff000f00u) == 0xed000b00u) {
+        return MM_TRUE; /* VLDR/VSTR (double) */
+    }
+    if ((insn & 0xffdc9ff9u) == 0xec900a00u || (insn & 0xffdc9ff9u) == 0xec800a00u) {
+        return MM_TRUE; /* VLDM/VSTM */
+    }
+    if ((insn & 0xffe00f7fu) == 0xee000a10u) {
+        return MM_TRUE; /* VMOV core<->S */
+    }
+    if ((insn & 0xffffefffu) == 0xeef10a10u || (insn & 0xffffefffu) == 0xeee10a10u) {
+        return MM_TRUE; /* VMRS/VMSR */
+    }
+    if ((insn & 0xffb8efffu) == 0xeeb00a00u) {
+        return MM_TRUE; /* VMOV (imm) */
+    }
+    if ((insn & 0xffb00f50u) == 0xee300a00u ||
+        (insn & 0xffb00f50u) == 0xee300a40u ||
+        (insn & 0xffb00f50u) == 0xee200a00u ||
+        (insn & 0xffb00f50u) == 0xee800a00u ||
+        (insn & 0xffb00f50u) == 0xee000a00u ||
+        (insn & 0xffb00f50u) == 0xee000a40u) {
+        return MM_TRUE; /* VADD/VSUB/VMUL/VDIV/VMLA/VMLS */
+    }
+    if ((insn & 0xffbf0fd0u) == 0xeeb10a40u || /* VNEG */
+        (insn & 0xffbf0fd0u) == 0xeeb00ac0u || /* VABS */
+        (insn & 0xffbf0fd0u) == 0xeeb40a40u || /* VCMP */
+        (insn & 0xffbf0fd0u) == 0xeeb40ac0u || /* VCMPE */
+        (insn & 0xffbf0fd0u) == 0xeebd0ac0u || /* VCVT S32,F32 */
+        (insn & 0xffbf0fd0u) == 0xeebd0a40u || /* VCVTR S32,F32 */
+        (insn & 0xffbf0fd0u) == 0xeebc0ac0u || /* VCVT U32,F32 */
+        (insn & 0xffbf0fd0u) == 0xeebc0a40u || /* VCVTR U32,F32 */
+        (insn & 0xffbf0fd0u) == 0xeeb80ac0u || /* VCVT F32,S32 */
+        (insn & 0xffbf0fd0u) == 0xeeb80a40u || /* VCVT F32,U32 */
+        (insn & 0xffbf0fd0u) == 0xeeb10ac0u) { /* VSQRT */
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
 mm_u32 mm_ubfx(mm_u32 value, mm_u8 lsb, mm_u8 width)
 {
     mm_u32 mask;

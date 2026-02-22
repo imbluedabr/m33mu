@@ -339,6 +339,11 @@ if(M33MU_HAS_CAPSTONE)
   )
 endif()
 
+set_source_files_properties(
+  "${CMAKE_SOURCE_DIR}/src/execute.c"
+  PROPERTIES COMPILE_FLAGS "-std=gnu11"
+)
+
 # Optional dependency wiring
 if(M33MU_HAS_CAPSTONE)
   target_compile_definitions(m33mu_lib PUBLIC M33MU_USE_LIBCAPSTONE=1)

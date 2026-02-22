@@ -23,6 +23,8 @@
 #include <string.h>
 
 struct mm_core_stub {
+    struct mm_core_sys *core;
+    mm_u32 kind;
     int unused;
 };
 
@@ -68,9 +70,34 @@ static mm_bool stub_load(void *opaque, struct mm_snapshot_reader *r)
     return MM_TRUE;
 }
 
+static mm_u32 dwt_cyccnt_read(const struct mm_dwt *dwt)
+{
+    mm_u32 base = 0u;
+    if (dwt == 0) {
+        return 0u;
+    }
+    if (dwt->vcycles != 0) {
+        base = (mm_u32)(*dwt->vcycles);
+    }
+    return base + dwt->cyccnt_base;
+}
+
+static void dwt_cyccnt_write(struct mm_dwt *dwt, mm_u32 value)
+{
+    mm_u32 base = 0u;
+    if (dwt == 0) {
+        return;
+    }
+    if (dwt->vcycles != 0) {
+        base = (mm_u32)(*dwt->vcycles);
+    }
+    dwt->cyccnt_base = value - base;
+}
+
 static mm_bool stub_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
-    (void)opaque;
+    struct mm_core_stub *stub = (struct mm_core_stub *)opaque;
+    struct mm_core_sys *core = (stub != 0) ? stub->core : 0;
     (void)offset;
     if (value_out == 0) {
         return MM_FALSE;
@@ -78,26 +105,67 @@ static mm_bool stub_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     if (size_bytes != 1u && size_bytes != 2u && size_bytes != 4u) {
         return MM_FALSE;
     }
-    *value_out = 0;
+    if (core != 0 && stub != 0 && stub->kind == 1u && offset < 0x1000u) {
+        mm_u32 aligned = offset & ~0x3u;
+        switch (aligned) {
+        case 0x000: /* DWT_CTRL */
+            *value_out = core->dwt.ctrl;
+            return MM_TRUE;
+        case 0x004: /* DWT_CYCCNT */
+            *value_out = dwt_cyccnt_read(&core->dwt);
+            return MM_TRUE;
+        case 0x008: /* CPICNT */
+        case 0x00C: /* EXCCNT */
+        case 0x010: /* SLEEPCNT */
+        case 0x014: /* LSUCNT */
+        case 0x018: /* FOLDCNT */
+        case 0x01C: /* PCSR */
+            *value_out = 0u;
+            return MM_TRUE;
+        default:
+            break;
+        }
+    }
+    *value_out = 0u;
     return MM_TRUE;
 }
 
 static mm_bool stub_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
-    (void)opaque;
+    struct mm_core_stub *stub = (struct mm_core_stub *)opaque;
+    struct mm_core_sys *core = (stub != 0) ? stub->core : 0;
     (void)offset;
     (void)value;
     if (size_bytes != 1u && size_bytes != 2u && size_bytes != 4u) {
         return MM_FALSE;
     }
+    if (core != 0 && stub != 0 && stub->kind == 1u && offset < 0x1000u) {
+        mm_u32 aligned = offset & ~0x3u;
+        switch (aligned) {
+        case 0x000: /* DWT_CTRL */
+            core->dwt.ctrl = value;
+            return MM_TRUE;
+        case 0x004: /* DWT_CYCCNT */
+            dwt_cyccnt_write(&core->dwt, value);
+            return MM_TRUE;
+        default:
+            break;
+        }
+    }
     return MM_TRUE;
 }
 
-mm_bool mm_core_sys_register(struct mmio_bus *bus)
+mm_bool mm_core_sys_register(struct mmio_bus *bus, struct mm_core_sys *core)
 {
-    static struct mm_core_stub stub;
+    static struct mm_core_stub stubs[3];
     struct mmio_region regs[3];
     memset(regs, 0, sizeof(regs));
+    stubs[0].core = core;
+    stubs[0].kind = 0u;
+    stubs[1].core = core;
+    stubs[1].kind = 1u; /* DWT */
+    stubs[2].core = core;
+    stubs[2].kind = 2u;
 
     /* ITM */
     regs[0].base = 0xE0000000u;
@@ -112,7 +180,7 @@ mm_bool mm_core_sys_register(struct mmio_bus *bus)
     {
         int i;
         for (i = 0; i < 3; ++i) {
-            regs[i].opaque = &stub;
+            regs[i].opaque = &stubs[i];
             regs[i].read = stub_read;
             regs[i].write = stub_write;
             regs[i].magic = MMIO_REGION_MAGIC;

@@ -42,5 +42,6 @@ mm_bool t32_is_32bit_prefix(mm_u16 prefix);
 /* Fetch a T32 instruction and advance PC on success. On fault, PC is unchanged. */
 struct mm_fetch_result mm_fetch_t32(struct mm_cpu *cpu, const struct mm_mem *mem);
 struct mm_fetch_result mm_fetch_t32_memmap(struct mm_cpu *cpu, const struct mm_memmap *map, enum mm_sec_state sec);
+struct mm_fetch_result mm_fetch_t32_memmap_at(const struct mm_memmap *map, enum mm_sec_state sec, mm_u32 pc);
 
 #endif /* M33MU_FETCH_H */

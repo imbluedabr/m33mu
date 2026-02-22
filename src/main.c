@@ -38,6 +38,7 @@
 #include "m33mu/exec_helpers.h"
 #include "m33mu/execute.h"
 #include "m33mu/core_sys.h"
+#include "m33mu/code_cache.h"
 #include "m33mu/trace.h"
 #include "mcxn947/mcxn947_romapi.h"
 #include "rp2350/rp2350_mmio.h"
@@ -157,7 +158,6 @@ void mm_system_request_reset(void);
 static void record_bus_fault(struct mm_scs *scs, mm_u32 addr, mm_u32 bfsr_bits);
 static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struct mm_scs *scs, mm_u32 fault_pc, mm_u32 fault_xpsr);
 static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs *scs);
-static mm_bool is_vfp_insn_fast(mm_u32 insn);
 static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
                                          const struct mm_cpu *cpu,
                                          const struct mm_scs *scs);
@@ -1055,7 +1055,6 @@ static mm_bool handle_tui(struct mm_tui *tui,
 
 static mm_bool parse_u32(const char *s, mm_u32 *out);
 static mm_bool parse_usb_spec(const char *spec, char *udc_out, size_t udc_len);
-static mm_bool is_vfp_insn_fast(mm_u32 insn);
 static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
                                          const struct mm_cpu *cpu,
                                          const struct mm_scs *scs);
@@ -1998,50 +1997,6 @@ static mm_bool parse_usb_spec(const char *spec, char *udc_out, size_t udc_len)
     return MM_TRUE;
 }
 
-static mm_bool is_vfp_insn_fast(mm_u32 insn)
-{
-    if ((insn & 0xff000f00u) == 0xed000a00u) {
-        return MM_TRUE; /* VLDR/VSTR */
-    }
-    if ((insn & 0xff000f00u) == 0xed000b00u) {
-        return MM_TRUE; /* VLDR/VSTR (double) */
-    }
-    if ((insn & 0xffdc9ff9u) == 0xec900a00u || (insn & 0xffdc9ff9u) == 0xec800a00u) {
-        return MM_TRUE; /* VLDM/VSTM */
-    }
-    if ((insn & 0xffe00f7fu) == 0xee000a10u) {
-        return MM_TRUE; /* VMOV core<->S */
-    }
-    if ((insn & 0xffffefffu) == 0xeef10a10u || (insn & 0xffffefffu) == 0xeee10a10u) {
-        return MM_TRUE; /* VMRS/VMSR */
-    }
-    if ((insn & 0xffb8efffu) == 0xeeb00a00u) {
-        return MM_TRUE; /* VMOV (imm) */
-    }
-    if ((insn & 0xffb00f50u) == 0xee300a00u ||
-        (insn & 0xffb00f50u) == 0xee300a40u ||
-        (insn & 0xffb00f50u) == 0xee200a00u ||
-        (insn & 0xffb00f50u) == 0xee800a00u ||
-        (insn & 0xffb00f50u) == 0xee000a00u ||
-        (insn & 0xffb00f50u) == 0xee000a40u) {
-        return MM_TRUE; /* VADD/VSUB/VMUL/VDIV/VMLA/VMLS */
-    }
-    if ((insn & 0xffbf0fd0u) == 0xeeb10a40u || /* VNEG */
-        (insn & 0xffbf0fd0u) == 0xeeb00ac0u || /* VABS */
-        (insn & 0xffbf0fd0u) == 0xeeb40a40u || /* VCMP */
-        (insn & 0xffbf0fd0u) == 0xeeb40ac0u || /* VCMPE */
-        (insn & 0xffbf0fd0u) == 0xeebd0ac0u || /* VCVT S32,F32 */
-        (insn & 0xffbf0fd0u) == 0xeebd0a40u || /* VCVTR S32,F32 */
-        (insn & 0xffbf0fd0u) == 0xeebc0ac0u || /* VCVT U32,F32 */
-        (insn & 0xffbf0fd0u) == 0xeebc0a40u || /* VCVTR U32,F32 */
-        (insn & 0xffbf0fd0u) == 0xeeb80ac0u || /* VCVT F32,S32 */
-        (insn & 0xffbf0fd0u) == 0xeeb80a40u || /* VCVT F32,U32 */
-        (insn & 0xffbf0fd0u) == 0xeeb10ac0u) { /* VSQRT */
-        return MM_TRUE;
-    }
-    return MM_FALSE;
-}
-
 static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
                                          const struct mm_cpu *cpu,
                                          const struct mm_scs *scs)
@@ -2064,7 +2019,7 @@ static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
         return mm_decode_t32(fetch);
     }
     if (fetch->len == 4u && cpu != 0 && scs != 0 &&
-        !fpu_access_allowed(cpu, scs) && is_vfp_insn_fast(fetch->insn)) {
+        !fpu_access_allowed(cpu, scs) && mm_is_vfp_insn_fast(fetch->insn)) {
         d.kind = MM_OP_UNDEFINED;
         d.cond = MM_COND_AL;
         d.rd = 0;
@@ -3812,6 +3767,7 @@ int main(int argc, char **argv)
     const char *strcmp_entry_env = getenv("M33MU_STRCMP_ENTRY");
     const char *memwatch_env = getenv("M33MU_MEMWATCH");
     const char *capstone_pc_env = getenv("CAPSTONE_PC");
+    const char *disable_tb_env = getenv("M33MU_DISABLE_TB");
     mm_u32 memwatch_addr = 0;
     mm_u32 memwatch_size = 0;
     mm_u32 capstone_pc = 0;
@@ -3829,6 +3785,7 @@ int main(int argc, char **argv)
     mm_u8 *spiflash_boot_data = 0;
     size_t spiflash_boot_size = 0;
     mm_u32 spiflash_boot_base = 0;
+    mm_bool opt_disable_tb = (disable_tb_env != 0);
 
     snprintf(usb_udc, sizeof(usb_udc), "dummy_udc.0");
 
@@ -4422,6 +4379,8 @@ int main(int argc, char **argv)
             mm_u64 vcycles = 0;
             mm_u64 vcycles_last_sync = 0;
             mm_u64 cycles_since_poll = 0;
+            struct mm_core_sys core_sys;
+            struct mm_code_cache code_cache;
             mm_u64 fault_clocks[16];
             mm_u8 fault_clock_count = opt_fault_clock_count;
             mm_u32 boot_offset_local = 0;
@@ -4462,6 +4421,12 @@ int main(int argc, char **argv)
             mm_memmap_configure_flash(&map, &cfg, flash, MM_FALSE);
             mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE);
             mm_memmap_configure_ram(&map, &cfg, ram, MM_FALSE);
+            memset(&core_sys, 0, sizeof(core_sys));
+            core_sys.dwt.vcycles = &vcycles;
+            core_sys.dwt.ctrl = 0u;
+            core_sys.dwt.cyccnt_base = 0u;
+            mm_code_cache_init(&code_cache, &map);
+            mm_memmap_set_code_cache(&map, &code_cache);
             {
                 if (opt_boot_offset) {
                     boot_offset_local = boot_offset;
@@ -4569,7 +4534,7 @@ int main(int argc, char **argv)
                     scs1.nsacr |= (1u << 10) | (1u << 11);
                 }
             }
-            mm_core_sys_register(&map.mmio);
+            mm_core_sys_register(&map.mmio, &core_sys);
             mm_prot_init(&prot, &scs, &cfg, &cpu);
             if (cfg.core_count > 1u) {
                 mm_prot_init(&prot1, &scs1, &cfg, &cpu1);
@@ -5214,12 +5179,172 @@ handle_pending:
                     continue;
                 }
 
+                /* Fast path: translation block cache */
+                {
+                    mm_bool fast_mode = MM_TRUE;
+                    mm_bool fast_fpu_ok = MM_TRUE;
+                    mm_u32 tb_chain_steps = 0;
+                    const mm_u32 tb_chain_limit = 64u;
+                    struct mm_execute_ctx exec_ctx;
+                    struct mm_tb *next_tb = 0;
+                    struct mm_tb *candidate_tb = 0;
+                    mm_u32 pc_after = 0;
+                    mm_bool tb_bkpt_hit = MM_FALSE;
+                    mm_u32 tb_bkpt_imm = 0;
+                    mm_u32 ops_executed = 0;
+                    mm_u32 target_idx = 0;
+                    if (opt_gdb || opt_capstone || mm_trace_enabled() || g_call_trace) {
+                        fast_mode = MM_FALSE;
+                    }
+                    if (it_remaining != 0u) {
+                        fast_mode = MM_FALSE;
+                    }
+                    if (opt_disable_tb) {
+                        fast_mode = MM_FALSE;
+                    }
+                    if (fast_mode && !fpu_access_allowed(&cpu, &scs)) {
+                        fast_fpu_ok = MM_FALSE;
+                    }
+                    code_cache.fpu_ok = fast_fpu_ok;
+                    if (fast_mode) {
+                        struct mm_tb *tb = mm_tb_lookup(&code_cache, cpu.r[15] & ~1u, cpu.sec_state);
+                        if (tb == 0) {
+                            tb = mm_tb_build(&code_cache, &cpu, &map, &scs, cpu.r[15] & ~1u, cpu.sec_state, opt_gdb);
+                        }
+                        if (tb != 0) {
+                            if (tb->fpu_ok != fast_fpu_ok) {
+                                tb = 0;
+                            }
+                        }
+                        while (tb != 0) {
+                            if (tb_chain_steps++ >= tb_chain_limit) {
+                                break;
+                            }
+                            next_tb = 0;
+                            candidate_tb = 0;
+                            pc_after = 0;
+                            tb_bkpt_hit = MM_FALSE;
+                            tb_bkpt_imm = 0;
+                            ops_executed = 0;
+
+                            cpu.r[13] = mm_cpu_get_active_sp(&cpu);
+                            exec_ctx.cpu = &cpu;
+                            exec_ctx.map = &map;
+                            exec_ctx.scs = &scs;
+                            exec_ctx.gdb = &gdb;
+                            exec_ctx.fetch = 0;
+                            exec_ctx.dec = 0;
+                            exec_ctx.opt_dump = opt_dump;
+                            exec_ctx.opt_gdb = opt_gdb;
+                            exec_ctx.it_pattern = &it_pattern;
+                            exec_ctx.it_remaining = &it_remaining;
+                            exec_ctx.it_cond = &it_cond;
+                            exec_ctx.done = &done;
+                            exec_ctx.handle_pc_write = handle_pc_write;
+                            exec_ctx.raise_mem_fault = raise_mem_fault;
+                            exec_ctx.raise_usage_fault = raise_usage_fault;
+                            exec_ctx.exc_return_unstack = exc_return_unstack;
+                            exec_ctx.enter_exception = enter_exception;
+
+                            (void)mm_tb_run(tb, &exec_ctx, &done, &tb_bkpt_hit, &tb_bkpt_imm, &ops_executed);
+                            if (ops_executed != 0u) {
+                                cycles_since_poll += ops_executed;
+                                cycle_total += ops_executed;
+                                vcycles += ops_executed;
+                                mm_scs_systick_advance(&scs, ops_executed);
+                                mm_timer_tick(&cfg, ops_executed);
+                            }
+                            if (tb_bkpt_hit) {
+                                printf("[BKPT] imm=0x%02lx\n", (unsigned long)tb_bkpt_imm);
+                                if (opt_expect_bkpt) {
+                                    if (tb_bkpt_imm == expect_bkpt) {
+                                        expect_bkpt_hit = MM_TRUE;
+                                        printf("[EXPECT BKPT] Success\n");
+                                    } else {
+                                        printf("[EXPECT BKPT] Fail\n");
+                                    }
+                                }
+                            }
+                            if (done) {
+                                if (opt_gdb) {
+                                    mm_gdb_stub_notify_stop(&gdb, 5);
+                                }
+                                break;
+                            }
+                            if (cpu.sleeping) {
+                                break;
+                            }
+                            if (it_remaining != 0u) {
+                                break;
+                            }
+                            fast_fpu_ok = fpu_access_allowed(&cpu, &scs) ? MM_TRUE : MM_FALSE;
+                            code_cache.fpu_ok = fast_fpu_ok;
+                            pc_after = cpu.r[15];
+                            if (pc_after == tb->fallthrough_pc) {
+                                if (tb->fallthrough_idx < M33MU_TB_ENTRIES) {
+                                    candidate_tb = mm_tb_chain_lookup(&code_cache,
+                                                                      tb->fallthrough_idx,
+                                                                      tb->fallthrough_gen,
+                                                                      tb->end_pc,
+                                                                      tb->sec);
+                                    if (candidate_tb == 0) {
+                                        tb->fallthrough_idx = M33MU_TB_ENTRIES;
+                                        tb->fallthrough_gen = 0;
+                                    }
+                                }
+                                if (candidate_tb == 0) {
+                                    candidate_tb = mm_tb_lookup(&code_cache, tb->end_pc, tb->sec);
+                                    if (candidate_tb != 0) {
+                                        target_idx = (tb->end_pc >> 1u) & (M33MU_TB_ENTRIES - 1u);
+                                        tb->fallthrough_idx = target_idx;
+                                        tb->fallthrough_gen = code_cache.tb_cache_gen[target_idx];
+                                    }
+                                }
+                                next_tb = candidate_tb;
+                            } else if (pc_after == tb->branch_pc) {
+                                if (tb->branch_idx < M33MU_TB_ENTRIES) {
+                                    candidate_tb = mm_tb_chain_lookup(&code_cache,
+                                                                      tb->branch_idx,
+                                                                      tb->branch_gen,
+                                                                      tb->branch_pc & ~1u,
+                                                                      tb->sec);
+                                    if (candidate_tb == 0) {
+                                        tb->branch_idx = M33MU_TB_ENTRIES;
+                                        tb->branch_gen = 0;
+                                    }
+                                }
+                                if (candidate_tb == 0) {
+                                    candidate_tb = mm_tb_lookup(&code_cache, tb->branch_pc & ~1u, tb->sec);
+                                    if (candidate_tb != 0) {
+                                        target_idx = ((tb->branch_pc & ~1u) >> 1u) & (M33MU_TB_ENTRIES - 1u);
+                                        tb->branch_idx = target_idx;
+                                        tb->branch_gen = code_cache.tb_cache_gen[target_idx];
+                                    }
+                                }
+                                next_tb = candidate_tb;
+                            }
+                            if (next_tb != 0 && next_tb->fpu_ok != fast_fpu_ok) {
+                                next_tb = 0;
+                            }
+                            if (next_tb == 0) {
+                                break;
+                            }
+                            tb = next_tb;
+                            continue;
+                        }
+                        if (tb != 0 || done || cpu.sleeping || it_remaining != 0u) {
+                            continue;
+                        }
+                    }
+                }
+
                 /* Fetch/decode */
                 {
                     struct mm_fetch_result f;
                     struct mm_decoded d;
                     mm_bool execute_it;
                     mm_u32 pc_before_exec = 0;
+                    mm_bool fpu_ok = MM_TRUE;
                     const mm_u32 insn_cycles = 1u;
                     mm_bool trace_started = MM_FALSE;
                     mm_bool fault_skip = MM_FALSE;
@@ -5293,7 +5418,13 @@ handle_pending:
                         }
                         continue;
                     }
-                    d = decode_t32_fast(&f, &cpu, &scs);
+                    if (f.len == 4u && !fpu_access_allowed(&cpu, &scs) && mm_is_vfp_insn_fast(f.insn)) {
+                        fpu_ok = MM_FALSE;
+                    }
+                    if (!mm_icache_lookup(&code_cache, &f, cpu.sec_state, fpu_ok, &d)) {
+                        d = decode_t32_fast(&f, &cpu, &scs);
+                        mm_icache_store(&code_cache, &f, cpu.sec_state, fpu_ok, &d);
+                    }
                     mm_memmap_set_last_pc(f.pc_fetch);
                     if (opt_strcmp_trace) {
                         mm_u32 pc = f.pc_fetch | 1u;
@@ -5558,6 +5689,7 @@ handle_pending:
                 }
             }
             if (reset_again) {
+                mm_code_cache_release(&code_cache);
                 continue;
             }
             if (!opt_gdb) {
@@ -5573,6 +5705,7 @@ handle_pending:
                            avg_cycles_per_wrap);
                 }
             }
+            mm_code_cache_release(&code_cache);
             break;
         }
     }

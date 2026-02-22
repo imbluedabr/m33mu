@@ -271,7 +271,8 @@ enum mm_op_kind {
     MM_OP_VLDR,
     MM_OP_VSTR,
     MM_OP_VLDM,
-    MM_OP_VSTM
+    MM_OP_VSTM,
+    MM_OP_MAX
 };
 
 struct mm_decoded {
