@@ -4524,7 +4524,7 @@ int main(int argc, char **argv)
             } else {
                 mm_scs_register_regions(&scs, &map.mmio, 0xE000ED00u, 0xE002ED00u, &nvic);
             }
-            if ((cfg.flags & MM_TARGET_FLAG_FPU_BOOT_ENABLED) != 0u) {
+            if ((cfg.flags & MM_TARGET_FLAG_FPU) != 0u) {
                 scs.cpacr_s |= 0x00F00000u;
                 scs.cpacr_ns |= 0x00F00000u;
                 scs.nsacr |= (1u << 10) | (1u << 11);

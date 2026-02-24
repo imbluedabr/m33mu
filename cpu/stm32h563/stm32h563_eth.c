@@ -276,6 +276,9 @@ void mm_stm32h563_eth_reset(void)
     g_eth.rx_idx = 0;
     eth_generate_mac(g_eth.mac);
     eth_apply_mac();
+    fprintf(stderr, "[ETH_MAC] assigned MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+            g_eth.mac[0], g_eth.mac[1], g_eth.mac[2],
+            g_eth.mac[3], g_eth.mac[4], g_eth.mac[5]);
     eth_phy_reset();
 }
 
@@ -418,10 +421,13 @@ static void eth_tx_poll(void)
     mm_bool te;
     mm_u32 processed = 0;
 
-    if (!eth_clock_enabled() || !eth_tx_clock_enabled()) return;
+    if (!eth_clock_enabled() || !eth_tx_clock_enabled())
+        return;
     te = (g_eth.regs[ETH_MACCR / 4u] & ETH_MACCR_TE) != 0u;
-    if (!te) return;
-    if ((g_eth.regs[ETH_DMACTXCR / 4u] & 1u) == 0u) return;
+    if (!te)
+        return;
+    if ((g_eth.regs[ETH_DMACTXCR / 4u] & 1u) == 0u)
+        return;
 
     base = g_eth.regs[ETH_DMACTXDLAR / 4u];
     count = eth_desc_count(g_eth.regs[ETH_DMACTXRLR / 4u]);
@@ -431,8 +437,10 @@ static void eth_tx_poll(void)
         mm_u32 len;
         mm_u32 j;
         mm_u8 buf[1600];
-        if (!eth_dma_read_desc(addr, &desc)) break;
-        if ((desc.des3 & ETH_TDES3_OWN) == 0u) break;
+        if (!eth_dma_read_desc(addr, &desc))
+            break;
+        if ((desc.des3 & ETH_TDES3_OWN) == 0u)
+            break;
         len = desc.des2 & ETH_TDES2_B1L_MASK;
         if (len > sizeof(buf)) len = sizeof(buf);
         for (j = 0; j < len; ++j) {
@@ -441,7 +449,7 @@ static void eth_tx_poll(void)
             b = (mm_u8)((desc.des1 >> ((j & 3u) * 8u)) & 0xFFu);
             buf[j] = b;
         }
-        (void)mm_eth_backend_send(buf, len);
+        mm_eth_backend_send(buf, len);
         desc.des3 &= ~ETH_TDES3_OWN;
         eth_dma_write_desc(addr, &desc);
         g_eth.regs[ETH_DMACSR / 4u] |= ETH_DMACSR_TI;
@@ -472,13 +480,17 @@ static void eth_rx_poll(void)
     mm_u32 i;
     mm_bool re;
 
-    if (!eth_clock_enabled() || !eth_rx_clock_enabled()) return;
+    if (!eth_clock_enabled() || !eth_rx_clock_enabled())
+        return;
     re = (g_eth.regs[ETH_MACCR / 4u] & ETH_MACCR_RE) != 0u;
-    if (!re) return;
-    if ((g_eth.regs[ETH_DMACRXCR / 4u] & 1u) == 0u) return;
+    if (!re)
+        return;
+    if ((g_eth.regs[ETH_DMACRXCR / 4u] & 1u) == 0u)
+        return;
 
     n = mm_eth_backend_recv(buf, sizeof(buf));
-    if (n <= 0) return;
+    if (n <= 0)
+        return;
 
     base = g_eth.regs[ETH_DMACRXDLAR / 4u];
     count = eth_desc_count(g_eth.regs[ETH_DMACRXRLR / 4u]);
@@ -514,7 +526,8 @@ static void eth_rx_poll(void)
 
 void mm_stm32h563_eth_poll(void)
 {
-    if (!eth_clock_enabled()) return;
+    if (!eth_clock_enabled())
+        return;
     eth_tx_poll();
     eth_rx_poll();
 }

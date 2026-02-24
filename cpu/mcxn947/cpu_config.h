@@ -35,6 +35,6 @@ static const struct mm_ram_region MCXN947_RAM_REGIONS[] = {
 #define MCXN947_TIMER_RESET    mm_mcxn947_timers_reset
 #define MCXN947_TIMER_TICK     mm_mcxn947_timers_tick
 
-#define MCXN947_FLAGS (MM_TARGET_FLAG_FPU | MM_TARGET_FLAG_DUALBANK | MM_TARGET_FLAG_FPU_BOOT_ENABLED)
+#define MCXN947_FLAGS (MM_TARGET_FLAG_FPU | MM_TARGET_FLAG_DUALBANK)
 
 #endif /* M33MU_CPU_MCXN947_CONFIG_H */
