@@ -5332,6 +5332,21 @@ handle_pending:
                             tb = next_tb;
                             continue;
                         }
+                        if (tb != 0 && cycles_since_poll >= poll_granularity) {
+                            mm_target_usart_poll(&cfg);
+                            mm_target_spi_poll(&cfg);
+                            mm_target_eth_poll(&cfg);
+                            rp2350_usb_sync_vector_ready(&scs, &map);
+                            mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
+                            mm_usbdev_poll();
+                            update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
+                                                     &tui_steps_offset, &tui_steps_latched);
+                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                                done = MM_TRUE;
+                                continue;
+                            }
+                            cycles_since_poll = 0;
+                        }
                         if (tb != 0 || done || cpu.sleeping || it_remaining != 0u) {
                             continue;
                         }
