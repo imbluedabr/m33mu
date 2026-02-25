@@ -578,7 +578,10 @@ struct mm_tb *mm_tb_run(struct mm_tb *tb,
             ops_executed++;
             continue;
         }
-        (void)mm_execute_decoded(exec_ctx);
+        if (mm_execute_decoded(exec_ctx) == MM_EXEC_CONTINUE) {
+            ops_executed++;
+            continue;
+        }
         if (exec_ctx->done != 0 && *exec_ctx->done) {
             if (tb->ops[i].d.kind == MM_OP_BKPT) {
                 bkpt_hit = MM_TRUE;
