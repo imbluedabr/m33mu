@@ -23,17 +23,17 @@ jobs:
       - name: Build firmware
         run: cmake --build build --target firmware-build
       - name: Run STM32H5 firmware test (SPI peripherals selection)
-        run: build/m33mu tests/firmware/test-stm32h563/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --uart-stdout --expect-bkpt 0x7f --timeout 60
+        run: build/m33mu tests/firmware/test-stm32h563/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --uart-stdout --expect-bkpt 0x7f --timeout 60 --quit-on-faults
       - name: Run STM32H5 dual-bank firmware test
-        run: build/m33mu tests/firmware/test-stm32h563-dualbank/app.bin --dualbank --expect-bkpt 0x7f --timeout 60 --uart-stdout
+        run: build/m33mu tests/firmware/test-stm32h563-dualbank/app.bin --dualbank --expect-bkpt 0x7f --timeout 60 --uart-stdout --quit-on-faults
 
       - name: Run STM32U5 firmware test (SPI peripherals selection)
-        run: build/m33mu  tests/firmware/test-stm32u585/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu stm32u585
+        run: build/m33mu  tests/firmware/test-stm32u585/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu stm32u585 --quit-on-faults
       - name: Run STM32L5 firmware test (SPI peripherals selection)
-        run: build/m33mu  tests/firmware/test-stm32l552/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu stm32l552
+        run: build/m33mu  tests/firmware/test-stm32l552/app.bin --spiflash:SPI1:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --tpm:SPI1:cs=PB1 --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu stm32l552 --quit-on-faults
       - name: Run nRF5340 firmware test (SPI flash read/write)
-        run: build/m33mu  tests/firmware/test-nrf5340/app.bin --spiflash:SPI0:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu nrf5340
+        run: build/m33mu  tests/firmware/test-nrf5340/app.bin --spiflash:SPI0:file=/tmp/flash.bin:size=4096:mmap=0x60000000:cs=PB0 --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu nrf5340 --quit-on-faults
       - name: Run nRF54LM20 firmware test
-        run: build/m33mu  tests/firmware/test-nrf54lm20/app.bin --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu nrf54lm20
+        run: build/m33mu  tests/firmware/test-nrf54lm20/app.bin --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu nrf54lm20 --quit-on-faults
       - name: Run STM32H5 firmware test (Floating point instructions)
-        run: build/m33mu tests/firmware/test-fpu-instructions/app.bin --uart-stdout --expect-bkpt 0x7f --timeout 60
+        run: build/m33mu tests/firmware/test-fpu-instructions/app.bin --uart-stdout --expect-bkpt 0x7f --timeout 60 --quit-on-faults

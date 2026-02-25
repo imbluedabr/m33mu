@@ -578,9 +578,43 @@ struct mm_tb *mm_tb_run(struct mm_tb *tb,
             ops_executed++;
             continue;
         }
-        if (mm_execute_decoded(exec_ctx) == MM_EXEC_CONTINUE) {
-            ops_executed++;
-            continue;
+        {
+            enum mm_exec_status status = mm_execute_decoded(exec_ctx);
+            if (status == MM_EXEC_CONTINUE) {
+                if (exec_ctx->done != 0 && *exec_ctx->done) {
+                    if (tb->ops[i].d.kind == MM_OP_BKPT) {
+                        bkpt_hit = MM_TRUE;
+                        bkpt_imm = tb->ops[i].d.imm;
+                    }
+                    if (done_out != 0) {
+                        *done_out = MM_TRUE;
+                    }
+                    if (bkpt_hit_out != 0) {
+                        *bkpt_hit_out = bkpt_hit;
+                    }
+                    if (bkpt_imm_out != 0) {
+                        *bkpt_imm_out = bkpt_imm;
+                    }
+                    if (ops_executed_out != 0) {
+                        *ops_executed_out = ops_executed;
+                    }
+                    return 0;
+                }
+                ops_executed++;
+                if (exec_ctx->cpu->sleeping || exec_ctx->cpu->r[15] != next_pc) {
+                    if (bkpt_hit_out != 0) {
+                        *bkpt_hit_out = bkpt_hit;
+                    }
+                    if (bkpt_imm_out != 0) {
+                        *bkpt_imm_out = bkpt_imm;
+                    }
+                    if (ops_executed_out != 0) {
+                        *ops_executed_out = ops_executed;
+                    }
+                    return 0;
+                }
+                continue;
+            }
         }
         if (exec_ctx->done != 0 && *exec_ctx->done) {
             if (tb->ops[i].d.kind == MM_OP_BKPT) {
