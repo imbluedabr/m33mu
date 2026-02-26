@@ -35,8 +35,42 @@ Start the interactive terminal UI.
 .BR --record
 Enable in-memory execution trace for reverse stepping.
 .TP
+.BR --record-start " " <pc>
+Begin a record window when the program counter reaches the given address (hex supported).
+.TP
+.BR --record-start-dump
+Dump register context and selected buffers when record-start is hit.
+.TP
+.BR --record-start-dump-ram
+Include full RAM dump at record-start (implies --record-start-dump).
+.TP
+.BR --record-end-dump-ram
+Include full RAM dump at record window end.
+.TP
+.BR --record-window " " N
+Capture N steps starting at record-start and emit a trace window.
+.TP
+.BR --record-dump " " N
+Dump the last N traced steps on exit.
+.TP
+.BR --record-trace " " <path>
+Write live trace lines to the given file.
+.TP
+.BR --record-quiet
+Disable live trace output while recording.
+.TP
 .BR --call-trace
 Log call/return, interrupt, and TrustZone SG transitions with symbol names when available.
+.TP
+.BR --unicorn " " <symbol|addr>
+Start side-by-side Unicorn execution when the target function/address is reached.
+This debug feature requires building with \fBM33MU_ENABLE_UNICORN=1\fR.
+.TP
+.BR --unicorn-stack " " N
+Compare and sync N bytes of stack around SP during Unicorn pairing.
+.TP
+.BR --unicorn-max-steps " " N
+Stop Unicorn pairing after N steps (fails if reached).
 .TP
 .BR --expect-bkpt " " NN
 Exit with code 0 only if a BKPT with the given immediate (hex) is hit.

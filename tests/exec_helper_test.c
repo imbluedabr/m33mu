@@ -37,6 +37,16 @@ static int test_add_with_carry_basic(void)
         printf("add_with_carry case2 res=%lu c=%d v=%d\n", (unsigned long)res, c, v);
         return 1;
     }
+    mm_add_with_carry(0x7fffffffu, 1u, MM_FALSE, &res, &c, &v);
+    if (res != 0x80000000u || c || !v) {
+        printf("add_with_carry case3 res=%lu c=%d v=%d\n", (unsigned long)res, c, v);
+        return 1;
+    }
+    mm_add_with_carry(0x80000000u, 0x80000000u, MM_FALSE, &res, &c, &v);
+    if (res != 0u || !c || !v) {
+        printf("add_with_carry case4 res=%lu c=%d v=%d\n", (unsigned long)res, c, v);
+        return 1;
+    }
     return 0;
 }
 
@@ -365,6 +375,11 @@ static int test_mul64_helpers(void)
     if (hi != 0x001258f6u) return 1;
 
     lo = hi = 0;
+    mm_umul64(0xffffffffu, 0xffffffffu, &lo, &hi);
+    if (lo != 0x00000001u) return 1;
+    if (hi != 0xfffffffeu) return 1;
+
+    lo = hi = 0;
     mm_smul64(0xffffffffu, 0x00000002u, &lo, &hi); /* (-1) * 2 */
     if (lo != 0xfffffffeu) return 1;
     if (hi != 0xffffffffu) return 1;
@@ -373,6 +388,11 @@ static int test_mul64_helpers(void)
     mm_smul64(0x80000000u, 0x00000002u, &lo, &hi); /* (-2147483648)*2 */
     if (lo != 0x00000000u) return 1;
     if (hi != 0xffffffffu) return 1;
+
+    lo = hi = 0;
+    mm_smul64(0x80000000u, 0xffffffffu, &lo, &hi); /* (-2147483648)*(-1) */
+    if (lo != 0x80000000u) return 1;
+    if (hi != 0x00000000u) return 1;
 
     return 0;
 }
@@ -401,6 +421,27 @@ static int test_sbcs_reg(void)
     res = mm_sbcs_reg(5u, 3u, &xpsr, MM_FALSE);
     if (res != 2u) return 1;
     if (xpsr != 0xa0000000u) return 1;
+
+    /* 0 - 0 with C=0 => -1, carry=0 */
+    xpsr = 0u;
+    res = mm_sbcs_reg(0u, 0u, &xpsr, MM_TRUE);
+    if (res != 0xffffffffu) return 1;
+    if ((xpsr & (1u << 29)) != 0u) return 1;
+    if ((xpsr & (1u << 31)) == 0u) return 1;
+
+    /* 1 - 0 with C=0 => 0, carry=1, Z=1 */
+    xpsr = 0u;
+    res = mm_sbcs_reg(1u, 0u, &xpsr, MM_TRUE);
+    if (res != 0u) return 1;
+    if ((xpsr & (1u << 29)) == 0u) return 1;
+    if ((xpsr & (1u << 30)) == 0u) return 1;
+
+    /* 0x80000000 - 0x7fffffff with C=1 => 1, V=1 */
+    xpsr = (1u << 29);
+    res = mm_sbcs_reg(0x80000000u, 0x7fffffffu, &xpsr, MM_TRUE);
+    if (res != 1u) return 1;
+    if ((xpsr & (1u << 29)) == 0u) return 1;
+    if ((xpsr & (1u << 28)) == 0u) return 1;
 
     return 0;
 }
@@ -435,6 +476,26 @@ static int test_adcs_reg(void)
     res = mm_adcs_reg(5u, 6u, &xpsr, MM_FALSE);
     if (res != 11u) return 1;
     if (xpsr != 0x50000000u) return 1;
+
+    /* 0xffffffff + 0 with C=0 => 0xffffffff, C=0, N=1 */
+    xpsr = 0u;
+    res = mm_adcs_reg(0xffffffffu, 0u, &xpsr, MM_TRUE);
+    if (res != 0xffffffffu) return 1;
+    if ((xpsr & (1u << 29)) != 0u) return 1;
+    if ((xpsr & (1u << 31)) == 0u) return 1;
+
+    /* 0x7fffffff + 0x7fffffff with C=0 => 0xfffffffe, V=1 */
+    xpsr = 0u;
+    res = mm_adcs_reg(0x7fffffffu, 0x7fffffffu, &xpsr, MM_TRUE);
+    if (res != 0xfffffffeu) return 1;
+    if ((xpsr & (1u << 28)) == 0u) return 1;
+
+    /* 0x80000000 + 0x80000000 with C=1 => 1, C=1, V=1 */
+    xpsr = (1u << 29);
+    res = mm_adcs_reg(0x80000000u, 0x80000000u, &xpsr, MM_TRUE);
+    if (res != 1u) return 1;
+    if ((xpsr & (1u << 29)) == 0u) return 1;
+    if ((xpsr & (1u << 28)) == 0u) return 1;
 
     return 0;
 }

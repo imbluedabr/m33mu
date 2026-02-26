@@ -37,6 +37,7 @@
 #include "m33mu/gdbstub.h"
 #include "m33mu/exec_helpers.h"
 #include "m33mu/execute.h"
+#include "m33mu/unicorn.h"
 #include "m33mu/core_sys.h"
 #include "m33mu/code_cache.h"
 #include "m33mu/trace.h"
@@ -135,6 +136,20 @@
 
 static mm_bool g_quit_on_faults = MM_FALSE;
 static mm_bool g_call_trace = MM_FALSE;
+static mm_bool g_record_start_set = MM_FALSE;
+static mm_bool g_record_started = MM_TRUE;
+static mm_u32 g_record_start_pc = 0;
+static mm_bool g_record_start_dump = MM_FALSE;
+static mm_bool g_record_start_dump_ram = MM_FALSE;
+static mm_bool g_record_end_dump_ram = MM_FALSE;
+static mm_u32 g_record_start_window = 0;
+static mm_u32 g_record_start_remaining = 0;
+static mm_bool g_record_trace_live = MM_TRUE;
+static FILE *g_record_trace_fp = NULL;
+static mm_bool g_record_stop_set = MM_FALSE;
+static mm_u32 g_record_stop_pc = 0;
+static mm_u32 g_record_dump_addr = 0;
+static mm_u32 g_record_dump_count = 0;
 
 static mm_u64 host_now_ns(void)
 {
@@ -175,6 +190,166 @@ static mm_bool parse_hex_u32(const char *s, mm_u32 *out)
     }
     *out = (mm_u32)v;
     return MM_TRUE;
+}
+
+static mm_bool t32_is_32bit_prefix_local(mm_u16 prefix)
+{
+    return (prefix & 0xF800u) >= 0xE800u;
+}
+
+static void dump_trace_tail(struct mm_cpu *cpu, struct mm_memmap *map, mm_u32 count)
+{
+    mm_u32 i;
+    if (cpu == 0 || map == 0 || count == 0u) {
+        return;
+    }
+    if (!mm_trace_enabled()) {
+        fprintf(stderr, "[TRACE_TAIL] trace not enabled\n");
+        return;
+    }
+    fprintf(stderr, "[TRACE_TAIL] dumping last %lu steps (most recent first)\n", (unsigned long)count);
+    for (i = 0; i < count; ++i) {
+        mm_u32 pc;
+        mm_u32 hw1 = 0;
+        mm_u32 hw2 = 0;
+        mm_u32 insn = 0;
+        mm_u32 len = 0;
+        if (!mm_trace_undo_step(cpu, map)) {
+            fprintf(stderr, "[TRACE_TAIL] no more history at step %lu\n", (unsigned long)i);
+            break;
+        }
+        pc = cpu->r[15] & ~1u;
+        if (mm_memmap_fetch_read16(map, cpu->sec_state, pc, &hw1)) {
+            if (t32_is_32bit_prefix_local((mm_u16)hw1) &&
+                mm_memmap_fetch_read16(map, cpu->sec_state, pc + 2u, &hw2)) {
+                insn = (hw1 << 16) | (hw2 & 0xffffu);
+                len = 4u;
+            } else {
+                insn = hw1 & 0xffffu;
+                len = 2u;
+            }
+        }
+        fprintf(stderr,
+                "[TRACE_TAIL] #%lu pc=0x%08lx len=%lu insn=0x%08lx "
+                "r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx "
+                "r4=0x%08lx r5=0x%08lx r6=0x%08lx r7=0x%08lx "
+                "r8=0x%08lx r9=0x%08lx r10=0x%08lx r11=0x%08lx "
+                "r12=0x%08lx sp=0x%08lx lr=0x%08lx xpsr=0x%08lx\n",
+                (unsigned long)i,
+                (unsigned long)pc,
+                (unsigned long)len,
+                (unsigned long)insn,
+                (unsigned long)cpu->r[0], (unsigned long)cpu->r[1],
+                (unsigned long)cpu->r[2], (unsigned long)cpu->r[3],
+                (unsigned long)cpu->r[4], (unsigned long)cpu->r[5],
+                (unsigned long)cpu->r[6], (unsigned long)cpu->r[7],
+                (unsigned long)cpu->r[8], (unsigned long)cpu->r[9],
+                (unsigned long)cpu->r[10], (unsigned long)cpu->r[11],
+                (unsigned long)cpu->r[12], (unsigned long)cpu->r[13],
+                (unsigned long)cpu->r[14], (unsigned long)cpu->xpsr);
+    }
+}
+
+static void dump_bytes(struct mm_memmap *map, enum mm_sec_state sec,
+                       mm_u32 addr, mm_u32 len, const char *label)
+{
+    mm_u32 i;
+    mm_u8 byte = 0;
+
+    fprintf(stderr, "[BKPT_DUMP] %s addr=0x%08lx len=%lu\n",
+            label, (unsigned long)addr, (unsigned long)len);
+    for (i = 0; i < len; ++i) {
+        if (!mm_memmap_read8(map, sec, addr + i, &byte)) {
+            fprintf(stderr, "[BKPT_DUMP] read fault at 0x%08lx\n",
+                    (unsigned long)(addr + i));
+            break;
+        }
+        if ((i % 16u) == 0u) {
+            fprintf(stderr, "[BKPT_DUMP] 0x%08lx: ", (unsigned long)(addr + i));
+        }
+        fprintf(stderr, "%02x ", (unsigned)byte);
+        if ((i % 16u) == 15u || i + 1u == len) {
+            fprintf(stderr, "\n");
+        }
+    }
+}
+
+static void dump_record_start_context(struct mm_cpu *cpu, struct mm_memmap *map)
+{
+    mm_u32 r0;
+    mm_u32 r1;
+    mm_u32 r2;
+    if (cpu == 0 || map == 0) {
+        return;
+    }
+    r0 = cpu->r[0];
+    r1 = cpu->r[1];
+    r2 = cpu->r[2];
+    fprintf(stderr, "[RECORD_START] pc=0x%08lx sp=0x%08lx lr=0x%08lx r0=0x%08lx r1=0x%08lx r2=0x%08lx\n",
+            (unsigned long)(cpu->r[15] & ~1u),
+            (unsigned long)cpu->r[13],
+            (unsigned long)cpu->r[14],
+            (unsigned long)r0, (unsigned long)r1, (unsigned long)r2);
+    fprintf(stderr,
+            "[RECORD_START_REGS] r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx "
+            "r4=0x%08lx r5=0x%08lx r6=0x%08lx r7=0x%08lx r8=0x%08lx r9=0x%08lx "
+            "r10=0x%08lx r11=0x%08lx r12=0x%08lx sp=0x%08lx lr=0x%08lx xpsr=0x%08lx\n",
+            (unsigned long)cpu->r[0], (unsigned long)cpu->r[1],
+            (unsigned long)cpu->r[2], (unsigned long)cpu->r[3],
+            (unsigned long)cpu->r[4], (unsigned long)cpu->r[5],
+            (unsigned long)cpu->r[6], (unsigned long)cpu->r[7],
+            (unsigned long)cpu->r[8], (unsigned long)cpu->r[9],
+            (unsigned long)cpu->r[10], (unsigned long)cpu->r[11],
+            (unsigned long)cpu->r[12], (unsigned long)cpu->r[13],
+            (unsigned long)cpu->r[14], (unsigned long)cpu->xpsr);
+    dump_bytes(map, cpu->sec_state, r1, 256u, "record_a (r1)");
+    dump_bytes(map, cpu->sec_state, r2, 256u, "record_b (r2)");
+    dump_bytes(map, cpu->sec_state, r0, 512u, "record_r (r0)");
+    dump_bytes(map, cpu->sec_state, cpu->r[13], 4096u, "record_sp (sp)");
+    if (g_record_start_dump_ram) {
+        if (map->ram_size_ns > 0u) {
+            dump_bytes(map, MM_NONSECURE, map->ram_base_ns, map->ram_size_ns, "record_ram_ns");
+        }
+        if (map->ram_size_s > 0u) {
+            dump_bytes(map, MM_SECURE, map->ram_base_s, map->ram_size_s, "record_ram_s");
+        }
+    }
+
+    g_record_stop_pc = cpu->r[14] & ~1u;
+    g_record_stop_set = MM_TRUE;
+    g_record_dump_addr = r0;
+}
+
+static void dump_record_window(struct mm_cpu *cpu, struct mm_memmap *map)
+{
+    if (g_record_start_window == 0u) {
+        return;
+    }
+    fprintf(stderr, "[RECORD_WINDOW] pc=0x%08lx steps=%lu\n",
+            (unsigned long)(cpu->r[15] & ~1u),
+            (unsigned long)g_record_start_window);
+    if (g_record_end_dump_ram) {
+        if (map->ram_size_ns > 0u) {
+            dump_bytes(map, MM_NONSECURE, map->ram_base_ns, map->ram_size_ns, "record_ram_ns_end");
+        }
+        if (map->ram_size_s > 0u) {
+            dump_bytes(map, MM_SECURE, map->ram_base_s, map->ram_size_s, "record_ram_s_end");
+        }
+    }
+    dump_trace_tail(cpu, map, g_record_start_window);
+    g_record_start_window = 0u;
+    g_record_start_remaining = 0u;
+}
+
+static void record_window_step(struct mm_cpu *cpu, struct mm_memmap *map)
+{
+    if (g_record_start_remaining == 0u) {
+        return;
+    }
+    g_record_start_remaining--;
+    if (g_record_start_remaining == 0u) {
+        dump_record_window(cpu, map);
+    }
 }
 
 static mm_u32 cfg_total_ram(const struct mm_target_cfg *cfg)
@@ -657,6 +832,68 @@ static mm_bool symbol_lookup_name(mm_u32 pc, char *out, size_t out_len)
     return MM_FALSE;
 #endif
 }
+
+#ifdef M33MU_HAS_LIBDW
+struct symbol_find_ctx {
+    const char *name;
+    mm_u32 addr;
+    mm_bool found;
+};
+
+static int symbol_find_cb(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Addr start, void *arg)
+{
+    struct symbol_find_ctx *ctx = (struct symbol_find_ctx *)arg;
+    int count;
+    int i;
+    (void)userdata;
+    (void)name;
+    (void)start;
+    if (ctx == 0 || ctx->found) {
+        return 0;
+    }
+    count = dwfl_module_getsymtab(mod);
+    if (count <= 0) {
+        return 0;
+    }
+    for (i = 0; i < count; ++i) {
+        GElf_Sym sym;
+        GElf_Word shndx;
+        const char *sname = dwfl_module_getsym(mod, i, &sym, &shndx);
+        if (sname != 0 && strcmp(sname, ctx->name) == 0) {
+            ctx->addr = (mm_u32)sym.st_value;
+            ctx->found = MM_TRUE;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static mm_bool symbol_lookup_addr_by_name(const char *name, mm_u32 *addr_out)
+{
+    struct symbol_find_ctx ctx;
+    if (name == 0 || name[0] == '\0' || addr_out == 0) {
+        return MM_FALSE;
+    }
+    if (!g_symbol_ctx.ready || g_symbol_ctx.dwfl == 0) {
+        return MM_FALSE;
+    }
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.name = name;
+    (void)dwfl_getmodules(g_symbol_ctx.dwfl, symbol_find_cb, &ctx, 0);
+    if (!ctx.found) {
+        return MM_FALSE;
+    }
+    *addr_out = ctx.addr & ~1u;
+    return MM_TRUE;
+}
+#else
+static mm_bool symbol_lookup_addr_by_name(const char *name, mm_u32 *addr_out)
+{
+    (void)name;
+    (void)addr_out;
+    return MM_FALSE;
+}
+#endif
 
 static const char *path_basename(const char *path)
 {
@@ -2729,7 +2966,25 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
     }
 
 
-    if (mm_trace_enabled()) {
+    if (!g_record_started && g_record_start_set &&
+        ((cpu->r[15] & ~1u) == g_record_start_pc)) {
+        mm_trace_reset();
+        g_record_started = MM_TRUE;
+        if (g_record_start_dump) {
+            dump_record_start_context(cpu, map);
+        }
+        g_record_start_remaining = g_record_start_window;
+    }
+        if (g_record_stop_set && ((cpu->r[15] & ~1u) == g_record_stop_pc)) {
+            fprintf(stderr, "[RECORD_STOP] pc=0x%08lx\n", (unsigned long)(cpu->r[15] & ~1u));
+            dump_bytes(map, cpu->sec_state, g_record_dump_addr, 64u, "record_r_after (r0)");
+            if (g_record_dump_count > 0u && mm_trace_enabled() && g_record_started) {
+                dump_trace_tail(cpu, map, g_record_dump_count);
+            }
+            g_record_stop_set = MM_FALSE;
+            g_record_started = MM_FALSE;
+        }
+    if (mm_trace_enabled() && g_record_started) {
         mm_trace_begin_step(cpu, cpu->r[15] & ~1u);
         trace_started = MM_TRUE;
     }
@@ -2861,12 +3116,22 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         }
 
         if (!execute_it && d.kind != MM_OP_IT) {
+            if (mm_unicorn_active()) {
+                mm_unicorn_clear_m33mu_write();
+                mm_unicorn_snapshot_pre(cpu);
+            }
             if (*it_remaining > 0u) {
                 mm_u8 raw = itstate_get(cpu->xpsr);
                 *it_pattern >>= 1;
                 (*it_remaining)--;
                 raw = itstate_advance(raw);
                 cpu->xpsr = itstate_set(cpu->xpsr, raw);
+            }
+            if (mm_unicorn_active()) {
+                if (mm_unicorn_step_compare(cpu, map, &f, &d, execute_it) == MM_UNICORN_STEP_FAIL) {
+                    if (done) *done = MM_TRUE;
+                    return MM_FALSE;
+                }
             }
             result = MM_TRUE;
             goto out;
@@ -2907,6 +3172,10 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             exec_ctx.raise_usage_fault = raise_usage_fault;
             exec_ctx.exc_return_unstack = exc_return_unstack;
             exec_ctx.enter_exception = enter_exception;
+            if (mm_unicorn_active()) {
+                mm_unicorn_clear_m33mu_write();
+                mm_unicorn_snapshot_pre(cpu);
+            }
             (void)mm_execute_decoded(&exec_ctx);
         }
 
@@ -3472,17 +3741,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
 
     sec = cpu->sec_state;
     pre_mode = cpu->mode;
-    if (pre_mode == MM_HANDLER) {
-        tail_chain = MM_FALSE;
-    } else {
-        mm_u32 lr = cpu->r[14];
-        if ((lr & 0xffffff00u) == 0xffffff00u) {
-            struct mm_exc_return_info info = mm_exc_return_decode(lr);
-            if (info.valid && info.to_thread) {
-                tail_chain = MM_TRUE;
-            }
-        }
-    }
+    tail_chain = MM_FALSE;
 
     if (exc_num >= 16u) {
         vtor = (handler_sec == MM_NONSECURE) ? scs->vtor_ns : scs->vtor_s;
@@ -3701,8 +3960,21 @@ int main(int argc, char **argv)
     mm_bool opt_uart_stdout = MM_FALSE;
     mm_bool opt_meminfo = MM_FALSE;
     mm_bool opt_record = MM_FALSE;
+    mm_bool opt_record_start_set = MM_FALSE;
+    mm_u32 opt_record_start_pc = 0;
+    mm_u32 opt_record_dump = 0;
+    mm_bool opt_record_start_dump = MM_FALSE;
+    mm_bool opt_record_start_dump_ram = MM_FALSE;
+    mm_bool opt_record_end_dump_ram = MM_FALSE;
+    mm_u32 opt_record_window = 0;
     mm_bool opt_call_trace = MM_FALSE;
     mm_bool opt_dualbank = MM_FALSE;
+    mm_bool opt_unicorn = MM_FALSE;
+    const char *opt_unicorn_target = 0;
+    mm_u32 opt_unicorn_stack = 256u;
+    mm_u32 opt_unicorn_max_steps = 10000000u;
+    mm_u32 opt_unicorn_entry_pc = 0;
+    mm_bool opt_unicorn_entry_set = MM_FALSE;
     const char *gdb_symbols = 0;
     const char *gdb_symbols_list[32];
     size_t gdb_symbols_count = 0;
@@ -3867,8 +4139,142 @@ int main(int argc, char **argv)
             opt_meminfo = MM_TRUE;
         } else if (strcmp(argv[i], "--record") == 0) {
             opt_record = MM_TRUE;
+        } else if (strcmp(argv[i], "--record-start") == 0) {
+            mm_u32 v;
+            if (i + 1 >= argc || !parse_hex_u32(argv[i + 1], &v)) {
+                fprintf(stderr, "invalid record-start value: %s\n", (i + 1 < argc) ? argv[i + 1] : "");
+                return 1;
+            }
+            opt_record_start_set = MM_TRUE;
+            opt_record_start_pc = v & ~1u;
+            opt_record = MM_TRUE;
+            i++;
+        } else if (strncmp(argv[i], "--record-start=", 15) == 0) {
+            mm_u32 v;
+            if (!parse_hex_u32(argv[i] + 15, &v)) {
+                fprintf(stderr, "invalid record-start value: %s\n", argv[i]);
+                return 1;
+            }
+            opt_record_start_set = MM_TRUE;
+            opt_record_start_pc = v & ~1u;
+            opt_record = MM_TRUE;
+        } else if (strcmp(argv[i], "--record-dump") == 0) {
+            unsigned long v;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing record-dump value\n");
+                return 1;
+            }
+            v = strtoul(argv[i + 1], 0, 10);
+            if (v == 0u) {
+                fprintf(stderr, "invalid record-dump value: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_record_dump = (mm_u32)v;
+            opt_record = MM_TRUE;
+            i++;
+        } else if (strncmp(argv[i], "--record-dump=", 14) == 0) {
+            unsigned long v = strtoul(argv[i] + 14, 0, 10);
+            if (v == 0u) {
+                fprintf(stderr, "invalid record-dump value: %s\n", argv[i]);
+                return 1;
+            }
+            opt_record_dump = (mm_u32)v;
+            opt_record = MM_TRUE;
+        } else if (strcmp(argv[i], "--record-start-dump") == 0) {
+            opt_record_start_dump = MM_TRUE;
+            opt_record = MM_TRUE;
+        } else if (strcmp(argv[i], "--record-start-dump-ram") == 0) {
+            opt_record_start_dump_ram = MM_TRUE;
+            opt_record_start_dump = MM_TRUE;
+            opt_record = MM_TRUE;
+        } else if (strcmp(argv[i], "--record-trace") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing record-trace path\n");
+                return 1;
+            }
+            g_record_trace_fp = fopen(argv[i + 1], "w");
+            if (g_record_trace_fp == NULL) {
+                fprintf(stderr, "failed to open record-trace file: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_record = MM_TRUE;
+            i++;
+        } else if (strcmp(argv[i], "--record-quiet") == 0) {
+            opt_record = MM_TRUE;
+            g_record_trace_live = MM_FALSE;
+        } else if (strcmp(argv[i], "--record-end-dump-ram") == 0) {
+            opt_record_end_dump_ram = MM_TRUE;
+            opt_record = MM_TRUE;
+        } else if (strcmp(argv[i], "--record-window") == 0) {
+            mm_u32 v;
+            if (i + 1 >= argc || !parse_hex_u32(argv[i + 1], &v)) {
+                fprintf(stderr, "invalid record-window value: %s\n", (i + 1 < argc) ? argv[i + 1] : "");
+                return 1;
+            }
+            opt_record_window = v;
+            opt_record = MM_TRUE;
+            i++;
+        } else if (strncmp(argv[i], "--record-window=", 16) == 0) {
+            mm_u32 v = 0;
+            if (!parse_hex_u32(argv[i] + 16, &v)) {
+                fprintf(stderr, "invalid record-window value: %s\n", argv[i]);
+                return 1;
+            }
+            opt_record_window = v;
+            opt_record = MM_TRUE;
         } else if (strcmp(argv[i], "--call-trace") == 0) {
             opt_call_trace = MM_TRUE;
+        } else if (strcmp(argv[i], "--unicorn") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing unicorn target (symbol or address)\n");
+                return 1;
+            }
+            opt_unicorn = MM_TRUE;
+            opt_unicorn_target = argv[i + 1];
+            i++;
+        } else if (strncmp(argv[i], "--unicorn=", 10) == 0) {
+            opt_unicorn = MM_TRUE;
+            opt_unicorn_target = argv[i] + 10;
+        } else if (strcmp(argv[i], "--unicorn-stack") == 0) {
+            unsigned long v;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing unicorn-stack value\n");
+                return 1;
+            }
+            v = strtoul(argv[i + 1], 0, 10);
+            if (v == 0u) {
+                fprintf(stderr, "invalid unicorn-stack value: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_unicorn_stack = (mm_u32)v;
+            i++;
+        } else if (strncmp(argv[i], "--unicorn-stack=", 16) == 0) {
+            unsigned long v = strtoul(argv[i] + 16, 0, 10);
+            if (v == 0u) {
+                fprintf(stderr, "invalid unicorn-stack value: %s\n", argv[i]);
+                return 1;
+            }
+            opt_unicorn_stack = (mm_u32)v;
+        } else if (strcmp(argv[i], "--unicorn-max-steps") == 0) {
+            unsigned long v;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing unicorn-max-steps value\n");
+                return 1;
+            }
+            v = strtoul(argv[i + 1], 0, 10);
+            if (v == 0u) {
+                fprintf(stderr, "invalid unicorn-max-steps value: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_unicorn_max_steps = (mm_u32)v;
+            i++;
+        } else if (strncmp(argv[i], "--unicorn-max-steps=", 20) == 0) {
+            unsigned long v = strtoul(argv[i] + 20, 0, 10);
+            if (v == 0u) {
+                fprintf(stderr, "invalid unicorn-max-steps value: %s\n", argv[i]);
+                return 1;
+            }
+            opt_unicorn_max_steps = (mm_u32)v;
         } else if (strcmp(argv[i], "--fault-clock") == 0) {
             unsigned long long t;
             if (i + 1 >= argc) {
@@ -4062,7 +4468,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_USE_LIBCAPSTONE
                         "[--capstone] [--capstone-verbose] "
 #endif
-                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--call-trace] [--dualbank] [--fault-clock N] [--no-tz] [--gdb-symbols <elf>] "
+                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--record] [--record-start <pc>] [--record-start-dump] [--record-start-dump-ram] [--record-end-dump-ram] [--record-trace <path>] [--record-quiet] [--record-dump <n>] [--call-trace] [--dualbank] [--unicorn <symbol|addr>] [--unicorn-stack N] [--unicorn-max-steps N] [--fault-clock N] [--no-tz] [--gdb-symbols <elf>] "
                         "[--expect-bkpt 0xNN] [--timeout seconds] "
                         "[--boot flash|ram|spiflash] "
                         "[--boot-offset=0xN] "
@@ -4085,6 +4491,15 @@ int main(int argc, char **argv)
 
     g_quit_on_faults = opt_quit_on_faults;
     g_call_trace = opt_call_trace;
+    g_record_start_set = opt_record_start_set;
+    g_record_start_pc = opt_record_start_pc;
+    g_record_started = opt_record_start_set ? MM_FALSE : MM_TRUE;
+    g_record_start_dump = opt_record_start_dump;
+    g_record_start_dump_ram = opt_record_start_dump_ram;
+    g_record_end_dump_ram = opt_record_end_dump_ram;
+    g_record_dump_count = opt_record_dump;
+    g_record_start_window = opt_record_window;
+    g_record_start_remaining = opt_record_window;
     if (opt_tui && opt_uart_stdout) {
         fprintf(stderr, "warning: --uart-stdout disabled while TUI is active\n");
         opt_uart_stdout = MM_FALSE;
@@ -4301,6 +4716,38 @@ int main(int argc, char **argv)
     }
 
     build_symbol_db(images, image_count, gdb_symbols_list, gdb_symbols_count);
+
+    if (opt_unicorn) {
+        if (!mm_unicorn_available()) {
+            fprintf(stderr, "Unicorn support not available (built without libunicorn)\n");
+            rc = 1;
+            goto cleanup;
+        }
+        if (opt_unicorn_target == 0 || opt_unicorn_target[0] == '\0') {
+            fprintf(stderr, "missing unicorn target (symbol or address)\n");
+            rc = 1;
+            goto cleanup;
+        }
+        if (parse_hex_u32(opt_unicorn_target, &opt_unicorn_entry_pc)) {
+            opt_unicorn_entry_set = MM_TRUE;
+        } else if (symbol_lookup_addr_by_name(opt_unicorn_target, &opt_unicorn_entry_pc)) {
+            opt_unicorn_entry_set = MM_TRUE;
+        } else {
+            fprintf(stderr, "failed to resolve unicorn target: %s\n", opt_unicorn_target);
+            rc = 1;
+            goto cleanup;
+        }
+        if (!mm_unicorn_configure(opt_unicorn_entry_pc, opt_unicorn_stack, opt_unicorn_max_steps)) {
+            fprintf(stderr, "failed to configure unicorn\n");
+            rc = 1;
+            goto cleanup;
+        }
+        opt_disable_tb = MM_TRUE;
+        printf("[UNICORN] target=0x%08lx stack=%lu max_steps=%lu\n",
+               (unsigned long)opt_unicorn_entry_pc,
+               (unsigned long)opt_unicorn_stack,
+               (unsigned long)opt_unicorn_max_steps);
+    }
 
     memset(&persist, 0, sizeof(persist));
     if (opt_persist) {
@@ -5125,40 +5572,42 @@ int main(int argc, char **argv)
 
                 /* Handle pending system exceptions (SysTick, PendSV). */
 handle_pending:
-                if (cpu.mode == MM_THREAD && scs.pend_sv &&
-                    !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_PENDSV)) {
-                    if (!enter_exception(&cpu, &map, &scs, MM_VECT_PENDSV, cpu.r[15] & ~1u, cpu.xpsr)) {
-                        done = MM_TRUE;
-                    } else {
-                        itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
-                    }
-                    continue;
-                }
-                if (cpu.mode == MM_THREAD && scs.pend_st &&
-                    !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_SYSTICK)) {
-                    if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {
-                        done = MM_TRUE;
-                    } else {
-                        itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
-                    }
-                    continue;
-                }
-
-                /* Manage interrupts */
-                {
-                    enum mm_sec_state irq_sec = MM_SECURE;
-                    pend_irq = mm_nvic_select_routed(&nvic, &cpu, &irq_sec);
-                    if (pend_irq >= 0) {
-                        mm_u32 exc_num = 16u + (mm_u32)pend_irq;
-                        /* Clear pending when accepted. */
-                        mm_nvic_set_pending(&nvic, (mm_u32)pend_irq, MM_FALSE);
-                        mm_nvic_set_active(&nvic, (mm_u32)pend_irq, MM_TRUE);
-                        if (!enter_exception_ex(&cpu, &map, &scs, exc_num, cpu.r[15] & ~1u, cpu.xpsr, irq_sec)) {
+                if (!mm_unicorn_active()) {
+                    if (cpu.mode == MM_THREAD && scs.pend_sv &&
+                        !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_PENDSV)) {
+                        if (!enter_exception(&cpu, &map, &scs, MM_VECT_PENDSV, cpu.r[15] & ~1u, cpu.xpsr)) {
                             done = MM_TRUE;
                         } else {
                             itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                         }
                         continue;
+                    }
+                    if (cpu.mode == MM_THREAD && scs.pend_st &&
+                        !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_SYSTICK)) {
+                        if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {
+                            done = MM_TRUE;
+                        } else {
+                            itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
+                        }
+                        continue;
+                    }
+
+                    /* Manage interrupts */
+                    {
+                        enum mm_sec_state irq_sec = MM_SECURE;
+                        pend_irq = mm_nvic_select_routed(&nvic, &cpu, &irq_sec);
+                        if (pend_irq >= 0) {
+                            mm_u32 exc_num = 16u + (mm_u32)pend_irq;
+                            /* Clear pending when accepted. */
+                            mm_nvic_set_pending(&nvic, (mm_u32)pend_irq, MM_FALSE);
+                            mm_nvic_set_active(&nvic, (mm_u32)pend_irq, MM_TRUE);
+                            if (!enter_exception_ex(&cpu, &map, &scs, exc_num, cpu.r[15] & ~1u, cpu.xpsr, irq_sec)) {
+                                done = MM_TRUE;
+                            } else {
+                                itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
+                            }
+                            continue;
+                        }
                     }
                 }
 
@@ -5177,6 +5626,14 @@ handle_pending:
                         mm_gdb_stub_notify_stop(&gdb, 5);
                     }
                     continue;
+                }
+
+                if (opt_unicorn && opt_unicorn_entry_set && !mm_unicorn_active() &&
+                    ((cpu.r[15] & ~1u) == opt_unicorn_entry_pc)) {
+                    if (!mm_unicorn_maybe_start(&cpu, &map)) {
+                        rc = 1;
+                        goto cleanup;
+                    }
                 }
 
                 /* Fast path: translation block cache */
@@ -5389,7 +5846,24 @@ handle_pending:
                      */
                     cpu.r[13] = mm_cpu_get_active_sp(&cpu);
 
-                    if (mm_trace_enabled()) {
+                    if (!g_record_started && g_record_start_set &&
+                        ((cpu.r[15] & ~1u) == g_record_start_pc)) {
+                        mm_trace_reset();
+                        g_record_started = MM_TRUE;
+                        if (g_record_start_dump) {
+                            dump_record_start_context(&cpu, &map);
+                        }
+                    }
+                    if (g_record_stop_set && ((cpu.r[15] & ~1u) == g_record_stop_pc)) {
+                        fprintf(stderr, "[RECORD_STOP] pc=0x%08lx\n", (unsigned long)(cpu.r[15] & ~1u));
+                        dump_bytes(&map, cpu.sec_state, g_record_dump_addr, 64u, "record_r_after (r0)");
+                        if (g_record_dump_count > 0u && mm_trace_enabled() && g_record_started) {
+                            dump_trace_tail(&cpu, &map, g_record_dump_count);
+                        }
+                        g_record_stop_set = MM_FALSE;
+                        g_record_started = MM_FALSE;
+                    }
+                    if (mm_trace_enabled() && g_record_started) {
                         mm_trace_begin_step(&cpu, cpu.r[15] & ~1u);
                         trace_started = MM_TRUE;
                     }
@@ -5398,6 +5872,7 @@ handle_pending:
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);
+                            record_window_step(&cpu, &map);
                         }
                         continue;
                     }
@@ -5405,6 +5880,7 @@ handle_pending:
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);
+                            record_window_step(&cpu, &map);
                         }
                         continue;
                     }
@@ -5424,12 +5900,14 @@ handle_pending:
                             if (trace_started) {
                                 mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                                 mm_trace_end_step(&cpu);
+                                record_window_step(&cpu, &map);
                             }
                             break;
                         }
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);
+                            record_window_step(&cpu, &map);
                         }
                         continue;
                     }
@@ -5510,51 +5988,41 @@ handle_pending:
                             if (trace_started) {
                                 mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                                 mm_trace_end_step(&cpu);
+                                record_window_step(&cpu, &map);
                             }
                             break;
                         }
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);
+                            record_window_step(&cpu, &map);
                         }
                         continue;
                     }
 
-                    if (it_remaining > 0u && itstate_get(cpu.xpsr) == 0u) {
-                        it_pattern = 0;
-                        it_remaining = 0;
-                        it_cond = 0;
-                    }
                     /* ITSTATE handling: if inside IT block and not IT instruction, conditionally execute. */
-                    execute_it = MM_TRUE;
-                    if (it_remaining > 0u && d.kind != MM_OP_IT) {
-                        mm_bool cond_true = MM_FALSE;
-                        mm_bool take = MM_FALSE;
-                        mm_bool n = (cpu.xpsr & (1u << 31)) != 0u;
-                        mm_bool z = (cpu.xpsr & (1u << 30)) != 0u;
-                        mm_bool c = (cpu.xpsr & (1u << 29)) != 0u;
-                        mm_bool v = (cpu.xpsr & (1u << 28)) != 0u;
-                        mm_u8 cond = it_cond;
-                        switch (cond) {
-                            case MM_COND_EQ: cond_true = z; break;
-                            case MM_COND_NE: cond_true = !z; break;
-                            case MM_COND_CS: cond_true = c; break;
-                            case MM_COND_CC: cond_true = !c; break;
-                            case MM_COND_MI: cond_true = n; break;
-                            case MM_COND_PL: cond_true = !n; break;
-                            case MM_COND_VS: cond_true = v; break;
-                            case MM_COND_VC: cond_true = !v; break;
-                            case MM_COND_HI: cond_true = c && !z; break;
-                            case MM_COND_LS: cond_true = !c || z; break;
-                            case MM_COND_GE: cond_true = (n == v); break;
-                            case MM_COND_LT: cond_true = (n != v); break;
-                            case MM_COND_GT: cond_true = !z && (n == v); break;
-                            case MM_COND_LE: cond_true = z || (n != v); break;
-                            case MM_COND_AL: cond_true = MM_TRUE; break;
-                            default: cond_true = MM_FALSE; break;
-                        }
-                        take = ((it_pattern & 0x1u) != 0u) ? cond_true : !cond_true;
-                        execute_it = take;
+                    execute_it = mm_it_should_execute(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
+                    if ((g_record_trace_fp != NULL || g_record_trace_live) &&
+                        g_record_started && g_record_start_remaining > 0u) {
+                        FILE *trace_out = g_record_trace_fp ? g_record_trace_fp : stderr;
+                        fprintf(trace_out,
+                                "[TRACE_LIVE] pc=0x%08lx len=%u insn=0x%08lx "
+                                "r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx "
+                                "r4=0x%08lx r5=0x%08lx r6=0x%08lx r7=0x%08lx "
+                                "r8=0x%08lx r9=0x%08lx r10=0x%08lx r11=0x%08lx "
+                                "r12=0x%08lx sp=0x%08lx lr=0x%08lx xpsr=0x%08lx exec=%u\n",
+                                (unsigned long)f.pc_fetch,
+                                (unsigned)d.len,
+                                (unsigned long)d.raw,
+                                (unsigned long)cpu.r[0], (unsigned long)cpu.r[1],
+                                (unsigned long)cpu.r[2], (unsigned long)cpu.r[3],
+                                (unsigned long)cpu.r[4], (unsigned long)cpu.r[5],
+                                (unsigned long)cpu.r[6], (unsigned long)cpu.r[7],
+                                (unsigned long)cpu.r[8], (unsigned long)cpu.r[9],
+                                (unsigned long)cpu.r[10], (unsigned long)cpu.r[11],
+                                (unsigned long)cpu.r[12], (unsigned long)mm_cpu_get_active_sp(&cpu),
+                                (unsigned long)cpu.r[14], (unsigned long)cpu.xpsr,
+                                execute_it ? 1u : 0u);
                     }
 
                     if (opt_dump) {
@@ -5571,16 +6039,22 @@ handle_pending:
                                 (unsigned long long)cycle_total);
                     }
                     if (!execute_it && d.kind != MM_OP_IT) {
-                        if (it_remaining > 0u) {
-                            mm_u8 raw = itstate_get(cpu.xpsr);
-                            it_pattern >>= 1;
-                            it_remaining--;
-                            raw = itstate_advance(raw);
-                            cpu.xpsr = itstate_set(cpu.xpsr, raw);
+                        if (opt_unicorn && mm_unicorn_active()) {
+                            mm_unicorn_clear_m33mu_write();
+                            mm_unicorn_snapshot_pre(&cpu);
+                        }
+                        mm_it_advance(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
+                        if (opt_unicorn && mm_unicorn_active()) {
+                            if (mm_unicorn_step_compare(&cpu, &map, &f, &d, execute_it) == MM_UNICORN_STEP_FAIL) {
+                                rc = 1;
+                                done = MM_TRUE;
+                                goto cleanup;
+                            }
                         }
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);
+                            record_window_step(&cpu, &map);
                         }
                         continue;
                     }
@@ -5599,13 +6073,18 @@ handle_pending:
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);
+                            record_window_step(&cpu, &map);
                         }
                         continue;
                     }
 
-                    {
-                        struct mm_execute_ctx exec_ctx;
-                        calltrace_handle_decoded(&cpu, &f, &d);
+                        {
+                            struct mm_execute_ctx exec_ctx;
+                            calltrace_handle_decoded(&cpu, &f, &d);
+                            if (opt_unicorn && mm_unicorn_active()) {
+                                mm_unicorn_clear_m33mu_write();
+                                mm_unicorn_snapshot_pre(&cpu);
+                        }
                         exec_ctx.cpu = &cpu;
                         exec_ctx.map = &map;
                         exec_ctx.scs = &scs;
@@ -5623,12 +6102,27 @@ handle_pending:
                         exec_ctx.raise_usage_fault = raise_usage_fault;
                         exec_ctx.exc_return_unstack = exc_return_unstack;
                         exec_ctx.enter_exception = enter_exception;
-                        if (mm_execute_decoded(&exec_ctx) == MM_EXEC_CONTINUE) {
-                            if (trace_started) {
-                                mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
-                                mm_trace_end_step(&cpu);
+                        {
+                            int exec_res = mm_execute_decoded(&exec_ctx);
+                            if (exec_res == MM_EXEC_CONTINUE) {
+                                if (execute_it && d.kind != MM_OP_IT) {
+                                    mm_it_advance(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
+                                }
+                                if (opt_unicorn && mm_unicorn_active()) {
+                                    mm_unicorn_step_result uni_res = mm_unicorn_step_compare(&cpu, &map, &f, &d, execute_it);
+                                    if (uni_res == MM_UNICORN_STEP_FAIL) {
+                                        rc = 1;
+                                        done = MM_TRUE;
+                                        goto cleanup;
+                                    }
+                                }
+                                if (trace_started) {
+                                    mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                                    mm_trace_end_step(&cpu);
+                                    record_window_step(&cpu, &map);
+                                }
+                                continue;
                             }
-                            continue;
                         }
                         if (d.kind == MM_OP_BKPT) {
                             printf("[BKPT] imm=0x%02lx\n", (unsigned long)d.imm);
@@ -5650,6 +6144,7 @@ handle_pending:
                     if (trace_started) {
                         mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                         mm_trace_end_step(&cpu);
+                        record_window_step(&cpu, &map);
                     }
 
                     if (opt_capstone) {
@@ -5659,13 +6154,7 @@ handle_pending:
                         }
                     }
 
-                    if (it_remaining > 0u && d.kind != MM_OP_IT) {
-                        mm_u8 raw = itstate_get(cpu.xpsr);
-                        it_pattern >>= 1;
-                        it_remaining--;
-                        raw = itstate_advance(raw);
-                        cpu.xpsr = itstate_set(cpu.xpsr, raw);
-                    }
+                    mm_it_advance(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
                 }
 
                 if (cycles_since_poll >= poll_granularity) {
@@ -5720,12 +6209,16 @@ handle_pending:
                            avg_cycles_per_wrap);
                 }
             }
+            if (opt_record_dump > 0u && mm_trace_enabled() && g_record_started) {
+                dump_trace_tail(&cpu, &map, opt_record_dump);
+            }
             mm_code_cache_release(&code_cache);
             break;
         }
     }
 
 cleanup:
+    mm_unicorn_stop();
     mm_spiflash_shutdown_all();
 #ifdef M33MU_HAS_LIBTPMS
     mm_tpm_tis_shutdown_all();
@@ -5741,6 +6234,10 @@ cleanup:
         mm_tui_register(0);
         mm_tui_stop_thread(&tui);
         mm_tui_shutdown(&tui);
+    }
+    if (g_record_trace_fp != NULL) {
+        fclose(g_record_trace_fp);
+        g_record_trace_fp = NULL;
     }
     if (opt_expect_bkpt && rc == 0) {
         rc = expect_bkpt_hit ? 0 : 1;

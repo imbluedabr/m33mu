@@ -85,6 +85,17 @@ mm_u32 itstate_set(mm_u32 xpsr, mm_u8 itstate);
 mm_u8 itstate_advance(mm_u8 itstate);
 void itstate_sync_from_xpsr(mm_u32 xpsr, mm_u8 *pattern_out, mm_u8 *remaining_out, mm_u8 *cond_out);
 
+mm_bool mm_it_should_execute(struct mm_cpu *cpu,
+                             const struct mm_decoded *dec,
+                             mm_u8 *it_pattern,
+                             mm_u8 *it_remaining,
+                             mm_u8 *it_cond);
+void mm_it_advance(struct mm_cpu *cpu,
+                   const struct mm_decoded *dec,
+                   mm_u8 *it_pattern,
+                   mm_u8 *it_remaining,
+                   mm_u8 *it_cond);
+
 enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx);
 
 #endif /* M33MU_EXECUTE_H */

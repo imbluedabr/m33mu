@@ -183,6 +183,18 @@ void mm_trace_init(void)
     fprintf(stderr, "[TRACE] buffer allocated %u bytes\n", g_trace.size);
 }
 
+void mm_trace_reset(void)
+{
+    if (!g_trace.enabled) {
+        return;
+    }
+    g_trace.head = 0;
+    g_trace.tail = 0;
+    g_trace.full = MM_FALSE;
+    memset(&g_trace.step, 0, sizeof(g_trace.step));
+    mm_trace_reverse_reset();
+}
+
 mm_bool mm_trace_enabled(void)
 {
     return g_trace.enabled ? MM_TRUE : MM_FALSE;

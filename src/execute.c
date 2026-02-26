@@ -348,15 +348,15 @@ mm_u32 itstate_set(mm_u32 xpsr, mm_u8 itstate)
 mm_u8 itstate_advance(mm_u8 itstate)
 {
     mm_u8 mask = (mm_u8)(itstate & 0x0fu);
-    mm_u8 next;
     if (mask == 0u) {
         return 0u;
     }
-    next = (mm_u8)((itstate & 0xE0u) | ((itstate & 0x1Fu) << 1));
-    if ((next & 0x0fu) == 0u) {
-        next = 0u;
+    mask = (mm_u8)(mask << 1);
+    itstate = (mm_u8)((itstate & 0xF0u) | (mask & 0x0fu));
+    if ((itstate & 0x0fu) == 0u) {
+        itstate = 0u;
     }
-    return next;
+    return itstate;
 }
 
 static void itstate_clear(mm_u32 *xpsr, mm_u8 *it_pattern, mm_u8 *it_remaining, mm_u8 *it_cond)
@@ -386,6 +386,79 @@ void itstate_sync_from_xpsr(mm_u32 xpsr, mm_u8 *pattern_out, mm_u8 *remaining_ou
     if (cond_out) {
         *cond_out = cond;
     }
+}
+
+mm_bool mm_it_should_execute(struct mm_cpu *cpu,
+                             const struct mm_decoded *dec,
+                             mm_u8 *it_pattern,
+                             mm_u8 *it_remaining,
+                             mm_u8 *it_cond)
+{
+    mm_bool execute_it = MM_TRUE;
+    if (cpu == 0 || dec == 0 || it_remaining == 0) {
+        return MM_TRUE;
+    }
+    if (*it_remaining > 0u && itstate_get(cpu->xpsr) == 0u) {
+        if (it_pattern) {
+            *it_pattern = 0;
+        }
+        *it_remaining = 0;
+        if (it_cond) {
+            *it_cond = 0;
+        }
+    }
+    if (*it_remaining > 0u && dec->kind != MM_OP_IT) {
+        mm_bool cond_true = MM_FALSE;
+        mm_bool take = MM_FALSE;
+        mm_bool n = (cpu->xpsr & (1u << 31)) != 0u;
+        mm_bool z = (cpu->xpsr & (1u << 30)) != 0u;
+        mm_bool c = (cpu->xpsr & (1u << 29)) != 0u;
+        mm_bool v = (cpu->xpsr & (1u << 28)) != 0u;
+        mm_u8 cond = (it_cond != 0) ? *it_cond : 0u;
+        switch (cond) {
+            case MM_COND_EQ: cond_true = z; break;
+            case MM_COND_NE: cond_true = !z; break;
+            case MM_COND_CS: cond_true = c; break;
+            case MM_COND_CC: cond_true = !c; break;
+            case MM_COND_MI: cond_true = n; break;
+            case MM_COND_PL: cond_true = !n; break;
+            case MM_COND_VS: cond_true = v; break;
+            case MM_COND_VC: cond_true = !v; break;
+            case MM_COND_HI: cond_true = c && !z; break;
+            case MM_COND_LS: cond_true = !c || z; break;
+            case MM_COND_GE: cond_true = (n == v); break;
+            case MM_COND_LT: cond_true = (n != v); break;
+            case MM_COND_GT: cond_true = !z && (n == v); break;
+            case MM_COND_LE: cond_true = z || (n != v); break;
+            case MM_COND_AL: cond_true = MM_TRUE; break;
+            default: cond_true = MM_FALSE; break;
+        }
+        take = ((it_pattern != 0 && ((*it_pattern & 0x1u) != 0u)) ? cond_true : !cond_true);
+        execute_it = take;
+    }
+    return execute_it;
+}
+
+void mm_it_advance(struct mm_cpu *cpu,
+                   const struct mm_decoded *dec,
+                   mm_u8 *it_pattern,
+                   mm_u8 *it_remaining,
+                   mm_u8 *it_cond)
+{
+    mm_u8 raw;
+    if (cpu == 0 || dec == 0 || it_remaining == 0) {
+        return;
+    }
+    if (*it_remaining > 0u && dec->kind != MM_OP_IT) {
+        raw = itstate_get(cpu->xpsr);
+        if (it_pattern) {
+            *it_pattern >>= 1;
+        }
+        (*it_remaining)--;
+        raw = itstate_advance(raw);
+        cpu->xpsr = itstate_set(cpu->xpsr, raw);
+    }
+    (void)it_cond;
 }
 
 enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
@@ -439,6 +512,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
 } while (0)
 
                     pc_before_exec = cpu.r[15];
+                    /* Snapshot last executed instruction for fetch diagnostics. */
                     switch (d.kind) {
                         case MM_OP_IT:
                             it_cond = (mm_u8)((d.imm >> 4) & 0x0fu);
@@ -1139,7 +1213,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                              mm_bool zero = (cpu.r[d.rn] == 0u);
                                              mm_bool take = (d.kind == MM_OP_CBZ) ? zero : (!zero);
                                              if (take) {
-                                                 cpu.r[15] = (f.pc_fetch + 4u + d.imm) | 1u;
+                                                 mm_u32 target = (f.pc_fetch + 4u + d.imm) | 1u;
+                                                 cpu.r[15] = target;
                                                  itstate_clear(&cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                                              } else {
                                                  /* Fall-through already handled by PC increment in fetch/decode. */
@@ -1217,17 +1292,31 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                        break;
                         case MM_OP_MOV_IMM: {
                                        mm_bool setflags = MM_FALSE;
+                                       mm_bool carry_out = MM_FALSE;
                                        if (d.len == 2u) {
                                            setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                        } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
                                            setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                           if (setflags) {
+                                               mm_u32 imm12 = (((d.raw >> 26) & 1u) << 11) |
+                                                              (((d.raw >> 12) & 0x7u) << 8) |
+                                                              (d.raw & 0xffu);
+                                               mm_u32 imm32 = 0;
+                                               mm_bool carry_in = (cpu.xpsr & (1u << 29)) != 0u;
+                                               mm_thumb_expand_imm12_c(imm12, carry_in, &imm32, &carry_out);
+                                           }
                                        }
                                        cpu.r[d.rd] = d.imm;
                                        if (setflags) {
                                            mm_u32 res = cpu.r[d.rd];
-                                           cpu.xpsr &= ~(0xE0000000u);
+                                           if (d.len == 2u) {
+                                               cpu.xpsr &= ~(0xC0000000u);
+                                           } else {
+                                               cpu.xpsr &= ~(0xF0000000u);
+                                           }
                                            if (res == 0u) cpu.xpsr |= (1u << 30);
                                            if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                           if (d.len == 4u && carry_out) cpu.xpsr |= (1u << 29);
                                        }
                                        break;
                         }
@@ -1532,15 +1621,15 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                         } break;
                         case MM_OP_SBCS_REG: {
                                                  mm_bool reg_form = ((d.raw & 0xfe000000u) == 0xea000000u);
-                                                 mm_bool setflags;
+                                                 mm_bool setflags = MM_FALSE;
                                                  if (reg_form) {
-                                                     setflags = (((d.raw >> 20) & 1u) != 0u) ? ((it_remaining <= 1u) ? MM_TRUE : MM_FALSE) : MM_FALSE;
+                                                     setflags = (((d.raw >> 20) & 1u) != 0u) ? MM_TRUE : MM_FALSE;
                                                      {
                                                          mm_u32 rhs = shift_reg_operand(cpu.r[d.rm], d.imm, cpu.xpsr, NULL);
                                                          cpu.r[d.rd] = mm_sbcs_reg(cpu.r[d.rn], rhs, &cpu.xpsr, setflags);
                                                      }
                                                  } else {
-                                                     setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                     setflags = MM_TRUE;
                                                      cpu.r[d.rd] = mm_sbcs_reg(cpu.r[d.rn], cpu.r[d.rm], &cpu.xpsr, setflags);
                                                  }
                                              } break;
@@ -1548,9 +1637,9 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  mm_bool reg_form = ((d.raw & 0xfe000000u) == 0xea000000u);
                                                  mm_bool setflags = MM_FALSE;
                                                  if (d.len == 2u) {
-                                                     setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                     setflags = MM_TRUE;
                                                  } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
-                                                     setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                     setflags = MM_TRUE;
                                                  }
                                                  if (reg_form) {
                                                      mm_u32 rhs = shift_reg_operand(cpu.r[d.rm], d.imm, cpu.xpsr, NULL);
@@ -1568,7 +1657,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_add_with_carry(cpu.r[d.rn], d.imm, carry_in, &res, &cflag, &vflag);
                                                 cpu.r[d.rd] = res;
                                                 if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
-                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                    setflags = MM_TRUE;
                                                 }
                                                 if (setflags) {
                                                     cpu.xpsr &= ~(0xF0000000u);

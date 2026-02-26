@@ -20,6 +20,7 @@
  */
 
 #include "m33mu/memmap.h"
+#include "m33mu/unicorn.h"
 #include "m33mu/trace.h"
 #include "m33mu/code_cache.h"
 #include <stdio.h>
@@ -448,6 +449,10 @@ mm_bool mm_memmap_write(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 add
                 memmap_read_old_bytes(map, sec, addr, size, old_bytes, &trace_flags)) {
                 mm_trace_log_mem_write(addr, size, old_bytes, trace_flags);
             }
+            if (mm_unicorn_active()) {
+                mm_unicorn_record_m33mu_write(sec, addr, size, value);
+                return MM_TRUE;
+            }
             buf = (mm_u8 *)map->ram.buffer;
             if (size == 4u) {
                 buf[offset] = (mm_u8)(value & 0xffu);
@@ -607,6 +612,10 @@ mm_bool mm_memmap_write8(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 ad
                 memmap_read_old_bytes(map, sec, addr, 1u, old_bytes, &trace_flags)) {
                 mm_trace_log_mem_write(addr, 1u, old_bytes, trace_flags);
             }
+            if (mm_unicorn_active()) {
+                mm_unicorn_record_m33mu_write(sec, addr, 1u, (mm_u32)value);
+                return MM_TRUE;
+            }
             buf = (mm_u8 *)map->ram.buffer;
             buf[offset] = value;
             if (map->code_cache != 0) {
@@ -623,4 +632,35 @@ mm_bool mm_memmap_write8(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 ad
         return MM_TRUE;
     }
     return MM_FALSE;
+}
+
+mm_bool mm_memmap_write_ram_raw(struct mm_memmap *map, mm_u32 addr, mm_u32 size, mm_u32 value)
+{
+    mm_u32 offset;
+    mm_u8 *buf;
+
+    if (map == 0 || map->ram.buffer == 0) {
+        return MM_FALSE;
+    }
+    if (!ram_offset_for_addr(map, addr, size, &offset)) {
+        return MM_FALSE;
+    }
+    buf = (mm_u8 *)map->ram.buffer;
+    if (size == 4u) {
+        buf[offset] = (mm_u8)(value & 0xffu);
+        buf[offset + 1u] = (mm_u8)((value >> 8) & 0xffu);
+        buf[offset + 2u] = (mm_u8)((value >> 16) & 0xffu);
+        buf[offset + 3u] = (mm_u8)((value >> 24) & 0xffu);
+    } else if (size == 2u) {
+        buf[offset] = (mm_u8)(value & 0xffu);
+        buf[offset + 1u] = (mm_u8)((value >> 8) & 0xffu);
+    } else if (size == 1u) {
+        buf[offset] = (mm_u8)(value & 0xffu);
+    } else {
+        return MM_FALSE;
+    }
+    if (map->code_cache != 0) {
+        mm_code_cache_note_write(map->code_cache, addr, size);
+    }
+    return MM_TRUE;
 }

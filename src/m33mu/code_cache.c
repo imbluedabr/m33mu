@@ -527,54 +527,10 @@ struct mm_tb *mm_tb_run(struct mm_tb *tb,
         mm_memmap_set_last_pc(tb->ops[i].f.pc_fetch);
         next_pc = (tb->ops[i].f.pc_fetch + tb->ops[i].f.len) | 1u;
         exec_ctx->cpu->r[15] = next_pc;
-        if (it_remaining != 0 && *it_remaining > 0u && itstate_get(exec_ctx->cpu->xpsr) == 0u) {
-            if (it_pattern) {
-                *it_pattern = 0;
-            }
-            *it_remaining = 0;
-            if (it_cond) {
-                *it_cond = 0;
-            }
-        }
-        if (it_remaining != 0 && *it_remaining > 0u && tb->ops[i].d.kind != MM_OP_IT) {
-            mm_bool cond_true = MM_FALSE;
-            mm_bool take = MM_FALSE;
-            mm_bool n = (exec_ctx->cpu->xpsr & (1u << 31)) != 0u;
-            mm_bool z = (exec_ctx->cpu->xpsr & (1u << 30)) != 0u;
-            mm_bool c = (exec_ctx->cpu->xpsr & (1u << 29)) != 0u;
-            mm_bool v = (exec_ctx->cpu->xpsr & (1u << 28)) != 0u;
-            mm_u8 cond = (it_cond != 0) ? *it_cond : 0u;
-            switch (cond) {
-            case MM_COND_EQ: cond_true = z; break;
-            case MM_COND_NE: cond_true = !z; break;
-            case MM_COND_CS: cond_true = c; break;
-            case MM_COND_CC: cond_true = !c; break;
-            case MM_COND_MI: cond_true = n; break;
-            case MM_COND_PL: cond_true = !n; break;
-            case MM_COND_VS: cond_true = v; break;
-            case MM_COND_VC: cond_true = !v; break;
-            case MM_COND_HI: cond_true = c && !z; break;
-            case MM_COND_LS: cond_true = !c || z; break;
-            case MM_COND_GE: cond_true = (n == v); break;
-            case MM_COND_LT: cond_true = (n != v); break;
-            case MM_COND_GT: cond_true = !z && (n == v); break;
-            case MM_COND_LE: cond_true = z || (n != v); break;
-            case MM_COND_AL: cond_true = MM_TRUE; break;
-            default: cond_true = MM_FALSE; break;
-            }
-            take = ((it_pattern != 0 && ((*it_pattern & 0x1u) != 0u)) ? cond_true : !cond_true);
-            execute_it = take;
-        }
+        execute_it = mm_it_should_execute(exec_ctx->cpu, &tb->ops[i].d,
+                                          it_pattern, it_remaining, it_cond);
         if (!execute_it && tb->ops[i].d.kind != MM_OP_IT) {
-            if (it_remaining != 0 && *it_remaining > 0u) {
-                mm_u8 raw = itstate_get(exec_ctx->cpu->xpsr);
-                if (it_pattern) {
-                    *it_pattern >>= 1;
-                }
-                (*it_remaining)--;
-                raw = itstate_advance(raw);
-                exec_ctx->cpu->xpsr = itstate_set(exec_ctx->cpu->xpsr, raw);
-            }
+            mm_it_advance(exec_ctx->cpu, &tb->ops[i].d, it_pattern, it_remaining, it_cond);
             ops_executed++;
             continue;
         }
@@ -601,6 +557,7 @@ struct mm_tb *mm_tb_run(struct mm_tb *tb,
                     return 0;
                 }
                 ops_executed++;
+                mm_it_advance(exec_ctx->cpu, &tb->ops[i].d, it_pattern, it_remaining, it_cond);
                 if (exec_ctx->cpu->sleeping || exec_ctx->cpu->r[15] != next_pc) {
                     if (bkpt_hit_out != 0) {
                         *bkpt_hit_out = bkpt_hit;
@@ -625,15 +582,7 @@ struct mm_tb *mm_tb_run(struct mm_tb *tb,
                 *done_out = MM_TRUE;
             }
         }
-        if (it_remaining != 0 && *it_remaining > 0u && tb->ops[i].d.kind != MM_OP_IT) {
-            mm_u8 raw = itstate_get(exec_ctx->cpu->xpsr);
-            if (it_pattern) {
-                *it_pattern >>= 1;
-            }
-            (*it_remaining)--;
-            raw = itstate_advance(raw);
-            exec_ctx->cpu->xpsr = itstate_set(exec_ctx->cpu->xpsr, raw);
-        }
+        mm_it_advance(exec_ctx->cpu, &tb->ops[i].d, it_pattern, it_remaining, it_cond);
         ops_executed++;
         if (exec_ctx->cpu->sleeping) {
             break;

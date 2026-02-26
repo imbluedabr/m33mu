@@ -23,6 +23,7 @@
 
 /* Initialize rolling trace buffer (pre-alloc). */
 void mm_trace_init(void);
+void mm_trace_reset(void);
 mm_bool mm_trace_enabled(void);
 
 /* Begin/end a per-instruction trace step. */
