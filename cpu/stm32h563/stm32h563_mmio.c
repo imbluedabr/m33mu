@@ -679,6 +679,8 @@ void mm_stm32h563_mmio_reset(void)
     mm_rcc_set_clock_list_reader(stm32h563_rcc_clock_list_line, 0);
     /* Enable HSI by default and mark ready flags. */
     rcc.regs[0] |= 1u;
+    /* RCC_AHB2ENR reset value (see STM32H563 SVD). */
+    rcc.regs[0x8c / 4u] = 0xC0000000u;
     rcc_update_ready(&rcc);
     rcc_update_sysclk(&rcc);
     iwdg.regs[IWDG_RLR / 4u] = 0x00000FFFu;
@@ -1948,6 +1950,7 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     memset(&gpdma1, 0, sizeof(gpdma1));
     memset(&gpdma2, 0, sizeof(gpdma2));
     rcc.regs[RCC_CR / 4] |= 1u;
+    rcc.regs[0x8c / 4u] = 0xC0000000u;
     rcc_update_ready(&rcc);
     rcc_update_sysclk(&rcc);
     hash_ctx[0].state = &hash_accel;

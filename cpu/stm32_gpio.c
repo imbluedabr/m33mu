@@ -109,10 +109,7 @@ mm_bool stm32_gpio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes,
     if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
     if (offset >= STM32_GPIO_REG_SIZE) return MM_FALSE;
 
-    if (ctx->clock_enabled && !ctx->clock_enabled(ctx->bank_index)) {
-        *value_out = 0;
-        return MM_TRUE;
-    }
+    /* On STM32, GPIO registers remain readable even when the clock is gated. */
 
     if (offset < sizeof(g->regs)) {
         memcpy(&v, (mm_u8 *)g->regs + offset, size_bytes);

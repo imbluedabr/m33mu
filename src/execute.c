@@ -1294,7 +1294,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                        mm_bool setflags = MM_FALSE;
                                        mm_bool carry_out = MM_FALSE;
                                        if (d.len == 2u) {
-                                           setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                           /* Thumb-1 MOVS should not clobber flags inside IT blocks. */
+                                           setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                        } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
                                            setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                            if (setflags) {

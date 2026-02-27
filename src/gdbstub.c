@@ -348,8 +348,14 @@ static size_t gdb_encode_registers(struct mm_cpu *cpu, char *out, size_t out_cap
     regs[12] = cpu->r[12];
     regs[13] = mm_cpu_get_active_sp(cpu);
     regs[14] = cpu->r[14];
-    regs[15] = cpu->r[15];
-    regs[16] = cpu->xpsr;
+    regs[15] = cpu->r[15] & ~1u;  /* strip Thumb bit; GDB PC is always an even address */
+    /* Strip EPSR.T (bit 24) and APSR.NZCVQ (bits 31-27).
+     * OpenOCD/ST-LINK does not report condition flags in the xPSR register —
+     * it returns only the structural parts (IPSR exception number, IT state,
+     * GE flags).  Matching that behaviour here avoids false co-sim divergences
+     * on every flag-setting instruction.  Execution correctness is unaffected
+     * because m33mu uses the full internal cpu->xpsr for branching logic. */
+    regs[16] = cpu->xpsr & ~0xF9000000u;
     regs[17] = cpu->msp_s;
     regs[18] = cpu->psp_s;
     regs[19] = 0; /* PRIMASK placeholder */
@@ -400,36 +406,80 @@ static mm_bool gdb_read_bytes(struct mm_memmap *map, enum mm_sec_state sec, mm_u
     return MM_TRUE;
 }
 
+static mm_bool gdb_ram_offset_for_addr(const struct mm_memmap *map, mm_u32 addr, mm_u32 size, mm_u32 *offset_out)
+{
+    mm_u32 i;
+    if (map == 0 || offset_out == 0) {
+        return MM_FALSE;
+    }
+    if (map->ram_region_count > 0u) {
+        for (i = 0; i < map->ram_region_count; ++i) {
+            const struct mm_ram_region *r = &map->ram_regions[i];
+            mm_u32 end = r->size;
+            if (addr >= r->base_s && (addr - r->base_s) + size <= end) {
+                *offset_out = map->ram_region_offsets[i] + (addr - r->base_s);
+                return MM_TRUE;
+            }
+            if (addr >= r->base_ns && (addr - r->base_ns) + size <= end) {
+                *offset_out = map->ram_region_offsets[i] + (addr - r->base_ns);
+                return MM_TRUE;
+            }
+        }
+    } else {
+        mm_u32 base = map->ram_base_s;
+        mm_u32 size_limit = map->ram_size_s;
+        if (addr >= base && (addr - base) + size <= size_limit) {
+            *offset_out = addr - base;
+            return MM_TRUE;
+        }
+        base = map->ram_base_ns;
+        size_limit = map->ram_size_ns;
+        if (addr >= base && (addr - base) + size <= size_limit) {
+            *offset_out = addr - base;
+            return MM_TRUE;
+        }
+    }
+    if (map->ram_total_size > 0u &&
+        map->ram_base_s == 0u &&
+        map->ram_base_ns == 0u &&
+        addr + size <= map->ram_total_size) {
+        *offset_out = addr;
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
 static mm_bool gdb_write_bytes(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr, const mm_u8 *src, size_t len)
 {
     size_t i;
     mm_u32 base;
     mm_u32 size;
     mm_u8 *buf;
+    mm_u32 offset;
 
     if (map == 0) {
         return MM_FALSE;
     }
 
-    /* RAM fast-path */
+    /* RAM fast-path (ignore sec state, mirror memmap RAM resolver). */
     if (map->ram.buffer != 0) {
-        if (sec == MM_NONSECURE) {
-            base = map->ram_base_ns;
-            size = map->ram_size_ns;
-        } else {
-            base = map->ram_base_s;
-            size = map->ram_size_s;
-        }
-        if (size == 0u && map->ram.length > 0u) {
-            base = map->ram.base;
-            size = (mm_u32)map->ram.length;
-        }
-        if (addr >= base && (addr - base) + len <= size) {
+        if (gdb_ram_offset_for_addr(map, addr, (mm_u32)len, &offset)) {
             buf = (mm_u8 *)map->ram.buffer;
             for (i = 0; i < len; ++i) {
-                buf[addr - base + i] = src[i];
+                buf[offset + i] = src[i];
             }
             return MM_TRUE;
+        }
+        if (map->ram.length > 0u) {
+            base = map->ram.base;
+            size = (mm_u32)map->ram.length;
+            if (addr >= base && (addr - base) + len <= size) {
+                buf = (mm_u8 *)map->ram.buffer;
+                for (i = 0; i < len; ++i) {
+                    buf[addr - base + i] = src[i];
+                }
+                return MM_TRUE;
+            }
         }
     }
 
@@ -1030,10 +1080,10 @@ void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_
                 val = cpu->r[14];
                 break;
             case 15:
-                val = cpu->r[15];
+                val = cpu->r[15] & ~1u;
                 break;
             case 16:
-                val = cpu->xpsr;
+                val = cpu->xpsr & ~0x01000000u;
                 break;
             case 17:
                 val = cpu->msp_s;
@@ -1069,6 +1119,90 @@ void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_
         } else {
             gdb_send_error(stub, 1);
         }
+    } break;
+    case 'P': {
+        /* Single register write: P<regnum>=<val>
+         * <val> is 8 hex digits, little-endian (same byte order as 'g' response). */
+        mm_u32 idx = 0;
+        const char *eq;
+        const char *vp;
+        mm_u32 val = 0;
+        int i;
+        mm_bool parse_ok = MM_TRUE;
+
+        eq = strchr(buf + 1, '=');
+        if (eq == NULL || sscanf(buf + 1, "%lx", (unsigned long *)&idx) != 1 || idx >= GDB_REG_COUNT) {
+            gdb_send_error(stub, 1);
+            break;
+        }
+        vp = eq + 1;
+        if (strlen(vp) < 8u) {
+            gdb_send_error(stub, 1);
+            break;
+        }
+        for (i = 0; i < 4; ++i) {
+            int h1 = hex_to_nibble((int)(unsigned char)vp[i * 2]);
+            int h2 = hex_to_nibble((int)(unsigned char)vp[i * 2 + 1]);
+            if (h1 < 0 || h2 < 0) {
+                parse_ok = MM_FALSE;
+                break;
+            }
+            val |= (mm_u32)((h1 << 4) | h2) << (i * 8);
+        }
+        if (!parse_ok) {
+            gdb_send_error(stub, 1);
+            break;
+        }
+        switch (idx) {
+        case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7:
+        case 8: case 9: case 10: case 11: case 12:
+            cpu->r[idx] = val;
+            break;
+        case 13:
+            /* Write to the currently-active SP shadow register */
+            if (cpu->control_s & 2u) { /* SPSEL=1: PSP active */
+                cpu->psp_s = val;
+            } else {                   /* SPSEL=0: MSP active */
+                cpu->msp_s = val;
+            }
+            break;
+        case 14:
+            cpu->r[14] = val;
+            break;
+        case 15:
+            cpu->r[15] = val | 1u; /* preserve internal Thumb bit */
+            break;
+        case 16:
+            cpu->xpsr = val | 0x01000000u; /* preserve EPSR.T */
+            break;
+        case 17:
+            cpu->msp_s = val;
+            break;
+        case 18:
+            cpu->psp_s = val;
+            break;
+        case 19:
+            /* PRIMASK placeholder — ignore */
+            break;
+        case 20:
+            cpu->control_s = val;
+            break;
+        case 21:
+            cpu->msplim_s = val;
+            break;
+        case 22:
+            cpu->psplim_s = val;
+            break;
+        case 23:
+            cpu->msplim_ns = val;
+            break;
+        case 24:
+            cpu->psplim_ns = val;
+            break;
+        default:
+            break;
+        }
+        gdb_send_ok(stub);
     } break;
     case 'm':
         gdb_handle_memory_read(stub, cpu, map, buf);

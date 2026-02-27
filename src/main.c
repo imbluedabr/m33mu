@@ -6056,6 +6056,12 @@ handle_pending:
                             mm_trace_end_step(&cpu);
                             record_window_step(&cpu, &map);
                         }
+                        if (opt_gdb) {
+                            mm_gdb_stub_maybe_rearm(&gdb, &map, cpu.sec_state, cpu.r[15]);
+                            if (mm_gdb_stub_should_step(&gdb)) {
+                                mm_gdb_stub_notify_stop(&gdb, 5);
+                            }
+                        }
                         continue;
                     }
 
@@ -6074,6 +6080,12 @@ handle_pending:
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);
                             record_window_step(&cpu, &map);
+                        }
+                        if (opt_gdb) {
+                            mm_gdb_stub_maybe_rearm(&gdb, &map, cpu.sec_state, cpu.r[15]);
+                            if (mm_gdb_stub_should_step(&gdb)) {
+                                mm_gdb_stub_notify_stop(&gdb, 5);
+                            }
                         }
                         continue;
                     }
