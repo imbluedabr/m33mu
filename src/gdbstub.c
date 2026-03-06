@@ -556,6 +556,7 @@ static void gdb_handle_memory_write(struct mm_gdb_stub *stub, struct mm_cpu *cpu
     mm_u32 addr = 0;
     mm_u32 len = 0;
     const char *data;
+    size_t data_hex_len;
     size_t i;
     mm_u8 bytes[256];
     unsigned long taddr = 0;
@@ -576,6 +577,14 @@ static void gdb_handle_memory_write(struct mm_gdb_stub *stub, struct mm_cpu *cpu
     data += 1; /* skip ':' */
     if (len > (mm_u32)(sizeof(bytes))) {
         len = (mm_u32)sizeof(bytes);
+    }
+    data_hex_len = strlen(data);
+    if (len > (mm_u32)(data_hex_len / 2u)) {
+        len = (mm_u32)(data_hex_len / 2u);
+    }
+    if (len == 0u) {
+        gdb_send_error(stub, 1);
+        return;
     }
     for (i = 0; i < len; ++i) {
         int h1;
