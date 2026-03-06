@@ -801,7 +801,6 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  }
                         case MM_OP_VCVTR_S32_F32: {
                                                       float a;
-                                                      float rounded;
                                                       if (!fpu_check_or_fault(ctx)) {
                                                           return MM_EXEC_CONTINUE;
                                                       }
@@ -809,8 +808,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                           EXEC_RAISE_UNDEF();
                                                       }
                                                       a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                      rounded = (a >= 0.0f) ? (a + 0.5f) : (a - 0.5f);
-                                                      cpu.s[d.rd] = (mm_u32)((mm_i32)rounded);
+                                                      cpu.s[d.rd] = (mm_u32)((mm_i32)nearbyintf(a));
                                                       fpu_mark_active(&cpu);
                                                       break;
                                                   }
@@ -829,7 +827,6 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  }
                         case MM_OP_VCVTR_U32_F32: {
                                                       float a;
-                                                      float rounded;
                                                       if (!fpu_check_or_fault(ctx)) {
                                                           return MM_EXEC_CONTINUE;
                                                       }
@@ -837,8 +834,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                           EXEC_RAISE_UNDEF();
                                                       }
                                                       a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                      rounded = (a >= 0.0f) ? (a + 0.5f) : (a - 0.5f);
-                                                      cpu.s[d.rd] = (mm_u32)rounded;
+                                                      cpu.s[d.rd] = (mm_u32)nearbyintf(a);
                                                       fpu_mark_active(&cpu);
                                                       break;
                                                   }

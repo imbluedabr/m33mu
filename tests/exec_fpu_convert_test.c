@@ -1,0 +1,188 @@
+/* m33mu -- an ARMv8-M Emulator
+ *
+ * Copyright (C) 2026
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#include <stdio.h>
+#include <string.h>
+
+#include "m33mu/cpu.h"
+#include "m33mu/decode.h"
+#include "m33mu/execute.h"
+#include "m33mu/fetch.h"
+#include "m33mu/memmap.h"
+#include "m33mu/scs.h"
+
+static mm_u32 f32_to_u32(float f)
+{
+    union {
+        float f;
+        mm_u32 u;
+    } v;
+
+    v.f = f;
+    return v.u;
+}
+
+static mm_bool stub_handle_pc_write(struct mm_cpu *cpu,
+                                    struct mm_memmap *map,
+                                    struct mm_scs *scs,
+                                    mm_u32 value,
+                                    mm_u8 *it_pattern,
+                                    mm_u8 *it_remaining,
+                                    mm_u8 *it_cond)
+{
+    (void)cpu;
+    (void)map;
+    (void)scs;
+    (void)value;
+    (void)it_pattern;
+    (void)it_remaining;
+    (void)it_cond;
+    return MM_TRUE;
+}
+
+static mm_bool stub_raise_mem_fault(struct mm_cpu *cpu,
+                                    struct mm_memmap *map,
+                                    struct mm_scs *scs,
+                                    mm_u32 fault_pc,
+                                    mm_u32 fault_xpsr,
+                                    mm_u32 addr,
+                                    mm_bool is_exec)
+{
+    (void)cpu;
+    (void)map;
+    (void)scs;
+    (void)fault_pc;
+    (void)fault_xpsr;
+    (void)addr;
+    (void)is_exec;
+    return MM_FALSE;
+}
+
+static mm_bool stub_raise_usage_fault(struct mm_cpu *cpu,
+                                      struct mm_memmap *map,
+                                      struct mm_scs *scs,
+                                      mm_u32 fault_pc,
+                                      mm_u32 fault_xpsr,
+                                      mm_u32 ufsr_bits)
+{
+    (void)cpu;
+    (void)map;
+    (void)scs;
+    (void)fault_pc;
+    (void)fault_xpsr;
+    (void)ufsr_bits;
+    return MM_FALSE;
+}
+
+static mm_bool stub_exc_return_unstack(struct mm_cpu *cpu,
+                                       struct mm_memmap *map,
+                                       struct mm_scs *scs,
+                                       mm_u32 exc_ret)
+{
+    (void)cpu;
+    (void)map;
+    (void)scs;
+    (void)exc_ret;
+    return MM_FALSE;
+}
+
+static mm_bool stub_enter_exception(struct mm_cpu *cpu,
+                                    struct mm_memmap *map,
+                                    struct mm_scs *scs,
+                                    mm_u32 exc_num,
+                                    mm_u32 return_pc,
+                                    mm_u32 xpsr_in)
+{
+    (void)cpu;
+    (void)map;
+    (void)scs;
+    (void)exc_num;
+    (void)return_pc;
+    (void)xpsr_in;
+    return MM_FALSE;
+}
+
+static int run_vcvtr_case(enum mm_op_kind kind, float input, mm_u32 expected, const char *name)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_gdb_stub gdb;
+    struct mm_fetch_result fetch;
+    struct mm_decoded dec;
+    struct mm_execute_ctx ctx;
+    struct mmio_region regions[1];
+    mm_u8 it_pattern = 0;
+    mm_u8 it_remaining = 0;
+    mm_u8 it_cond = 0;
+    mm_bool done = MM_FALSE;
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&map, 0, sizeof(map));
+    memset(&scs, 0, sizeof(scs));
+    memset(&gdb, 0, sizeof(gdb));
+    memset(&fetch, 0, sizeof(fetch));
+    memset(&dec, 0, sizeof(dec));
+    memset(&ctx, 0, sizeof(ctx));
+    memset(regions, 0, sizeof(regions));
+
+    mm_memmap_init(&map, regions, 1u);
+
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.s[1] = f32_to_u32(input);
+
+    scs.fpu_present = MM_TRUE;
+    scs.cpacr_s = 0x00f00000u;
+
+    dec.kind = kind;
+    dec.rd = 0u;
+    dec.rm = 1u;
+    dec.len = 4u;
+    dec.undefined = MM_FALSE;
+
+    ctx.cpu = &cpu;
+    ctx.map = &map;
+    ctx.scs = &scs;
+    ctx.gdb = &gdb;
+    ctx.fetch = &fetch;
+    ctx.dec = &dec;
+    ctx.it_pattern = &it_pattern;
+    ctx.it_remaining = &it_remaining;
+    ctx.it_cond = &it_cond;
+    ctx.done = &done;
+    ctx.handle_pc_write = stub_handle_pc_write;
+    ctx.raise_mem_fault = stub_raise_mem_fault;
+    ctx.raise_usage_fault = stub_raise_usage_fault;
+    ctx.exc_return_unstack = stub_exc_return_unstack;
+    ctx.enter_exception = stub_enter_exception;
+
+    if (mm_execute_decoded(&ctx) != MM_EXEC_OK) {
+        printf("%s: execution failed\n", name);
+        return 1;
+    }
+    if (done) {
+        printf("%s: unexpected done flag\n", name);
+        return 1;
+    }
+    if (cpu.s[0] != expected) {
+        printf("%s: got=0x%08lx expected=0x%08lx\n",
+               name,
+               (unsigned long)cpu.s[0],
+               (unsigned long)expected);
+        return 1;
+    }
+
+    return 0;
+}
+
+int main(void)
+{
+    if (run_vcvtr_case(MM_OP_VCVTR_S32_F32, 0.5f, 0u, "vcvtr_s32_f32_half_even") != 0) return 1;
+    if (run_vcvtr_case(MM_OP_VCVTR_U32_F32, 0.5f, 0u, "vcvtr_u32_f32_half_even") != 0) return 1;
+    return 0;
+}
