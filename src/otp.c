@@ -170,7 +170,7 @@ void mm_otp_init(struct mm_otp *otp, const char *target_name, mm_u32 size)
 mm_bool mm_otp_read(struct mm_otp *otp, mm_u32 offset, mm_u8 *dst, mm_u32 len)
 {
     if (otp == 0 || dst == 0 || len == 0u) return MM_FALSE;
-    if (offset + len > otp->size) return MM_FALSE;
+    if (len > otp->size || offset > otp->size - len) return MM_FALSE;
     if (!otp_load(otp)) return MM_FALSE;
     memcpy(dst, otp->data + offset, len);
     return MM_TRUE;
@@ -181,7 +181,7 @@ mm_bool mm_otp_write(struct mm_otp *otp, mm_u32 offset, const mm_u8 *src, mm_u32
     mm_u32 i;
     mm_bool changed = MM_FALSE;
     if (otp == 0 || src == 0 || len == 0u) return MM_FALSE;
-    if (offset + len > otp->size) return MM_FALSE;
+    if (len > otp->size || offset > otp->size - len) return MM_FALSE;
     if (!otp_load(otp)) return MM_FALSE;
     if (!otp->write_enabled) return MM_FALSE;
     if ((otp->flags & MM_OTP_FLAG_FINAL_LOCK) != 0u) return MM_FALSE;
