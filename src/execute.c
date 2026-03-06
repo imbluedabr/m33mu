@@ -2027,8 +2027,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                              } else {
                                                  mm_i32 dividend = (mm_i32)cpu.r[d.rn];
                                                  mm_i32 divisor = (mm_i32)divisor_u;
-                                                 mm_i32 quot = dividend / divisor;
-                                                 cpu.r[d.rd] = (mm_u32)quot;
+                                                 if (dividend == (mm_i32)0x80000000u && divisor == -1) {
+                                                     cpu.r[d.rd] = 0x80000000u;
+                                                 } else {
+                                                     mm_i32 quot = dividend / divisor;
+                                                     cpu.r[d.rd] = (mm_u32)quot;
+                                                 }
                                              }
                                          } break;
                         case MM_OP_UMULL:
