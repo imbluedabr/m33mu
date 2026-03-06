@@ -1417,7 +1417,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                if ((d.raw & 0xfc00u) == 0x4400u) {
                                                    setflags = MM_FALSE;
                                                } else {
-                                                   setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                   /* Thumb-1 ADDS aliases inside IT must not clobber flags. */
+                                                   setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                                }
                                            }
                                            if (setflags) {
@@ -1468,7 +1469,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     res = val << sh;
                                                 }
                                                 if (d.len == 2u) {
-                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                    /* Thumb-1 LSLS aliases inside IT must not clobber flags. */
+                                                    setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                                 } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
                                                     setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                 }
@@ -1588,7 +1590,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                         case MM_OP_ROR_REG: {
                                                 mm_u32 val = cpu.r[d.rn];
                                                 mm_u32 sh = cpu.r[d.rm] & 0xffu;
-                                                mm_bool setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                /* Thumb-1 RORS aliases inside IT must not clobber flags. */
+                                                mm_bool setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                                 mm_bool carry_in = (cpu.xpsr & (1u << 29)) != 0u;
                                                 mm_bool carry_out = carry_in;
                                                 mm_u32 res = mm_ror_reg_shift_c(val, sh, carry_in, &carry_out);
@@ -1676,7 +1679,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_bool setflags = MM_FALSE;
                                                 mm_bool carry_out = (cpu.xpsr & (1u << 29)) != 0u;
                                                 if (d.len == 2u) {
-                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                    /* Thumb-1 ANDS aliases inside IT must not clobber flags. */
+                                                    setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                                 } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
                                                     setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                 }
@@ -1719,7 +1723,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_bool setflags = MM_FALSE;
                                                 mm_bool carry_out = (cpu.xpsr & (1u << 29)) != 0u;
                                                 if (d.len == 2u) {
-                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                    /* Thumb-1 EORS aliases inside IT must not clobber flags. */
+                                                    setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                                 } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
                                                     setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                 }
@@ -1821,7 +1826,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_bool setflags = MM_FALSE;
                                                 mm_bool carry_out = (cpu.xpsr & (1u << 29)) != 0u;
                                                 if (d.len == 2u) {
-                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                    /* Thumb-1 ORRS aliases inside IT must not clobber flags. */
+                                                    setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                                 } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
                                                     setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                 }
@@ -1896,7 +1902,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_bool setflags = MM_FALSE;
                                                 mm_bool carry_out = (cpu.xpsr & (1u << 29)) != 0u;
                                                 if (d.len == 2u) {
-                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                    /* Thumb-1 BICS aliases inside IT must not clobber flags. */
+                                                    setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                                 } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
                                                     setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                 }
@@ -2290,6 +2297,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_bool is_tbh = (d.kind == MM_OP_TBH) ? MM_TRUE : MM_FALSE;
                                             mm_u32 rn_val;
                                             mm_u32 rm_val;
+                                            const char *tb_trace = getenv("M33MU_TB_TRACE");
 
                                             if (d.rn == 15u) {
                                                 rn_val = (f.pc_fetch + 4u) & ~1u;
@@ -2301,6 +2309,16 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             if (!mm_table_branch_target(&map, cpu.sec_state, f.pc_fetch, rn_val, rm_val, is_tbh, &target_pc, &fault_addr)) {
                                                 if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, fault_addr, MM_FALSE)) done = MM_TRUE;
                                                 return MM_EXEC_CONTINUE;
+                                            }
+                                            if (tb_trace != 0 && tb_trace[0] != '\0') {
+                                                printf("[TB_TRACE] kind=%s pc_fetch=0x%08lx rn=%u rn_val=0x%08lx rm=%u rm_val=0x%08lx target=0x%08lx\n",
+                                                       is_tbh ? "TBH" : "TBB",
+                                                       (unsigned long)f.pc_fetch,
+                                                       (unsigned)d.rn,
+                                                       (unsigned long)rn_val,
+                                                       (unsigned)d.rm,
+                                                       (unsigned long)rm_val,
+                                                       (unsigned long)target_pc);
                                             }
                                             if (!handle_pc_write(&cpu, &map, &scs, target_pc, &it_pattern, &it_remaining, &it_cond)) {
                                                 done = MM_TRUE;
@@ -2578,7 +2596,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             } break;
                         case MM_OP_MVN_REG: {
                                                 if (d.len == 2u) {
-                                                    mm_bool setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                    /* Thumb-1 MVNS aliases inside IT must not clobber flags. */
+                                                    mm_bool setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                                     mm_u32 rm_val = cpu.r[d.rm];
                                                     cpu.r[d.rd] = mm_mvn_reg(rm_val, &cpu.xpsr, setflags);
                                                 } else {
@@ -2617,7 +2636,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                         {
                                             mm_bool setflags = MM_FALSE;
                                             if (d.len == 2u) {
-                                                setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                /* Thumb-1 SUBS aliases inside IT must not clobber flags. */
+                                                setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
                                             } else if (((d.raw >> 20) & 1u) != 0u) {
                                                 setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                             }
@@ -2699,7 +2719,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 }
                                             }
                                         } else {
-                                            mm_bool setflags = (d.len == 2u) ? ((it_remaining <= 1u) ? MM_TRUE : MM_FALSE) : MM_FALSE;
+                                            mm_bool setflags = (d.len == 2u) ? ((it_remaining == 0u) ? MM_TRUE : MM_FALSE) : MM_FALSE;
                                             mm_u32 res;
                                             if (setflags) {
                                                 mm_bool cflag;
