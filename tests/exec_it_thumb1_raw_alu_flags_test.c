@@ -221,6 +221,10 @@ int main(void)
         0xff, 0x20, 0x47, 0x21, 0x3d, 0x29, 0x18, 0xbf, 0x80, 0x43, 0x18, 0xbf,
         0x01, 0x22,
     };
+    static const mm_u8 mul_reg_case[] = {
+        0x00, 0x20, 0x47, 0x21, 0x3d, 0x29, 0x18, 0xbf, 0x48, 0x43, 0x18, 0xbf,
+        0x01, 0x22,
+    };
     static const struct alu_case cases[] = {
         { "add_reg_it_flags", add_reg_case, sizeof(add_reg_case) },
         { "sub_reg_it_flags", sub_reg_case, sizeof(sub_reg_case) },
@@ -228,6 +232,7 @@ int main(void)
         { "eor_reg_it_flags", eor_reg_case, sizeof(eor_reg_case) },
         { "orr_reg_it_flags", orr_reg_case, sizeof(orr_reg_case) },
         { "bic_reg_it_flags", bic_reg_case, sizeof(bic_reg_case) },
+        { "mul_reg_it_flags", mul_reg_case, sizeof(mul_reg_case) },
     };
     size_t i;
 

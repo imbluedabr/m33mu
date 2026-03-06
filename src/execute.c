@@ -1938,9 +1938,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_u32 rhs = cpu.r[d.rm];
                                             mm_u32 res = lhs * rhs;
                                             cpu.r[d.rd] = res;
-                                            cpu.xpsr &= ~(0xC0000000u);
-                                            if (res == 0u) cpu.xpsr |= (1u << 30);
-                                            if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                            if (it_remaining == 0u) {
+                                                cpu.xpsr &= ~(0xC0000000u);
+                                                if (res == 0u) cpu.xpsr |= (1u << 30);
+                                                if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                            }
                                         } break;
                         case MM_OP_REV: {
                                             mm_u32 val = cpu.r[d.rm];
