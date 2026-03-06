@@ -123,6 +123,15 @@ static int test_yield(void)
     return 0;
 }
 
+static int test_sevl(void)
+{
+    mm_u8 bytes[] = { 0x50, 0xbf };
+    struct mm_decoded dec;
+    if (decode_from_bytes(bytes, sizeof(bytes), &dec) != 0) return 1;
+    if (dec.kind != MM_OP_NOP) return 1;
+    return 0;
+}
+
 static int test_svc(void)
 {
     mm_u8 bytes[] = { 0x01, 0xdf };
@@ -187,6 +196,7 @@ int main(void)
         { "wfe", test_wfe },
         { "sev", test_sev },
         { "yield", test_yield },
+        { "sevl", test_sevl },
         { "svc", test_svc },
         { "bkpt", test_bkpt },
         { "udf", test_udf },
