@@ -133,12 +133,18 @@ void mm_tz_exec_blxns(struct mm_cpu *cpu, mm_u32 target, mm_u32 return_addr)
                (unsigned long)cpu->psp_s,
                (unsigned long)cpu->psp_ns);
     }
-    if (cpu->tz_depth < MM_TZ_STACK_MAX) {
-        cpu->tz_ret_pc[cpu->tz_depth] = ra;
-        cpu->tz_ret_sec[cpu->tz_depth] = cpu->sec_state;
-        cpu->tz_ret_mode[cpu->tz_depth] = cpu->mode;
-        cpu->tz_depth++;
+    if (cpu->tz_depth >= MM_TZ_STACK_MAX) {
+        if (tz_trace_enabled()) {
+            printf("[TZ_BLXNS] overflow depth=%u max=%u, call aborted\n",
+                   (unsigned)cpu->tz_depth,
+                   (unsigned)MM_TZ_STACK_MAX);
+        }
+        return;
     }
+    cpu->tz_ret_pc[cpu->tz_depth] = ra;
+    cpu->tz_ret_sec[cpu->tz_depth] = cpu->sec_state;
+    cpu->tz_ret_mode[cpu->tz_depth] = cpu->mode;
+    cpu->tz_depth++;
     cpu->r[14] = MM_TZ_RET_LR_SENTINEL;
     cpu->sec_state = MM_NONSECURE;
     tz_note_ns_msp_top(cpu);

@@ -68,12 +68,46 @@ static int test_blxns_sets_lr_and_branches(void)
     return 0;
 }
 
+static int test_blxns_stack_full_aborts_transition(void)
+{
+    struct mm_cpu cpu;
+    mm_u32 i;
+    cpu_init(&cpu);
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[14] = 0x12345679u;
+    cpu.r[15] = 0x08001001u;
+    cpu.r[13] = 0x20002000u;
+    cpu.tz_depth = MM_TZ_STACK_MAX;
+    for (i = 0; i < MM_TZ_STACK_MAX; ++i) {
+        cpu.tz_ret_pc[i] = 0x10000001u + (i << 1);
+        cpu.tz_ret_sec[i] = MM_SECURE;
+        cpu.tz_ret_mode[i] = MM_THREAD;
+    }
+
+    mm_tz_exec_blxns(&cpu, 0x08000200u, 0x0c000123u);
+
+    if (cpu.sec_state != MM_SECURE) return 1;
+    if (cpu.mode != MM_THREAD) return 1;
+    if (cpu.r[14] != 0x12345679u) return 1;
+    if (cpu.r[15] != 0x08001001u) return 1;
+    if (cpu.r[13] != 0x20002000u) return 1;
+    if (cpu.tz_depth != MM_TZ_STACK_MAX) return 1;
+    for (i = 0; i < MM_TZ_STACK_MAX; ++i) {
+        if (cpu.tz_ret_pc[i] != (0x10000001u + (i << 1))) return 1;
+        if (cpu.tz_ret_sec[i] != MM_SECURE) return 1;
+        if (cpu.tz_ret_mode[i] != MM_THREAD) return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "sg_ns_to_s", test_sg_ns_to_s },
         { "bxns_s_to_ns", test_bxns_s_to_ns },
         { "blxns_sets_lr_and_branches", test_blxns_sets_lr_and_branches },
+        { "blxns_stack_full_aborts_transition", test_blxns_stack_full_aborts_transition },
     };
     int failures = 0;
     int i;
