@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#define USE_LIBTPMS 1
 #define mm_tpm_tis_parse_spec test_mm_tpm_tis_parse_spec
 #define mm_tpm_tis_register_cfg test_mm_tpm_tis_register_cfg
 #define mm_tpm_tis_reset_all test_mm_tpm_tis_reset_all

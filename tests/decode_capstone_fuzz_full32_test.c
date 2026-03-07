@@ -322,6 +322,14 @@ static int capstone_should_skip(const char *mnemonic, const char *op_str)
         }
     }
 
+    /* LDRD/STRD with PC base: Capstone decodes post-index [pc] forms that are
+     * UNPREDICTABLE/undefined for M-profile; m33mu correctly rejects these. */
+    if (strcmp(mnemonic, "ldrd") == 0 || strcmp(mnemonic, "strd") == 0) {
+        if (strstr(op_str, "[pc") != 0 || strstr(op_str, "[PC") != 0) {
+            return 1;
+        }
+    }
+
     /* STC/STCL/STC2/STC2L with PC: UNPREDICTABLE per ARM spec but Capstone decodes */
     /* Also skip coprocessor 10/11 (FP/NEON) - these redirect to VFP/NEON space or UNDEFINED */
     if (strcmp(mnemonic, "stc") == 0 || strcmp(mnemonic, "stcl") == 0 ||

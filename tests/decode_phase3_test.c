@@ -160,6 +160,26 @@ static int test_clrex(void)
     return 0;
 }
 
+static int test_strd_postindex_zero_decode(void)
+{
+    struct mm_decoded dec;
+    if (decode_insn(0xe860u, 0x0000u, &dec) != 0) return 1; /* strd r0, r0, [r0], #-0 */
+    if (dec.kind != MM_OP_STRD) return 1;
+    if (dec.rn != 0u || dec.rd != 0u || dec.rm != 0u) return 1;
+    if ((dec.imm & 0x40000000u) == 0u) return 1;
+    if ((dec.imm & 0x20000000u) != 0u) return 1;
+    return 0;
+}
+
+static int test_strd_postindex_pc_base_undefined(void)
+{
+    struct mm_decoded dec;
+    if (decode_insn(0xe86fu, 0x0000u, &dec) != 0) return 1; /* strd r0, r0, [pc], #-0 */
+    if (dec.kind != MM_OP_UNDEFINED) return 1;
+    if (dec.rn != 15u) return 1;
+    return 0;
+}
+
 static int test_dsb_dmb_isb(void)
 {
     struct mm_decoded dec;
@@ -502,6 +522,8 @@ int main(void)
         { "ldrex", test_ldrex },
         { "strex", test_strex },
         { "clrex", test_clrex },
+        { "strd_postindex_zero", test_strd_postindex_zero_decode },
+        { "strd_postindex_pc_base_undefined", test_strd_postindex_pc_base_undefined },
         { "dsb_dmb_isb", test_dsb_dmb_isb },
         { "msr_psr_fields_decode", test_msr_psr_fields_decode },
         { "sxtb_w_decode", test_sxtb_w_decode },

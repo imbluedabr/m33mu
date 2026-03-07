@@ -1434,7 +1434,7 @@ static struct mm_decoded decode_32(mm_u32 insn)
     /* LDRD/STRD (immediate)
      *
      * Thumb‑2 encoding T1/T2 layout (Armv8‑M):
-     *   hw1: 1110 1001 0 PUW Rn Rt<15:12>
+     *   hw1: 1110 100x 0 PUW Rn Rt<15:12>
      *   hw2: Rt2<15:12> imm4<11:8> imm8<7:0>
      *
      * In the assembled 32‑bit word, Rt is in bits 12..15 and Rt2 is in bits 8..11.
@@ -1442,7 +1442,8 @@ static struct mm_decoded decode_32(mm_u32 insn)
      * the second register where the first should go (and vice‑versa), corrupting
      * stacked frames for the RTOS test.  Swap the fields to match the architecture.
      */
-    if ((insn & 0xff400000u) == 0xe9400000u) {
+    if ((insn & 0xfe400000u) == 0xe8400000u &&
+        (insn & 0xfff0ffe0u) != 0xe8d0f000u) {
         mm_bool load = ((insn >> 20) & 1u) != 0u;
         mm_bool u = ((insn >> 23) & 1u) != 0u;
         mm_bool w = ((insn >> 21) & 1u) != 0u;
