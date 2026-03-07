@@ -123,7 +123,7 @@ static void gdb_send_packet(int fd, const char *payload)
     ssize_t w;
 
     buf[pos++] = '$';
-    for (i = 0; i < len && pos < sizeof(buf) - 4; ++i) {
+    for (i = 0; i < len && pos < sizeof(buf) - 3; ++i) {
         buf[pos++] = payload[i];
         csum += (unsigned char)payload[i];
     }

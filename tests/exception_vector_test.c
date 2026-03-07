@@ -80,10 +80,46 @@ static int test_vtor_banks_select_different_handlers(void)
     return 0;
 }
 
+static int test_unaligned_vtor_flash_fallback(void)
+{
+    struct mm_memmap map;
+    struct mmio_region regions[4];
+    struct mm_target_cfg cfg;
+    struct mm_scs scs;
+    mm_u8 flash[0x80];
+    mm_u32 handler = 0;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flash_base_s = 0;
+    cfg.flash_size_s = sizeof(flash);
+    cfg.flash_base_ns = 0;
+    cfg.flash_size_ns = sizeof(flash);
+    cfg.ram_base_s = cfg.ram_base_ns = 0;
+    cfg.ram_size_s = cfg.ram_size_ns = 0;
+    memset(flash, 0, sizeof(flash));
+
+    write32(flash, 1u + (15u * 4u), 0x12345679u);
+
+    mm_memmap_init(&map, regions, 4);
+    if (!mm_memmap_configure_flash(&map, &cfg, flash, MM_TRUE)) return 1;
+    if (!mm_memmap_configure_flash(&map, &cfg, flash, MM_FALSE)) return 1;
+    map.flash.base = 0;
+    map.flash.length = sizeof(flash);
+
+    mm_scs_init(&scs, 0);
+    scs.vtor_s = 1u;
+    scs.vtor_ns = 0u;
+
+    if (!mm_exception_read_handler(&map, &scs, MM_SECURE, MM_VECT_SYSTICK, &handler)) return 1;
+    if (handler != 0x12345679u) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "vtor_banks_select_handlers", test_vtor_banks_select_different_handlers },
+        { "unaligned_vtor_flash_fallback", test_unaligned_vtor_flash_fallback },
     };
     int failures = 0;
     int i;

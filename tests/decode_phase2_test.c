@@ -132,6 +132,15 @@ static int test_sevl(void)
     return 0;
 }
 
+static int test_undefined_hint_zero_mask_nop(void)
+{
+    mm_u8 bytes[] = { 0x60, 0xbf };
+    struct mm_decoded dec;
+    if (decode_from_bytes(bytes, sizeof(bytes), &dec) != 0) return 1;
+    if (dec.kind != MM_OP_NOP) return 1;
+    return 0;
+}
+
 static int test_svc(void)
 {
     mm_u8 bytes[] = { 0x01, 0xdf };
@@ -197,6 +206,7 @@ int main(void)
         { "sev", test_sev },
         { "yield", test_yield },
         { "sevl", test_sevl },
+        { "undefined_hint_zero_mask_nop", test_undefined_hint_zero_mask_nop },
         { "svc", test_svc },
         { "bkpt", test_bkpt },
         { "udf", test_udf },

@@ -128,7 +128,9 @@ MM_INLINE mm_bool decode_16_control(mm_u16 hw1, struct mm_decoded *d)
         return MM_TRUE;
     }
 
-    /* Hints: YIELD/WFE/WFI/SEV/SEVL (low nibble must be 0) */
+    /* Hints: any 0xbfX0 encoding acts as a hint/NOP and must not fall through
+     * into the IT decoder with a zero mask. Recognized hints get dedicated kinds;
+     * the remaining architecturally undefined hint slots execute as NOPs. */
     if ((hw1 & 0xff0fu) == 0xbf00u) {
         mm_u8 op = (mm_u8)(hw1 & 0x00f0u);
         if (op == 0x10u) {
@@ -141,11 +143,11 @@ MM_INLINE mm_bool decode_16_control(mm_u16 hw1, struct mm_decoded *d)
             d->kind = MM_OP_SEV;
         } else if (op == 0x50u) {
             d->kind = MM_OP_NOP;
+        } else {
+            d->kind = MM_OP_NOP;
         }
-        if (d->kind != MM_OP_UNDEFINED) {
-            d->undefined = MM_FALSE;
-            return MM_TRUE;
-        }
+        d->undefined = MM_FALSE;
+        return MM_TRUE;
     }
 
     /* CPSIE/CPSID (only I-bit handled); pattern 1011 0110 I 10 0 0 im[2:0] */

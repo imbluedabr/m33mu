@@ -870,6 +870,14 @@ static void ta100_cmd_genkey(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_l
 #endif
 
 #ifdef M33MU_HAS_WOLFSSL
+    if (ta->nv_data == 0) {
+        ta->rsp_buf[0] = TA100_STATUS_EXEC_ERROR;
+        ta->rsp_len = 1;
+        crc = ta100_calculate_crc(ta->rsp_buf, ta->rsp_len);
+        ta->rsp_buf[ta->rsp_len++] = (mm_u8)(crc >> 8);
+        ta->rsp_buf[ta->rsp_len++] = (mm_u8)(crc & 0xFF);
+        return;
+    }
     if (!ta->rng_initialized) {
         ret = wc_InitRng(&ta->rng);
         if (ret != 0) {
@@ -978,6 +986,15 @@ static void ta100_cmd_sign(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len
         ta->rsp_buf[0] = TA100_STATUS_SUCCESS;
         memcpy(&ta->rsp_buf[1], sig, sizeof(sig));
         ta->rsp_len = 1 + (mm_u32)sizeof(sig);
+        crc = ta100_calculate_crc(ta->rsp_buf, ta->rsp_len);
+        ta->rsp_buf[ta->rsp_len++] = (mm_u8)(crc >> 8);
+        ta->rsp_buf[ta->rsp_len++] = (mm_u8)(crc & 0xFF);
+        return;
+    }
+
+    if (ta->nv_data == 0) {
+        ta->rsp_buf[0] = TA100_STATUS_EXEC_ERROR;
+        ta->rsp_len = 1;
         crc = ta100_calculate_crc(ta->rsp_buf, ta->rsp_len);
         ta->rsp_buf[ta->rsp_len++] = (mm_u8)(crc >> 8);
         ta->rsp_buf[ta->rsp_len++] = (mm_u8)(crc & 0xFF);

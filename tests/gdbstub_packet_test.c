@@ -1,0 +1,65 @@
+/* m33mu -- an ARMv8-M Emulator
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "../src/gdbstub.c"
+
+static int test_gdb_send_packet_keeps_full_1020_char_payload(void)
+{
+    int fds[2];
+    char payload[1021];
+    char out[1032];
+    ssize_t n;
+    size_t i;
+    unsigned char csum = 0;
+
+    if (pipe(fds) != 0) {
+        printf("gdbstub_packet_test: pipe failed\n");
+        return 1;
+    }
+
+    for (i = 0; i < 1020u; ++i) {
+        payload[i] = (char)((i & 1u) ? 'b' : 'a');
+        csum += (unsigned char)payload[i];
+    }
+    payload[1020] = '\0';
+
+    gdb_send_packet(fds[1], payload);
+    close(fds[1]);
+    n = read(fds[0], out, sizeof(out));
+    close(fds[0]);
+
+    if (n != 1024) {
+        printf("gdbstub_packet_test: packet len=%ld expected=1024\n", (long)n);
+        return 1;
+    }
+    if (out[0] != '$') {
+        printf("gdbstub_packet_test: missing packet prefix\n");
+        return 1;
+    }
+    if (memcmp(out + 1, payload, 1020u) != 0) {
+        printf("gdbstub_packet_test: payload truncated or corrupted\n");
+        return 1;
+    }
+    if (out[1021] != '#') {
+        printf("gdbstub_packet_test: missing checksum separator\n");
+        return 1;
+    }
+    if (out[1022] != nibble_to_hex((mm_u8)((csum >> 4) & 0x0fu)) ||
+        out[1023] != nibble_to_hex((mm_u8)(csum & 0x0fu))) {
+        printf("gdbstub_packet_test: checksum mismatch\n");
+        return 1;
+    }
+    return 0;
+}
+
+int main(void)
+{
+    if (test_gdb_send_packet_keeps_full_1020_char_payload() != 0) return 1;
+    return 0;
+}

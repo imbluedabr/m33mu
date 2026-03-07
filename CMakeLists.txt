@@ -261,6 +261,7 @@ if(M33MU_ENABLE_WOLFSSL)
     set_target_properties(wolfssl::wolfssl PROPERTIES
       IMPORTED_LOCATION "${WOLFSSL_LIBRARY}"
       INTERFACE_INCLUDE_DIRECTORIES "${WOLFSSL_INCLUDE_DIR}"
+      INTERFACE_LINK_LIBRARIES "m"
     )
   else()
     list(APPEND M33MU_CONFIG_WARNINGS
@@ -519,6 +520,9 @@ if(M33MU_BUILD_TESTS)
     )
     if("${test_name}" STREQUAL "decode_capstone_fuzz_full32_test")
       set_tests_properties("${test_name}" PROPERTIES DISABLED TRUE)
+    endif()
+    if("${test_name}" STREQUAL "ta100_nv_null_test")
+      target_link_libraries("${test_name}" PRIVATE m)
     endif()
   endforeach()
 endif()

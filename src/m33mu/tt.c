@@ -77,8 +77,8 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
         mm_bool unpriv_write = (ap == 0x1u);
         mm_bool unpriv_read = (ap == 0x1u) || (ap == 0x3u);
         
-        /* Determine effective permissions based on forceunpriv flag */
-        if (forceunpriv || !(cpu->xpsr & (1u << 0))) {  /* Unprivileged or forced unpriv */
+        /* Determine effective permissions based on forceunpriv flag. */
+        if (forceunpriv || !mm_cpu_get_privileged(cpu)) {
             result |= (unpriv_read ? (1u << 16) : 0);   /* R bit */
             result |= (unpriv_write ? (1u << 17) : 0);  /* RW bit */
         } else {  /* Privileged */

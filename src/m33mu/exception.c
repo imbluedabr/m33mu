@@ -20,6 +20,7 @@
  */
 
 #include "m33mu/exception.h"
+#include <string.h>
 
 mm_bool mm_exception_read_handler(const struct mm_memmap *map,
                                   const struct mm_scs *scs,
@@ -42,8 +43,10 @@ mm_bool mm_exception_read_handler(const struct mm_memmap *map,
     if (map->flash.buffer != 0 &&
         vtor >= map->flash.base &&
         (vtor - map->flash.base) + (((mm_u32)index + 1u) * 4u) <= map->flash.length) {
-        const mm_u32 *p = (const mm_u32 *)(map->flash.buffer + (vtor - map->flash.base));
-        *handler_out = p[(mm_u32)index];
+        mm_u32 entry;
+        size_t offset = (size_t)(vtor - map->flash.base) + ((size_t)(mm_u32)index * 4u);
+        memcpy(&entry, map->flash.buffer + offset, sizeof(entry));
+        *handler_out = entry;
         return MM_TRUE;
     }
 
