@@ -234,14 +234,34 @@ static void tpm_nv_sanitize(char *out, size_t out_len, const char *name)
 static void tpm_nv_path(char *out, size_t out_len, const struct tpm_nv_store *nv, const char *name)
 {
     char clean[96];
+    size_t pos = 0;
+    size_t n = 0;
     tpm_nv_sanitize(clean, sizeof(clean), name);
-    if (nv->base[0] == '\0') {
-        sprintf(out, "%s", clean);
-    } else {
-        sprintf(out, "%s.%s", nv->base, clean);
+    if (out == 0 || out_len == 0u || nv == 0) {
+        return;
     }
-    if (out_len > 0) {
-        out[out_len - 1u] = '\0';
+    out[0] = '\0';
+    if (nv->base[0] != '\0') {
+        n = strlen(nv->base);
+        if (n > out_len - 1u) {
+            n = out_len - 1u;
+        }
+        memcpy(out, nv->base, n);
+        pos = n;
+        out[pos] = '\0';
+        if (pos + 1u < out_len) {
+            out[pos++] = '.';
+            out[pos] = '\0';
+        }
+    }
+    if (pos < out_len - 1u) {
+        n = strlen(clean);
+        if (n > (out_len - 1u - pos)) {
+            n = out_len - 1u - pos;
+        }
+        memcpy(out + pos, clean, n);
+        pos += n;
+        out[pos] = '\0';
     }
 }
 
