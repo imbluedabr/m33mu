@@ -31,7 +31,7 @@ mm_bool mm_snapshot_write(struct mm_snapshot_writer *w, const void *data, mm_u32
     if (w == 0 || data == 0 || len == 0u) {
         return MM_FALSE;
     }
-    if (w->used + len > w->size) {
+    if (len > w->size || w->used > w->size - len) {
         return MM_FALSE;
     }
     memcpy(w->buf + w->used, data, len);
@@ -81,7 +81,7 @@ mm_bool mm_snapshot_read(struct mm_snapshot_reader *r, void *data, mm_u32 len)
     if (r == 0 || data == 0 || len == 0u) {
         return MM_FALSE;
     }
-    if (r->offset + len > r->size) {
+    if (len > r->size || r->offset > r->size - len) {
         return MM_FALSE;
     }
     memcpy(data, r->buf + r->offset, len);
@@ -103,7 +103,7 @@ mm_bool mm_snapshot_reader_begin_section(struct mm_snapshot_reader *r, struct mm
     if (!mm_snapshot_read_u32(r, &len)) {
         return MM_FALSE;
     }
-    if (r->offset + len > r->size) {
+    if (len > r->size || r->offset > r->size - len) {
         return MM_FALSE;
     }
     section_out->buf = r->buf + r->offset;
@@ -118,7 +118,7 @@ mm_bool mm_snapshot_skip(struct mm_snapshot_reader *r, mm_u32 len)
     if (r == 0) {
         return MM_FALSE;
     }
-    if (r->offset + len > r->size) {
+    if (len > r->size || r->offset > r->size - len) {
         return MM_FALSE;
     }
     r->offset += len;
