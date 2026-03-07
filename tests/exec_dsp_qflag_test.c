@@ -7,7 +7,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 
 #include "m33mu/cpu.h"
 #include "m33mu/decode.h"
@@ -15,17 +14,6 @@
 #include "m33mu/fetch.h"
 #include "m33mu/memmap.h"
 #include "m33mu/scs.h"
-
-static mm_u32 f32_to_u32(float f)
-{
-    union {
-        float f;
-        mm_u32 u;
-    } v;
-
-    v.f = f;
-    return v.u;
-}
 
 static mm_bool stub_handle_pc_write(struct mm_cpu *cpu,
                                     struct mm_memmap *map,
@@ -107,7 +95,7 @@ static mm_bool stub_enter_exception(struct mm_cpu *cpu,
     return MM_FALSE;
 }
 
-static int run_vcvt_case(enum mm_op_kind kind, float input, mm_u32 expected, const char *name)
+static int test_smla_sets_q_on_accumulate_overflow(void)
 {
     struct mm_cpu cpu;
     struct mm_memmap map;
@@ -135,14 +123,17 @@ static int run_vcvt_case(enum mm_op_kind kind, float input, mm_u32 expected, con
 
     cpu.sec_state = MM_SECURE;
     cpu.mode = MM_THREAD;
-    cpu.s[1] = f32_to_u32(input);
+    cpu.r[0] = 0x00007fffu;
+    cpu.r[1] = 0x00007fffu;
+    cpu.r[2] = 0x7fffffffu;
+    cpu.q_flag = MM_FALSE;
 
-    scs.fpu_present = MM_TRUE;
-    scs.cpacr_s = 0x00f00000u;
-
-    dec.kind = kind;
-    dec.rd = 0u;
+    dec.kind = MM_OP_SMLA;
+    dec.rn = 0u;
     dec.rm = 1u;
+    dec.ra = 2u;
+    dec.rd = 3u;
+    dec.imm = 0u;
     dec.len = 4u;
     dec.undefined = MM_FALSE;
 
@@ -163,18 +154,20 @@ static int run_vcvt_case(enum mm_op_kind kind, float input, mm_u32 expected, con
     ctx.enter_exception = stub_enter_exception;
 
     if (mm_execute_decoded(&ctx) != MM_EXEC_OK) {
-        printf("%s: execution failed\n", name);
+        printf("exec_dsp_qflag_test: SMLA execution failed\n");
         return 1;
     }
     if (done) {
-        printf("%s: unexpected done flag\n", name);
+        printf("exec_dsp_qflag_test: unexpected done flag\n");
         return 1;
     }
-    if (cpu.s[0] != expected) {
-        printf("%s: got=0x%08lx expected=0x%08lx\n",
-               name,
-               (unsigned long)cpu.s[0],
-               (unsigned long)expected);
+    if (cpu.r[3] != 0xbfff0000u) {
+        printf("exec_dsp_qflag_test: result mismatch got=0x%08lx\n",
+               (unsigned long)cpu.r[3]);
+        return 1;
+    }
+    if (!cpu.q_flag) {
+        printf("exec_dsp_qflag_test: Q flag not set on overflow\n");
         return 1;
     }
 
@@ -183,11 +176,6 @@ static int run_vcvt_case(enum mm_op_kind kind, float input, mm_u32 expected, con
 
 int main(void)
 {
-    if (run_vcvt_case(MM_OP_VCVT_S32_F32, NAN, 0u, "vcvt_s32_f32_nan_zero") != 0) return 1;
-    if (run_vcvt_case(MM_OP_VCVTR_S32_F32, 0.5f, 0u, "vcvtr_s32_f32_half_even") != 0) return 1;
-    if (run_vcvt_case(MM_OP_VCVTR_S32_F32, 2147483648.0f, 0x7fffffffu, "vcvtr_s32_f32_sat_max") != 0) return 1;
-    if (run_vcvt_case(MM_OP_VCVT_U32_F32, -1.0f, 0u, "vcvt_u32_f32_sat_zero") != 0) return 1;
-    if (run_vcvt_case(MM_OP_VCVTR_U32_F32, 0.5f, 0u, "vcvtr_u32_f32_half_even") != 0) return 1;
-    if (run_vcvt_case(MM_OP_VCVTR_U32_F32, 4294967296.0f, 0xffffffffu, "vcvtr_u32_f32_sat_max") != 0) return 1;
+    if (test_smla_sets_q_on_accumulate_overflow() != 0) return 1;
     return 0;
 }

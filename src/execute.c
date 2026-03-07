@@ -209,6 +209,40 @@ static mm_u32 fpu_f32_to_u32(float f)
     return u.u;
 }
 
+static mm_u32 fpu_vcvt_s32_from_f32(float a, mm_bool round)
+{
+    double v;
+
+    if (a != a) {
+        return 0u;
+    }
+    v = round ? (double)nearbyintf(a) : (double)truncf(a);
+    if (v > 2147483647.0) {
+        return 0x7fffffffu;
+    }
+    if (v < -2147483648.0) {
+        return 0x80000000u;
+    }
+    return (mm_u32)(mm_i32)v;
+}
+
+static mm_u32 fpu_vcvt_u32_from_f32(float a, mm_bool round)
+{
+    double v;
+
+    if (a != a) {
+        return 0u;
+    }
+    v = round ? (double)nearbyintf(a) : (double)truncf(a);
+    if (v <= 0.0) {
+        return 0u;
+    }
+    if (v > 4294967295.0) {
+        return 0xffffffffu;
+    }
+    return (mm_u32)v;
+}
+
 static mm_u32 fpu_vmov_imm_to_u32(mm_u8 imm8)
 {
     mm_u32 sign = (mm_u32)((imm8 >> 7) & 0x1u);
@@ -791,14 +825,14 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                      if (!fpu_check_or_fault(ctx)) {
                                                          return MM_EXEC_CONTINUE;
                                                      }
-                                                     if (d.rd >= 32u || d.rm >= 32u) {
-                                                         EXEC_RAISE_UNDEF();
-                                                     }
-                                                     a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                     cpu.s[d.rd] = (mm_u32)((mm_i32)a);
-                                                     fpu_mark_active(&cpu);
-                                                     break;
-                                                 }
+                                                      if (d.rd >= 32u || d.rm >= 32u) {
+                                                          EXEC_RAISE_UNDEF();
+                                                      }
+                                                      a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                                      cpu.s[d.rd] = fpu_vcvt_s32_from_f32(a, MM_FALSE);
+                                                      fpu_mark_active(&cpu);
+                                                      break;
+                                                  }
                         case MM_OP_VCVTR_S32_F32: {
                                                       float a;
                                                       if (!fpu_check_or_fault(ctx)) {
@@ -808,7 +842,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                           EXEC_RAISE_UNDEF();
                                                       }
                                                       a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                      cpu.s[d.rd] = (mm_u32)((mm_i32)nearbyintf(a));
+                                                      cpu.s[d.rd] = fpu_vcvt_s32_from_f32(a, MM_TRUE);
                                                       fpu_mark_active(&cpu);
                                                       break;
                                                   }
@@ -817,14 +851,14 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                      if (!fpu_check_or_fault(ctx)) {
                                                          return MM_EXEC_CONTINUE;
                                                      }
-                                                     if (d.rd >= 32u || d.rm >= 32u) {
-                                                         EXEC_RAISE_UNDEF();
-                                                     }
-                                                     a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                     cpu.s[d.rd] = (mm_u32)a;
-                                                     fpu_mark_active(&cpu);
-                                                     break;
-                                                 }
+                                                      if (d.rd >= 32u || d.rm >= 32u) {
+                                                          EXEC_RAISE_UNDEF();
+                                                      }
+                                                      a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                                      cpu.s[d.rd] = fpu_vcvt_u32_from_f32(a, MM_FALSE);
+                                                      fpu_mark_active(&cpu);
+                                                      break;
+                                                  }
                         case MM_OP_VCVTR_U32_F32: {
                                                       float a;
                                                       if (!fpu_check_or_fault(ctx)) {
@@ -834,7 +868,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                           EXEC_RAISE_UNDEF();
                                                       }
                                                       a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                      cpu.s[d.rd] = (mm_u32)nearbyintf(a);
+                                                      cpu.s[d.rd] = fpu_vcvt_u32_from_f32(a, MM_TRUE);
                                                       fpu_mark_active(&cpu);
                                                       break;
                                                   }
@@ -2081,8 +2115,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_i32 rn_half = (mm_i16)(((d.imm & 0x2u) != 0u) ? (rn_val >> 16) : (rn_val & 0xffffu));
                                             mm_i32 rm_half = (mm_i16)(((d.imm & 0x1u) != 0u) ? (rm_val >> 16) : (rm_val & 0xffffu));
                                             mm_i32 prod = rn_half * rm_half;
-                                            mm_i32 acc = prod + (mm_i32)cpu.r[d.ra];
+                                            mm_i64 acc64 = (mm_i64)prod + (mm_i64)(mm_i32)cpu.r[d.ra];
+                                            mm_i32 acc = (mm_i32)acc64;
                                             cpu.r[d.rd] = (mm_u32)acc;
+                                            if (acc64 != (mm_i64)acc) {
+                                                cpu.q_flag = MM_TRUE;
+                                            }
                                         } break;
                         case MM_OP_MLS: {
                                             mm_u32 prod = cpu.r[d.rn] * cpu.r[d.rm];
