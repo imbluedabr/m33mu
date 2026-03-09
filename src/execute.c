@@ -1361,7 +1361,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                         case MM_OP_ADD_IMM:
                                        /* TODO: check the boundaries of memory of the operators */
                                        {
+                                           mm_u32 lhs = cpu.r[d.rn];
                                            mm_bool setflags = MM_FALSE;
+                                       if (d.len == 4u && d.rn == 15u) {
+                                           /* ADD (immediate) with PC base is the ADR form. */
+                                           lhs = (f.pc_fetch + 4u) & ~3u;
+                                       }
                                        if (d.len == 2u) {
                                            /* Thumb-1 ADD (imm) behaves better if it does not clobber flags inside IT. */
                                            setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
@@ -1372,7 +1377,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                mm_u32 res;
                                                mm_bool cflag;
                                                mm_bool vflag;
-                                               mm_add_with_carry(cpu.r[d.rn], d.imm, MM_FALSE, &res, &cflag, &vflag);
+                                               mm_add_with_carry(lhs, d.imm, MM_FALSE, &res, &cflag, &vflag);
                                                cpu.r[d.rd] = res;
                                                cpu.xpsr &= ~(0xF0000000u);
                                                if (res == 0u) cpu.xpsr |= (1u << 30);
@@ -1380,7 +1385,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                if (cflag) cpu.xpsr |= (1u << 29);
                                                if (vflag) cpu.xpsr |= (1u << 28);
                                            } else {
-                                               cpu.r[d.rd] = cpu.r[d.rn] + d.imm;
+                                               cpu.r[d.rd] = lhs + d.imm;
                                            }
                                            if (d.rd == 13u) {
                                                EXEC_SET_SP(cpu.r[13]);
