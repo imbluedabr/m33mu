@@ -31,7 +31,17 @@ extern uint32_t _ebss;
 extern uint32_t _estack;
 extern void __libc_init_array(void);
 
-/* int ISA_SWEEPER_Run(void); */
+#ifdef ISA_SWEEPER
+int ISA_SWEEPER_Run(void);
+typedef struct {
+    uint32_t pc;
+    uint32_t insn;
+    uint32_t cfsr;
+    uint32_t hfsr;
+    uint32_t lr_exc_return;
+} IsaSweeperFault;
+const volatile IsaSweeperFault *ISA_SWEEPER_GetFaultLog(uint32_t *count_out);
+#endif
 
 #define SYSCLK_HZ 64000000u
 
@@ -164,7 +174,26 @@ static void tests(void)
         global_counter += 1u;
     }
 
-    /* ISA sweeper disabled for now */
+#ifdef ISA_SWEEPER
+    {
+        uint32_t i;
+        uint32_t count = 0;
+        int undef_hits = ISA_SWEEPER_Run();
+        const volatile IsaSweeperFault *faults = ISA_SWEEPER_GetFaultLog(&count);
+
+        printf("ISA sweeper undef hits: %d\r\n", undef_hits);
+        printf("ISA sweeper fault count: %lu\r\n", (unsigned long)count);
+        for (i = 0; i < count; ++i) {
+            printf("ISA fault[%lu] pc=%08lx insn=%08lx cfsr=%08lx hfsr=%08lx lr=%08lx\r\n",
+                   (unsigned long)i,
+                   (unsigned long)faults[i].pc,
+                   (unsigned long)faults[i].insn,
+                   (unsigned long)faults[i].cfsr,
+                   (unsigned long)faults[i].hfsr,
+                   (unsigned long)faults[i].lr_exc_return);
+        }
+    }
+#endif
 }
 
 static void gpio_config_usart3_pd8_pd9(void)
@@ -771,6 +800,7 @@ void Reset_Handler(void)
     main();
 }
 
+#ifndef ISA_SWEEPER
 void HardFault_Handler(void)
 {
     __asm volatile("bkpt #0x7e");
@@ -786,3 +816,4 @@ void UsageFault_Handler(void)
         /* stay here */
     }
 }
+#endif

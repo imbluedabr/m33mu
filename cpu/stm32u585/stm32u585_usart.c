@@ -44,6 +44,7 @@
 #define CR1_TXEIE (1u << 7)
 
 #define ISR_RXNE (1u << 5)
+#define ISR_TC   (1u << 6)
 #define ISR_TXE  (1u << 7)
 #define ISR_TEACK (1u << 21)
 #define ISR_REACK (1u << 22)
@@ -112,6 +113,7 @@ static void ensure_enabled(struct usart_inst *u)
         if (mm_uart_io_open(&u->io, u->base)) {
             /* Mark TXE empty */
             u->regs[USART_ISR / 4] |= ISR_TXE;
+            u->regs[USART_ISR / 4] |= ISR_TC;
             if (mm_tui_is_active()) {
                 mm_tui_attach_uart(u->label, u->io.name);
             }
@@ -162,8 +164,8 @@ static mm_bool usart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
         return MM_TRUE;
     }
     if (offset == USART_ISR) {
-        /* Keep TXE set so firmware polls see the line idle immediately. */
-        u->regs[USART_ISR / 4] |= ISR_TXE;
+        /* Keep TXE/TC set so firmware polls see the line idle immediately. */
+        u->regs[USART_ISR / 4] |= ISR_TXE | ISR_TC;
         usart_update_ack(u);
     }
     memcpy(value_out, (mm_u8 *)u->regs + offset, size_bytes);
@@ -200,9 +202,9 @@ static mm_bool usart_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
             }
         }
         mm_uart_io_queue_tx(&u->io, (mm_u8)value);
-        u->regs[USART_ISR / 4] &= ~ISR_TXE;
+        u->regs[USART_ISR / 4] &= ~(ISR_TXE | ISR_TC);
         if (mm_uart_io_flush(&u->io) && mm_uart_io_tx_empty(&u->io)) {
-            u->regs[USART_ISR / 4] |= ISR_TXE;
+            u->regs[USART_ISR / 4] |= ISR_TXE | ISR_TC;
         }
         return MM_TRUE;
     }
@@ -222,7 +224,7 @@ static void poll_instance(struct usart_inst *u)
         u->regs[USART_ISR / 4] |= ISR_RXNE;
     }
     if (mm_uart_io_tx_empty(&u->io)) {
-        u->regs[USART_ISR / 4] |= ISR_TXE;
+        u->regs[USART_ISR / 4] |= ISR_TXE | ISR_TC;
     }
     /* Interrupts */
     if (g_nvic != 0 && u->irq >= 0) {

@@ -50,16 +50,21 @@ extern void mm_system_request_reset(void);
 #define RCC_SIZE     0x400u
 
 #define RCC_CR       0x000u
+#define RCC_ICSCR1   0x008u
+#define RCC_ICSCR2   0x00cu
 #define RCC_CFGR1    0x01cu
 #define RCC_CFGR2    0x020u
 #define RCC_PLL1CFGR 0x028u
 #define RCC_PLL1DIVR 0x034u
+#define RCC_PLL1FRACR 0x038u
 #define RCC_PLL2CFGR 0x02cu
 #define RCC_PLL3CFGR 0x030u
 #define RCC_PLL2DIVR 0x03cu
 #define RCC_PLL2FRACR 0x040u
 #define RCC_PLL3DIVR 0x044u
 #define RCC_PLL3FRACR 0x048u
+#define RCC_BDCR     0x0f0u
+#define RCC_CSR      0x0f4u
 
 /* PWR base (system domain) */
 #define PWR_BASE     0x46020800u
@@ -159,6 +164,11 @@ extern void mm_system_request_reset(void);
 #define TAMP_SEC_BASE   0x56007C00u
 #define TAMP_SIZE       0x400u
 
+/* DAC1 base addresses (secure / non-secure aliases) */
+#define DAC1_BASE       0x46021800u
+#define DAC1_SEC_BASE   0x56021800u
+#define DAC1_SIZE       0x400u
+
 /* SYSCFG base addresses (secure / non-secure aliases) */
 #define SYSCFG_BASE     0x46000400u
 #define SYSCFG_SEC_BASE 0x56000400u
@@ -166,7 +176,7 @@ extern void mm_system_request_reset(void);
 
 /* DBGMCU base address (private peripheral bus - no secure alias) */
 #define DBGMCU_BASE     0xE0044000u
-#define DBGMCU_SIZE     0x400u
+#define DBGMCU_SIZE     0x1000u
 
 /* UCPD1 register offsets (subset) */
 #define UCPD_CFGR1 0x000u
@@ -435,6 +445,8 @@ static struct simple_blk crs_sec;
 static struct simple_blk icache;
 static struct simple_blk dcache;
 static struct simple_blk tamp;
+static struct simple_blk dac1;
+static struct simple_blk dac1_sec;
 static struct simple_blk syscfg;
 static struct simple_blk dbgmcu;
 static struct ucpd_state ucpd1_state;
@@ -663,6 +675,8 @@ void mm_stm32u585_mmio_reset(void)
     memset(&ucpd1_state_sec, 0, sizeof(ucpd1_state_sec));
     memset(&otg_fs, 0, sizeof(otg_fs));
     memset(&otg_fs_sec, 0, sizeof(otg_fs_sec));
+    memset(&dac1, 0, sizeof(dac1));
+    memset(&dac1_sec, 0, sizeof(dac1_sec));
     memset(&rng, 0, sizeof(rng));
     memset(&hash_accel, 0, sizeof(hash_accel));
     memset(&aes_accel, 0, sizeof(aes_accel));
@@ -700,8 +714,14 @@ void mm_stm32u585_mmio_reset(void)
     mm_gpio_bank_set_seccfgr_reader(stm32u585_gpio_bank_read_seccfgr, 0);
     mm_gpio_set_bank_info_reader(stm32u585_gpio_bank_info, 0);
     mm_rcc_set_clock_list_reader(stm32u585_rcc_clock_list_line, 0);
-    /* Enable HSI by default and mark ready flags. */
-    rcc.regs[0] |= 1u;
+    /* Seed RCC reset values from the STM32U585 SVD. */
+    rcc.regs[RCC_CR / 4u] = 0x00000035u;
+    rcc.regs[RCC_ICSCR1 / 4u] = 0x44000000u;
+    rcc.regs[RCC_ICSCR2 / 4u] = 0x00084210u;
+    rcc.regs[RCC_CFGR2 / 4u] = 0x00006000u;
+    rcc.regs[RCC_PLL1DIVR / 4u] = 0x01010280u;
+    rcc.regs[RCC_PLL2DIVR / 4u] = 0x01010280u;
+    rcc.regs[RCC_CSR / 4u] = 0x0C004400u;
     rcc_update_ready(&rcc);
     rcc_update_sysclk(&rcc);
     iwdg.regs[IWDG_RLR / 4u] = 0x00000FFFu;
@@ -710,7 +730,9 @@ void mm_stm32u585_mmio_reset(void)
     wwdg.regs[WWDG_CFR / 4u] = 0x0000007Fu;
     wwdg.counter = 0x7Fu;
     exti.regs[EXTI_IMR1 / 4u] = 0xFFFE0000u;
-    /* Power ready flags. */
+    /* Seed PWR reset values and synthesize ready flags. */
+    pwr.regs[PWR_VOSR / 4u] = 0x00008000u;
+    pwr.regs[PWR_SVMSR / 4u] = 0x00008000u;
     pwr_update_vos(&pwr);
 
     /* RNG reset values */
@@ -1263,6 +1285,12 @@ static mm_bool rcc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
     struct rcc_state *r = (struct rcc_state *)opaque;
     if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
     if ((offset + size_bytes) > RCC_SIZE) return MM_FALSE;
+    if (offset <= RCC_CR && (offset + size_bytes) > RCC_CR) {
+        rcc_update_ready(r);
+    }
+    if (offset <= RCC_CFGR1 && (offset + size_bytes) > RCC_CFGR1) {
+        rcc_update_sysclk(r);
+    }
     memcpy(value_out, (mm_u8 *)r->regs + offset, size_bytes);
     return MM_TRUE;
 }
@@ -1270,9 +1298,12 @@ static mm_bool rcc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
 static void rcc_update_ready(struct rcc_state *r)
 {
     mm_u32 cr = r->regs[0]; /* offset 0x0 */
+    mm_u32 bdcr = r->regs[RCC_BDCR / 4];
     /* Mirror RDY bits to match ON bits (immediate ready). */
     /* MSIRDY bit2 follows MSISON bit0 */
     if ((cr & (1u << 0)) != 0u) cr |= (1u << 2); else cr &= ~(1u << 2);
+    /* MSIKRDY bit5 follows MSIKON bit4 */
+    if ((cr & (1u << 4)) != 0u) cr |= (1u << 5); else cr &= ~(1u << 5);
     /* HSIRDY bit10 follows HSION bit8 */
     if ((cr & (1u << 8)) != 0u) cr |= (1u << 10); else cr &= ~(1u << 10);
     /* HSI48RDY bit13 follows HSI48ON bit12 */
@@ -1286,13 +1317,50 @@ static void rcc_update_ready(struct rcc_state *r)
     /* PLL3RDY bit29 follows PLL3ON bit28 */
     if ((cr & (1u << 28)) != 0u) cr |= (1u << 29); else cr &= ~(1u << 29);
     r->regs[0] = cr;
+
+    /* BDCR low-speed clock status follows the enable bits immediately. */
+    if ((bdcr & (1u << 0)) != 0u) bdcr |= (1u << 1); else bdcr &= ~(1u << 1);
+    if ((bdcr & (1u << 7)) != 0u) bdcr |= (1u << 11); else bdcr &= ~(1u << 11);
+    if ((bdcr & (1u << 26)) != 0u) bdcr |= (1u << 27); else bdcr &= ~(1u << 27);
+    r->regs[RCC_BDCR / 4] = bdcr;
+}
+
+static mm_u64 rcc_msi_range_hz(mm_u32 range)
+{
+    switch (range & 0xfu) {
+    case 0u: return 48000000ull;
+    case 1u: return 24000000ull;
+    case 2u: return 16000000ull;
+    case 3u: return 12000000ull;
+    case 4u: return 4000000ull;
+    case 5u: return 2000000ull;
+    case 6u: return 1500000ull;
+    case 7u: return 1000000ull;
+    case 8u: return 3072000ull;
+    case 9u: return 1536000ull;
+    case 10u: return 1024000ull;
+    case 11u: return 768000ull;
+    case 12u: return 400000ull;
+    case 13u: return 200000ull;
+    case 14u: return 150000ull;
+    case 15u: return 100000ull;
+    default: return 0ull;
+    }
 }
 
 static mm_u64 rcc_msi_hz(const struct rcc_state *r)
 {
-    (void)r;
-    /* wolfboot HAL uses MSI @ 48 MHz as PLL source. */
-    return 48000000ull;
+    mm_u32 icscr1;
+    mm_u32 csr;
+    if (r == 0) {
+        return 0ull;
+    }
+    icscr1 = r->regs[RCC_ICSCR1 / 4u];
+    csr = r->regs[RCC_CSR / 4u];
+    if ((icscr1 & (1u << 23)) != 0u) {
+        return rcc_msi_range_hz((icscr1 >> 28) & 0xfu);
+    }
+    return rcc_msi_range_hz((csr >> 12) & 0xfu);
 }
 
 #if 0
@@ -1333,7 +1401,7 @@ static mm_u64 rcc_pll1_r_clk(const struct rcc_state *r)
 
     /* STM32U5 PLL source: 0=none, 1=MSI, 2=HSI, 3=HSE. */
     if (src == 1u) fin = rcc_msi_hz(r);
-    else if (src == 2u) fin = 64000000ull; /* HSI */
+    else if (src == 2u) fin = 16000000ull; /* HSI16 */
     else if (src == 3u) fin = 8000000ull; /* HSE */
     else fin = 0;
 
@@ -1347,7 +1415,7 @@ static void rcc_update_sysclk(struct rcc_state *r)
 {
     mm_u32 cfgr1 = r->regs[RCC_CFGR1 / 4];
     mm_u32 cfgr2 = r->regs[RCC_CFGR2 / 4];
-    mm_u32 sw = cfgr1 & 0x7u;
+    mm_u32 sw = cfgr1 & 0x3u;
     mm_u32 hpre = cfgr2 & 0xfu;
     mm_u64 sys = 0;
     mm_u32 div = 1u;
@@ -1357,8 +1425,8 @@ static void rcc_update_sysclk(struct rcc_state *r)
     static mm_u32 last_pllcfgr = 0xffffffffu;
     static mm_u32 last_plldivr = 0xffffffffu;
 
-    if (sw == 0u) sys = 64000000ull;
-    else if (sw == 1u) sys = 4000000ull;
+    if (sw == 0u) sys = rcc_msi_hz(r);
+    else if (sw == 1u) sys = 16000000ull;
     else if (sw == 2u) sys = 8000000ull;
     else if (sw == 3u) sys = rcc_pll1_r_clk(r);
 
@@ -1381,7 +1449,7 @@ static void rcc_update_sysclk(struct rcc_state *r)
         r->cpu_hz = sys / (mm_u64)div;
         if (r->cpu_hz == 0) r->cpu_hz = 1;
     }
-    r->regs[RCC_CFGR1 / 4] = (r->regs[RCC_CFGR1 / 4] & ~(0x7u << 3)) | (sw << 3);
+    r->regs[RCC_CFGR1 / 4] = (r->regs[RCC_CFGR1 / 4] & ~(0x3u << 2)) | (sw << 2);
 
     if (rcc_trace < 0) {
         const char *v = getenv("M33MU_RCC_TRACE");
@@ -1401,7 +1469,7 @@ static void rcc_update_sysclk(struct rcc_state *r)
             mm_u32 dbg_rdiv = ((last_plldivr >> 25) & 0x7fu) + 1u;
             mm_u64 dbg_fin = 0;
             if (dbg_src == 1u) dbg_fin = rcc_msi_hz(r);
-            else if (dbg_src == 2u) dbg_fin = 64000000ull;
+            else if (dbg_src == 2u) dbg_fin = 16000000ull;
             else if (dbg_src == 3u) dbg_fin = 8000000ull;
             printf("[RCC] CFGR1=0x%08lx CFGR2=0x%08lx PLL1CFGR=0x%08lx PLL1DIVR=0x%08lx src=%lu divm=%lu n=%lu r=%lu fin=%llu cpu_hz=%llu\n",
                    (unsigned long)cfgr1,
@@ -1421,18 +1489,29 @@ static void rcc_update_sysclk(struct rcc_state *r)
 static mm_bool rcc_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
     struct rcc_state *r = (struct rcc_state *)opaque;
+    static int rcc_trace = -1;
     if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
     if ((offset + size_bytes) > RCC_SIZE) return MM_FALSE;
+    if (rcc_trace < 0) {
+        const char *v = getenv("M33MU_RCC_TRACE");
+        rcc_trace = (v && v[0] != '\0') ? 1 : 0;
+    }
     memcpy((mm_u8 *)r->regs + offset, &value, size_bytes);
-    if (offset == RCC_CR) {
+    if (offset == RCC_CR || offset == RCC_BDCR) {
         rcc_update_ready(r);
+        if (rcc_trace && offset == RCC_BDCR) {
+            printf("[RCC] BDCR write size=%lu value=0x%08lx stored=0x%08lx\n",
+                   (unsigned long)size_bytes,
+                   (unsigned long)value,
+                   (unsigned long)r->regs[RCC_BDCR / 4]);
+        }
     }
     if (offset == RCC_CFGR1 || offset == RCC_CFGR2 ||
         offset == RCC_PLL1CFGR || offset == RCC_PLL1DIVR ||
         offset == RCC_PLL2CFGR || offset == RCC_PLL3CFGR ||
         offset == RCC_PLL2DIVR || offset == RCC_PLL2FRACR ||
         offset == RCC_PLL3DIVR || offset == RCC_PLL3FRACR ||
-        offset == RCC_CR) {
+        offset == RCC_CR || offset == RCC_BDCR) {
         rcc_update_sysclk(r);
     }
     return MM_TRUE;
@@ -2197,6 +2276,17 @@ mm_bool mm_stm32u585_register_mmio(struct mmio_bus *bus)
     reg.write = simple_blk_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
     reg.base = TAMP_SEC_BASE;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* DAC1 (secure and non-secure aliases) */
+    reg.base = DAC1_BASE;
+    reg.size = DAC1_SIZE;
+    reg.opaque = &dac1;
+    reg.read = simple_blk_read;
+    reg.write = simple_blk_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = DAC1_SEC_BASE;
+    reg.opaque = &dac1_sec;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     /* SYSCFG (secure and non-secure aliases) */

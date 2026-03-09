@@ -624,19 +624,56 @@ static mm_bool gdb_fetch_hw1(struct mm_memmap *map, enum mm_sec_state sec, mm_u3
     return MM_TRUE;
 }
 
-static mm_bool gdb_install_breakpoint(struct mm_gdb_stub *stub, struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr)
+static mm_u32 gdb_canonical_break_addr(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr)
+{
+    mm_u32 even_addr = addr & ~1u;
+    if (map != 0 && even_addr >= 2u) {
+        struct mm_fetch_result prev = mm_fetch_t32_memmap_at(map, sec, even_addr - 2u);
+        if (!prev.fault && prev.len == 4u && (prev.pc_fetch + 2u) == even_addr) {
+            return prev.pc_fetch | 1u;
+        }
+    }
+
+    return even_addr | 1u;
+}
+
+static int gdb_find_breakpoint_slot(const struct mm_gdb_stub *stub, mm_u32 addr)
 {
     size_t i;
     mm_u32 even_addr = addr & ~1u;
+
+    if (stub == 0) {
+        return -1;
+    }
+
+    for (i = 0; i < sizeof(stub->breakpoints) / sizeof(stub->breakpoints[0]); ++i) {
+        mm_u32 bp_addr;
+        mm_u32 bp_end;
+        if (!stub->breakpoints[i].valid) {
+            continue;
+        }
+        bp_addr = stub->breakpoints[i].addr & ~1u;
+        bp_end = bp_addr + (mm_u32)stub->breakpoints[i].len;
+        if (even_addr >= bp_addr && even_addr < bp_end) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
+
+static mm_bool gdb_install_breakpoint(struct mm_gdb_stub *stub, struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr)
+{
+    size_t i;
+    mm_u32 canon_addr = gdb_canonical_break_addr(map, sec, addr);
+    mm_u32 even_addr = canon_addr & ~1u;
     mm_u16 hw1;
     mm_u8 len = 2;
     mm_u8 patch[4];
     mm_u8 orig[4];
 
-    for (i = 0; i < sizeof(stub->breakpoints) / sizeof(stub->breakpoints[0]); ++i) {
-        if (stub->breakpoints[i].valid && stub->breakpoints[i].addr == even_addr) {
-            return MM_TRUE;
-        }
+    if (gdb_find_breakpoint_slot(stub, canon_addr) >= 0) {
+        return MM_TRUE;
     }
 
     if (!gdb_fetch_hw1(map, sec, even_addr, &hw1)) {
@@ -657,12 +694,12 @@ static mm_bool gdb_install_breakpoint(struct mm_gdb_stub *stub, struct mm_memmap
     if (!gdb_write_bytes(map, sec, even_addr, patch, len)) {
         return MM_FALSE;
     }
-    printf("[GDB] Breakpoint set at 0x%08lx len=%u\n", (unsigned long)(even_addr | 1u), (unsigned)len);
+    printf("[GDB] Breakpoint set at 0x%08lx len=%u\n", (unsigned long)canon_addr, (unsigned)len);
 
     for (i = 0; i < sizeof(stub->breakpoints) / sizeof(stub->breakpoints[0]); ++i) {
         if (!stub->breakpoints[i].valid) {
             stub->breakpoints[i].valid = MM_TRUE;
-            stub->breakpoints[i].addr = even_addr | 1u;
+            stub->breakpoints[i].addr = canon_addr;
             stub->breakpoints[i].len = len;
             memcpy(stub->breakpoints[i].orig, orig, len);
             return MM_TRUE;
@@ -673,20 +710,26 @@ static mm_bool gdb_install_breakpoint(struct mm_gdb_stub *stub, struct mm_memmap
 
 static mm_bool gdb_remove_breakpoint(struct mm_gdb_stub *stub, struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr)
 {
-    size_t i;
-    mm_u32 even_addr = addr & ~1u;
-    for (i = 0; i < sizeof(stub->breakpoints) / sizeof(stub->breakpoints[0]); ++i) {
-        if (stub->breakpoints[i].valid && stub->breakpoints[i].addr == (even_addr | 1u)) {
-            if (!gdb_write_bytes(map, sec, even_addr, stub->breakpoints[i].orig, stub->breakpoints[i].len)) {
-                return MM_FALSE;
-            }
-            stub->breakpoints[i].valid = MM_FALSE;
-            stub->breakpoints[i].len = 0;
-            printf("[GDB] Breakpoint cleared at 0x%08lx\n", (unsigned long)(even_addr | 1u));
-            return MM_TRUE;
-        }
+    int slot;
+    mm_u32 canon_addr = gdb_canonical_break_addr(map, sec, addr);
+    mm_u32 even_addr;
+
+    slot = gdb_find_breakpoint_slot(stub, canon_addr);
+    if (slot < 0) {
+        slot = gdb_find_breakpoint_slot(stub, addr);
     }
-    return MM_FALSE;
+    if (slot < 0) {
+        return MM_FALSE;
+    }
+
+    even_addr = stub->breakpoints[slot].addr & ~1u;
+    if (!gdb_write_bytes(map, sec, even_addr, stub->breakpoints[slot].orig, stub->breakpoints[slot].len)) {
+        return MM_FALSE;
+    }
+    stub->breakpoints[slot].valid = MM_FALSE;
+    stub->breakpoints[slot].len = 0;
+    printf("[GDB] Breakpoint cleared at 0x%08lx\n", (unsigned long)stub->breakpoints[slot].addr);
+    return MM_TRUE;
 }
 
 mm_bool mm_gdb_stub_breakpoint_hit(const struct mm_gdb_stub *stub, mm_u32 pc)

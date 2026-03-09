@@ -8,6 +8,9 @@ endif
 LDFLAGS := -nostdlib -T target.ld -Wl,-gc-sections
 
 SRCS := ivt.c main.c syscalls.c
+ifeq ($(ISA_SWEEPER),1)
+SRCS += isa_sweeper.c
+endif
 OBJS := $(SRCS:.c=.o)
 
 all: app.bin

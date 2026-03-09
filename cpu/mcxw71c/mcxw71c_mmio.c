@@ -14,6 +14,36 @@
 #define MRCC_SEC_BASE (MRCC_BASE + 0x10000000u)
 #define MRCC_SIZE 0x800u
 
+#define WDOG_BASE 0x4001A000u
+#define WDOG_SEC_BASE 0x5001A000u
+#define WDOG_SIZE 0x1000u
+
+#define SCG_BASE 0x4001E000u
+#define SCG_SEC_BASE 0x5001E000u
+#define SCG_SIZE 0x804u
+
+#define CCM32K_BASE 0x4001F000u
+#define CCM32K_SEC_BASE 0x5001F000u
+#define CCM32K_SIZE 0x28u
+
+#define VBAT_BASE 0x4002B000u
+#define VBAT_SEC_BASE 0x5002B000u
+#define VBAT_SIZE 0x340u
+
+#define SCG_VERID 0x000u
+#define SCG_PARAM 0x004u
+#define SCG_CSR 0x010u
+#define SCG_RCCR 0x014u
+#define SCG_SOSCCSR 0x100u
+#define SCG_SIRCCSR 0x200u
+#define SCG_FIRCCSR 0x300u
+#define SCG_ROSCCSR 0x400u
+
+#define CCM32K_FRO32K_CTRL 0x000u
+#define CCM32K_OSC32K_CTRL 0x008u
+#define CCM32K_STATUS 0x00cu
+#define CCM32K_CGC32K 0x01cu
+
 #define GPIOA_BASE 0x48010000u
 #define GPIOB_BASE 0x48020000u
 #define GPIOC_BASE 0x48030000u
@@ -53,6 +83,22 @@ struct mrcc_state {
     mm_u32 regs[MRCC_SIZE / 4];
 };
 
+struct wdog_state {
+    mm_u32 regs[WDOG_SIZE / 4];
+};
+
+struct scg_state {
+    mm_u32 regs[SCG_SIZE / 4];
+};
+
+struct ccm32k_state {
+    mm_u32 regs[CCM32K_SIZE / 4];
+};
+
+struct vbat_state {
+    mm_u32 regs[VBAT_SIZE / 4];
+};
+
 struct port_state {
     mm_u32 regs[PORT_SIZE / 4];
     mm_u32 pcr[32];
@@ -61,6 +107,10 @@ struct port_state {
 
 static struct gpio_bank gpio_banks[4];
 static struct mrcc_state mrcc;
+static struct wdog_state wdog;
+static struct scg_state scg;
+static struct ccm32k_state ccm32k;
+static struct vbat_state vbat;
 static struct port_state ports[3];
 static struct mm_nvic *g_gpio_nvic = 0;
 
@@ -436,6 +486,10 @@ void mm_mcxw71c_mmio_reset(void)
 {
     memset(gpio_banks, 0, sizeof(gpio_banks));
     memset(&mrcc, 0, sizeof(mrcc));
+    memset(&wdog, 0, sizeof(wdog));
+    memset(&scg, 0, sizeof(scg));
+    memset(&ccm32k, 0, sizeof(ccm32k));
+    memset(&vbat, 0, sizeof(vbat));
     memset(ports, 0, sizeof(ports));
     g_gpio_nvic = 0;
     mrcc.regs[MCXW71C_MRCC_LPIT0 / 4] = 0x80000000u;
@@ -443,12 +497,27 @@ void mm_mcxw71c_mmio_reset(void)
     mrcc.regs[MCXW71C_MRCC_LPSPI1 / 4] = 0x80000000u;
     mrcc.regs[MCXW71C_MRCC_LPUART0 / 4] = 0x80000000u;
     mrcc.regs[MCXW71C_MRCC_LPUART1 / 4] = 0x80000000u;
-    mrcc.regs[MCXW71C_MRCC_PORTA / 4] = 0x80000000u;
-    mrcc.regs[MCXW71C_MRCC_PORTB / 4] = 0x80000000u;
-    mrcc.regs[MCXW71C_MRCC_PORTC / 4] = 0x80000000u;
-    mrcc.regs[MCXW71C_MRCC_GPIOA / 4] = 0x80000000u;
-    mrcc.regs[MCXW71C_MRCC_GPIOB / 4] = 0x80000000u;
-    mrcc.regs[MCXW71C_MRCC_GPIOC / 4] = 0x80000000u;
+    /* PORT/GPIO blocks are reachable during early pinctrl on Zephyr. */
+    mrcc.regs[MCXW71C_MRCC_PORTA / 4] = 0xC0000001u;
+    mrcc.regs[MCXW71C_MRCC_PORTB / 4] = 0xC0000001u;
+    mrcc.regs[MCXW71C_MRCC_PORTC / 4] = 0xC0000001u;
+    mrcc.regs[MCXW71C_MRCC_GPIOA / 4] = 0xC0000001u;
+    mrcc.regs[MCXW71C_MRCC_GPIOB / 4] = 0xC0000001u;
+    mrcc.regs[MCXW71C_MRCC_GPIOC / 4] = 0xC0000001u;
+    /* SystemInit() waits for RCS, ULK and CMD32EN in WDOG0->CS. */
+    wdog.regs[0x0u / 4] = (1u << 10) | (1u << 11) | (1u << 13);
+    scg.regs[SCG_VERID / 4u] = 0x00000000u;
+    scg.regs[SCG_PARAM / 4u] = 0x000001FEu;
+    scg.regs[SCG_CSR / 4u] = 0x03000000u;
+    scg.regs[SCG_RCCR / 4u] = 0x03000000u;
+    scg.regs[SCG_SOSCCSR / 4u] = 0x01000020u;
+    scg.regs[SCG_SIRCCSR / 4u] = 0x01000020u;
+    scg.regs[SCG_FIRCCSR / 4u] = 0x03000031u;
+    scg.regs[SCG_ROSCCSR / 4u] = 0x03000000u;
+    ccm32k.regs[CCM32K_FRO32K_CTRL / 4u] = 0x00000001u;
+    ccm32k.regs[CCM32K_STATUS / 4u] = 0x00000001u;
+    ccm32k.regs[CCM32K_CGC32K / 4u] = 0x00000020u;
+    vbat.regs[0x10u / 4u] = 0x00000011u;
     mm_gpio_bank_set_reader(mcxw71c_gpio_bank_read, 0);
     mm_gpio_bank_set_moder_reader(mcxw71c_gpio_bank_read_moder, 0);
     mm_gpio_bank_set_clock_reader(mcxw71c_gpio_bank_clock, 0);
@@ -494,6 +563,106 @@ static mm_bool mrcc_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
     return MM_TRUE;
 }
 
+static mm_bool wdog_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct wdog_state *w = (struct wdog_state *)opaque;
+    if (w == 0 || value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > WDOG_SIZE) return MM_FALSE;
+    memcpy(value_out, (mm_u8 *)w->regs + offset, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool wdog_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct wdog_state *w = (struct wdog_state *)opaque;
+    if (w == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > WDOG_SIZE) return MM_FALSE;
+    memcpy((mm_u8 *)w->regs + offset, &value, size_bytes);
+    /* Keep SystemInit()-visible ready bits asserted in CS. */
+    if (offset == 0x0u && size_bytes == 4u) {
+        w->regs[0x0u / 4] |= (1u << 10) | (1u << 11) | (1u << 13);
+    }
+    return MM_TRUE;
+}
+
+static mm_bool scg_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct scg_state *s = (struct scg_state *)opaque;
+    if (s == 0 || value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > SCG_SIZE) return MM_FALSE;
+    memcpy(value_out, (mm_u8 *)s->regs + offset, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool scg_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct scg_state *s = (struct scg_state *)opaque;
+    const mm_u32 scs_mask = 0x0F000000u;
+    if (s == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > SCG_SIZE) return MM_FALSE;
+    if (size_bytes != 4) return MM_FALSE;
+    if (offset == SCG_VERID || offset == SCG_PARAM) {
+        return MM_TRUE;
+    }
+    s->regs[offset / 4u] = value;
+    if (offset == SCG_RCCR) {
+        mm_u32 csr = s->regs[SCG_CSR / 4u] & ~scs_mask;
+        s->regs[SCG_CSR / 4u] = csr | (value & scs_mask);
+    } else if (offset == SCG_SOSCCSR || offset == SCG_SIRCCSR || offset == SCG_FIRCCSR) {
+        s->regs[offset / 4u] |= (1u << 24) | (1u << 5);
+    } else if (offset == SCG_ROSCCSR) {
+        s->regs[offset / 4u] |= (1u << 24) | (1u << 25);
+    }
+    return MM_TRUE;
+}
+
+static mm_bool ccm32k_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct ccm32k_state *c = (struct ccm32k_state *)opaque;
+    if (c == 0 || value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > CCM32K_SIZE) return MM_FALSE;
+    memcpy(value_out, (mm_u8 *)c->regs + offset, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool ccm32k_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct ccm32k_state *c = (struct ccm32k_state *)opaque;
+    if (c == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > CCM32K_SIZE) return MM_FALSE;
+    if (offset == CCM32K_STATUS) {
+        return MM_TRUE;
+    }
+    memcpy((mm_u8 *)c->regs + offset, &value, size_bytes);
+    if (offset == CCM32K_FRO32K_CTRL || offset == CCM32K_OSC32K_CTRL || offset == CCM32K_CGC32K) {
+        c->regs[CCM32K_STATUS / 4u] |= 1u;
+        scg.regs[SCG_ROSCCSR / 4u] |= (1u << 24) | (1u << 25);
+    }
+    return MM_TRUE;
+}
+
+static mm_bool vbat_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
+{
+    struct vbat_state *v = (struct vbat_state *)opaque;
+    if (v == 0 || value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > VBAT_SIZE) return MM_FALSE;
+    memcpy(value_out, (mm_u8 *)v->regs + offset, size_bytes);
+    return MM_TRUE;
+}
+
+static mm_bool vbat_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
+{
+    struct vbat_state *v = (struct vbat_state *)opaque;
+    if (v == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if ((offset + size_bytes) > VBAT_SIZE) return MM_FALSE;
+    memcpy((mm_u8 *)v->regs + offset, &value, size_bytes);
+    /* Keep LDO ready asserted and allow STATUSA flag clearing writes. */
+    if (offset == 0x10u && size_bytes == 4u) {
+        v->regs[0x10u / 4u] = (v->regs[0x10u / 4u] & ~value) | 0x10u;
+    }
+    return MM_TRUE;
+}
+
 mm_bool mm_mcxw71c_register_mmio(struct mmio_bus *bus)
 {
     struct mmio_region reg;
@@ -506,6 +675,42 @@ mm_bool mm_mcxw71c_register_mmio(struct mmio_bus *bus)
     reg.write = mrcc_write;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
     reg.base = MRCC_SEC_BASE;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.base = WDOG_BASE;
+    reg.size = WDOG_SIZE;
+    reg.opaque = &wdog;
+    reg.read = wdog_read;
+    reg.write = wdog_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = WDOG_SEC_BASE;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.base = SCG_BASE;
+    reg.size = SCG_SIZE;
+    reg.opaque = &scg;
+    reg.read = scg_read;
+    reg.write = scg_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = SCG_SEC_BASE;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.base = CCM32K_BASE;
+    reg.size = CCM32K_SIZE;
+    reg.opaque = &ccm32k;
+    reg.read = ccm32k_read;
+    reg.write = ccm32k_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = CCM32K_SEC_BASE;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.base = VBAT_BASE;
+    reg.size = VBAT_SIZE;
+    reg.opaque = &vbat;
+    reg.read = vbat_read;
+    reg.write = vbat_write;
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    reg.base = VBAT_SEC_BASE;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     reg.size = GPIO_SIZE;

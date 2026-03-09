@@ -7,6 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "m33mu/memmap.h"
+
 #include "../src/gdbstub.c"
 
 static int test_gdb_send_packet_keeps_full_1020_char_payload(void)
@@ -61,5 +63,49 @@ static int test_gdb_send_packet_keeps_full_1020_char_payload(void)
 int main(void)
 {
     if (test_gdb_send_packet_keeps_full_1020_char_payload() != 0) return 1;
+    {
+        struct mm_gdb_stub stub;
+        struct mm_memmap map;
+        struct mmio_region regions[1];
+        mm_u8 flash[8] = {
+            0x00, 0xbf, /* nop */
+            0x42, 0xf4, 0x80, 0x22, /* 32-bit Thumb insn */
+            0x00, 0xbf /* nop */
+        };
+
+        memset(regions, 0, sizeof(regions));
+        memset(&map, 0, sizeof(map));
+        mm_memmap_init(&map, regions, 1u);
+        map.flash.buffer = flash;
+        map.flash.length = sizeof(flash);
+        map.flash.base = 0x08000000u;
+        map.flash_base_s = 0x08000000u;
+        map.flash_base_ns = 0x08000000u;
+        map.flash_size_s = sizeof(flash);
+        map.flash_size_ns = sizeof(flash);
+
+        mm_gdb_stub_init(&stub);
+        if (!gdb_install_breakpoint(&stub, &map, MM_NONSECURE, 0x08000004u)) {
+            printf("gdbstub_packet_test: failed to install canonicalized breakpoint\n");
+            return 1;
+        }
+        if (!stub.breakpoints[0].valid || stub.breakpoints[0].addr != 0x08000003u ||
+            stub.breakpoints[0].len != 4u) {
+            printf("gdbstub_packet_test: breakpoint was not canonicalized to 32-bit boundary\n");
+            return 1;
+        }
+        if (flash[2] != 0x00 || flash[3] != 0xbe || flash[4] != 0x00 || flash[5] != 0xbe) {
+            printf("gdbstub_packet_test: 32-bit breakpoint patch was not written at instruction start\n");
+            return 1;
+        }
+        if (!gdb_remove_breakpoint(&stub, &map, MM_NONSECURE, 0x08000004u)) {
+            printf("gdbstub_packet_test: failed to remove canonicalized breakpoint\n");
+            return 1;
+        }
+        if (flash[2] != 0x42 || flash[3] != 0xf4 || flash[4] != 0x80 || flash[5] != 0x22) {
+            printf("gdbstub_packet_test: 32-bit breakpoint restore failed\n");
+            return 1;
+        }
+    }
     return 0;
 }

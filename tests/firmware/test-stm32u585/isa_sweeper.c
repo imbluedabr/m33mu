@@ -202,6 +202,16 @@ PROBE(probe_exclusives,
   "str  r2, [r0, #4]  \n"
 )
 
+// Exact Thumb-2 opcodes seen in Zephyr U585 fault path.
+PROBE(probe_stm32u5_vco_range_subw,
+  "mov   r1, r0            \n"
+  "movw  r0, #0x0900       \n"
+  "movt  r0, #0x003d       \n"
+  ".inst.w 0xf5a01374      \n" /* sub.w r3, r0, #0x3d0000 */
+  ".inst.w 0xf5a36310      \n" /* sub.w r3, r3, #0x900 */
+  "str   r3, [r1]          \n"
+)
+
 // ---- Optional TrustZone “*_NS special register access” probes ----
 // These only assemble on toolchains with Armv8-M Security Extensions support.
 // And they should be run from Secure privileged code.
@@ -249,6 +259,7 @@ int ISA_SWEEPER_Run(void) {
   undef_hits += run_probe(probe_bitfield,    &g_scratch[0]);
   undef_hits += run_probe(probe_barriers,    &g_scratch[0]);
   undef_hits += run_probe(probe_exclusives,  &g_scratch[0]);
+  undef_hits += run_probe(probe_stm32u5_vco_range_subw, &g_scratch[0]);
 
 #if defined(__ARM_FEATURE_CMSE) && !defined(ISA_SWEEPER_NO_TZ_PROBES)
   // Only meaningful in Secure privileged context.

@@ -5001,6 +5001,12 @@ int main(int argc, char **argv)
                 mm_prot_add_region(&prot, 0x0CFFF000u, 0x800u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
                 mm_prot_add_region(&prot, 0x08FFF000u, 0x800u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
             }
+            if (cpu_name != 0 &&
+                (strcmp(cpu_name, "stm32u585") == 0 || strcmp(cpu_name, "stm32l552") == 0)) {
+                /* STM32U5/L5 expose vendor PPB blocks such as DBGMCU at 0xE004xxxx. */
+                mm_prot_add_region(&prot, 0xE0040000u, 0x00010000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                mm_prot_add_region(&prot, 0xE0040000u, 0x00010000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+            }
             if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
                 mm_prot_add_region(&prot, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
                 mm_prot_add_region(&prot, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
@@ -5044,6 +5050,11 @@ int main(int argc, char **argv)
                 if (cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
                     mm_prot_add_region(&prot1, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
                     mm_prot_add_region(&prot1, 0x00000000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                }
+                if (cpu_name != 0 &&
+                    (strcmp(cpu_name, "stm32u585") == 0 || strcmp(cpu_name, "stm32l552") == 0)) {
+                    mm_prot_add_region(&prot1, 0xE0040000u, 0x00010000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                    mm_prot_add_region(&prot1, 0xE0040000u, 0x00010000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
                 }
                 if (cpu_name != 0 && strcmp(cpu_name, "nrf5340") == 0) {
                     mm_prot_add_region(&prot1, 0x00000000u, cfg.flash_size_ns,
@@ -6132,6 +6143,12 @@ handle_pending:
                                     mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                                     mm_trace_end_step(&cpu);
                                     record_window_step(&cpu, &map);
+                                }
+                                if (opt_gdb) {
+                                    mm_gdb_stub_maybe_rearm(&gdb, &map, cpu.sec_state, cpu.r[15]);
+                                    if (mm_gdb_stub_should_step(&gdb)) {
+                                        mm_gdb_stub_notify_stop(&gdb, 5);
+                                    }
                                 }
                                 continue;
                             }
