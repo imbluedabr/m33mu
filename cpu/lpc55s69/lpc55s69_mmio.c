@@ -1032,7 +1032,8 @@ mm_bool mm_lpc55s69_syscon_periph_active(mm_u32 ahbclk_offset, mm_u32 bit)
     clk_reg = syscon.regs[ahbclk_offset / 4u];
     rst_reg = syscon.regs[preset_offset / 4u];
     mask = (1u << bit);
-    return ((clk_reg & mask) != 0u && (rst_reg & mask) != 0u) ? MM_TRUE : MM_FALSE;
+    /* Clock bit must be set; reset bit must be CLEAR (0 = released from reset). */
+    return ((clk_reg & mask) != 0u && (rst_reg & mask) == 0u) ? MM_TRUE : MM_FALSE;
 }
 
 void mm_lpc55s69_mmio_reset(void)
@@ -1328,29 +1329,16 @@ void mm_lpc55s69_flash_bind(struct mm_memmap *map,
 
     flash_buf = flash;
 
-    /* Initialise blank bitmap from flash image content.
-     * Any 16-byte ECC word that is entirely 0xFF is considered blank/erased
-     * (reading such a word causes a bus fault on real hardware). */
+    /*
+     * Do NOT pre-mark factory-blank (0xFF) pages as ECC-faulting.
+     * On real hardware, freshly-blank flash (factory state or after a proper
+     * erase) returns 0xFF correctly; ECC faults only occur on inconsistent
+     * (partially-written) words.  We track which words were explicitly erased
+     * by the ROM API erase stub and only fault on those, matching the SDK
+     * FLASH_VerifyErase() behaviour without breaking reads of unwritten flash.
+     */
     memset(flash_blank_bits, 0, sizeof(flash_blank_bits));
-
-    n_words = LPC55S69_FLASH_SIZE / FC_ECC_WORD_BYTES;
-    for (i = 0; i < n_words; ++i) {
-        mm_u32 byte_off = i * FC_ECC_WORD_BYTES;
-        all_ff = MM_TRUE;
-        for (j = 0; j < FC_ECC_WORD_BYTES; ++j) {
-            if (byte_off + j >= flash_size || flash[byte_off + j] != 0xFFu) {
-                all_ff = MM_FALSE;
-                break;
-            }
-        }
-        /* Words beyond the loaded image (flash_size) are also blank */
-        if (byte_off >= flash_size) {
-            all_ff = MM_TRUE;
-        }
-        if (all_ff) {
-            flash_blank_set(i);
-        }
-    }
+    (void)n_words; (void)i; (void)j; (void)all_ff; (void)flash_size;
 
     mm_memmap_set_flash_ecc_check(map, lpc55s69_flash_ecc_check, 0);
 }

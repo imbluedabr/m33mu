@@ -36,8 +36,8 @@ extern void _exit(int status);
 
 static void syscon_clock_enable1(uint32_t bit)
 {
-    AHBCLKCTRL1 |= (1u << bit);
-    PRESETCTRL1 |= (1u << bit);
+    AHBCLKCTRL1 |=  (1u << bit);   /* enable clock */
+    PRESETCTRL1  &= ~(1u << bit);  /* release from reset (bit=0 = active) */
 }
 
 /* -------------------------------------------------------------------------
