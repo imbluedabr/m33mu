@@ -4848,6 +4848,14 @@ int main(int argc, char **argv)
                 mm_prot_add_region(&prot, 0x13000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
                 mm_prot_add_region(&prot, 0x13000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
             }
+            if (cpu_name != 0 && strcmp(cpu_name, "pic32ck") == 0) {
+                /* PIC32CK Boot ROM: 0x08000000, 128 KB */
+                mm_prot_add_region(&prot, 0x08000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
+                mm_prot_add_region(&prot, 0x08000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                /* PIC32CK CFM (Configuration Flash Memory): 0x0A000000, 64 KB */
+                mm_prot_add_region(&prot, 0x0A000000u, 0x00010000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                mm_prot_add_region(&prot, 0x0A000000u, 0x00010000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+            }
             if (cpu_name != 0 &&
                 (strcmp(cpu_name, "stm32h563") == 0 || strcmp(cpu_name, "stm32h533") == 0)) {
                 mm_prot_add_region(&prot, 0x0CFFF000u, 0x800u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);

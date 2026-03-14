@@ -68,6 +68,10 @@
 #include "lpc55s69/lpc55s69_flexcomm.h"
 #include "lpc55s69/lpc55s69_timers.h"
 #include "lpc55s69/cpu_config.h"
+#include "pic32ck/pic32ck_mmio.h"
+#include "pic32ck/pic32ck_sercom.h"
+#include "pic32ck/pic32ck_timers.h"
+#include "pic32ck/cpu_config.h"
 
 struct mm_cpu_entry {
     const char *name;
@@ -423,6 +427,41 @@ static const struct mm_cpu_entry cpu_table[] = {
             LPC55S69_TIMER_INIT,
             LPC55S69_TIMER_RESET,
             LPC55S69_TIMER_TICK
+        }
+    },
+    {
+        "pic32ck",
+        {
+            PIC32CK_FLASH_BASE_S,
+            PIC32CK_FLASH_SIZE,
+            PIC32CK_FLASH_BASE_NS,
+            PIC32CK_FLASH_SIZE,
+            PIC32CK_RAM_BASE_S,
+            PIC32CK_RAM_SIZE,
+            PIC32CK_RAM_BASE_NS,
+            PIC32CK_RAM_SIZE,
+            1,
+            PIC32CK_RAM_REGIONS,
+            PIC32CK_RAM_REGION_COUNT,
+            PIC32CK_MPCBB_BLOCK_SIZE,
+            0,
+            PIC32CK_FLAGS,
+            PIC32CK_SOC_RESET,
+            PIC32CK_SOC_REGISTER,
+            PIC32CK_FLASH_BIND,
+            PIC32CK_CLOCK_GET_HZ,
+            PIC32CK_USART_INIT,
+            PIC32CK_USART_RESET,
+            PIC32CK_USART_POLL,
+            PIC32CK_SPI_INIT,
+            PIC32CK_SPI_RESET,
+            PIC32CK_SPI_POLL,
+            0,
+            0,
+            0,
+            PIC32CK_TIMER_INIT,
+            PIC32CK_TIMER_RESET,
+            PIC32CK_TIMER_TICK
         }
     }
 };

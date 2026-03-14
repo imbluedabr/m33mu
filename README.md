@@ -34,6 +34,7 @@ These are the current valid `--cpu` option values:
 - nrf5340
 - nrf54lm20
 - rp2350
+- pic32ck
 
 
 ## Features
