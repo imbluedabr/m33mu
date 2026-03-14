@@ -26,7 +26,6 @@ option(M33MU_ENABLE_CAPSTONE    "Enable capstone integration if found"  ON)
 option(M33MU_ENABLE_TPM_LIBTPMS "Enable libtpms integration if found"   ON)
 option(M33MU_ENABLE_WOLFSSL     "Enable wolfSSL integration if found"   ON)
 option(M33MU_ENABLE_LIBDW       "Enable libdw/libdwfl symbolization if found" ON)
-option(M33MU_ENABLE_UNICORN     "Enable Unicorn integration if found"   OFF)
 
 # -----------------------------------------------------------------------------
 # Compiler flags (match Makefile)
@@ -66,15 +65,17 @@ set(M33MU_MAIN_SRC "${CMAKE_SOURCE_DIR}/src/main.c")
 list(REMOVE_ITEM M33MU_SOURCES "${M33MU_MAIN_SRC}")
 set(M33MU_CAPSTONE_SRC "${CMAKE_SOURCE_DIR}/src/m33mu/capstone.c")
 set(M33MU_CAPSTONE_STUB_SRC "${CMAKE_SOURCE_DIR}/src/m33mu/capstone_stub.c")
+set(M33MU_TPM_TIS_SRC "${CMAKE_SOURCE_DIR}/src/m33mu/tpm_tis.c")
 set(M33MU_UNICORN_SRC "${CMAKE_SOURCE_DIR}/src/m33mu/unicorn.c")
 set(M33MU_UNICORN_STUB_SRC "${CMAKE_SOURCE_DIR}/src/m33mu/unicorn_stub.c")
-set(M33MU_TPM_TIS_SRC "${CMAKE_SOURCE_DIR}/src/m33mu/tpm_tis.c")
 set(M33MU_TERMBOX2_SRC "${CMAKE_SOURCE_DIR}/tui/termbox2.c")
 set(M33MU_TUI_SRC "${CMAKE_SOURCE_DIR}/tui/tui.c")
 set(M33MU_TUI_STUB_SRC "${CMAKE_SOURCE_DIR}/tui/tui_stub.c")
 list(REMOVE_ITEM M33MU_SOURCES "${M33MU_TERMBOX2_SRC}")
 list(REMOVE_ITEM M33MU_SOURCES "${M33MU_TUI_SRC}")
 list(REMOVE_ITEM M33MU_SOURCES "${M33MU_TUI_STUB_SRC}")
+list(REMOVE_ITEM M33MU_SOURCES "${M33MU_UNICORN_SRC}")
+list(REMOVE_ITEM M33MU_SOURCES "${M33MU_UNICORN_STUB_SRC}")
 
 # -----------------------------------------------------------------------------
 # 2) Optional libcapstone detection + define
@@ -118,34 +119,6 @@ if(M33MU_ENABLE_CAPSTONE)
   endif()
 else()
   list(REMOVE_ITEM M33MU_SOURCES "${M33MU_CAPSTONE_SRC}")
-endif()
-
-# -----------------------------------------------------------------------------
-# 2b) Optional Unicorn detection + define
-# -----------------------------------------------------------------------------
-set(M33MU_HAS_UNICORN FALSE)
-
-if(M33MU_ENABLE_UNICORN)
-  find_path(UNICORN_INCLUDE_DIR
-    NAMES unicorn/unicorn.h
-  )
-  find_library(UNICORN_LIBRARY
-    NAMES unicorn
-  )
-
-  if(UNICORN_INCLUDE_DIR AND UNICORN_LIBRARY)
-    set(M33MU_HAS_UNICORN TRUE)
-    add_library(Unicorn::unicorn UNKNOWN IMPORTED)
-    set_target_properties(Unicorn::unicorn PROPERTIES
-      IMPORTED_LOCATION "${UNICORN_LIBRARY}"
-      INTERFACE_INCLUDE_DIRECTORIES "${UNICORN_INCLUDE_DIR}"
-    )
-    list(REMOVE_ITEM M33MU_SOURCES "${M33MU_UNICORN_STUB_SRC}")
-  else()
-    list(REMOVE_ITEM M33MU_SOURCES "${M33MU_UNICORN_SRC}")
-  endif()
-else()
-  list(REMOVE_ITEM M33MU_SOURCES "${M33MU_UNICORN_SRC}")
 endif()
 
 # -----------------------------------------------------------------------------
@@ -229,6 +202,14 @@ if(M33MU_ENABLE_WOLFSSL)
       HINTS ${_WOLFSSL_INCLUDE_DIRS} ${PC_WOLFSSL_INCLUDE_DIRS}
     )
   endif()
+  if(EXISTS "/usr/lib/x86_64-linux-gnu/libwolfssl.so")
+    set(WOLFSSL_LIBRARY_SHARED "/usr/lib/x86_64-linux-gnu/libwolfssl.so" CACHE FILEPATH "" FORCE)
+  else()
+    find_library(WOLFSSL_LIBRARY_SHARED
+      NAMES wolfssl
+      HINTS ${_WOLFSSL_LIBRARY_DIRS} ${PC_WOLFSSL_LIBRARY_DIRS}
+    )
+  endif()
   set(_WOLFSSL_SUFFIXES_SAVE ${CMAKE_FIND_LIBRARY_SUFFIXES})
   set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
   if(EXISTS "/usr/lib/x86_64-linux-gnu/libwolfssl.a")
@@ -241,18 +222,10 @@ if(M33MU_ENABLE_WOLFSSL)
   endif()
   set(CMAKE_FIND_LIBRARY_SUFFIXES ${_WOLFSSL_SUFFIXES_SAVE})
   unset(_WOLFSSL_SUFFIXES_SAVE)
-  if(EXISTS "/usr/lib/x86_64-linux-gnu/libwolfssl.so")
-    set(WOLFSSL_LIBRARY_SHARED "/usr/lib/x86_64-linux-gnu/libwolfssl.so" CACHE FILEPATH "" FORCE)
-  else()
-    find_library(WOLFSSL_LIBRARY_SHARED
-      NAMES wolfssl
-      HINTS ${_WOLFSSL_LIBRARY_DIRS} ${PC_WOLFSSL_LIBRARY_DIRS}
-    )
-  endif()
-  if(WOLFSSL_LIBRARY_STATIC)
-    set(WOLFSSL_LIBRARY ${WOLFSSL_LIBRARY_STATIC})
-  else()
+  if(WOLFSSL_LIBRARY_SHARED)
     set(WOLFSSL_LIBRARY ${WOLFSSL_LIBRARY_SHARED})
+  else()
+    set(WOLFSSL_LIBRARY ${WOLFSSL_LIBRARY_STATIC})
   endif()
 
   if(WOLFSSL_INCLUDE_DIR AND WOLFSSL_LIBRARY)
@@ -398,11 +371,6 @@ endif()
 if(M33MU_HAS_VDE)
   target_compile_definitions(m33mu_lib PUBLIC M33MU_HAS_VDE=1)
   target_link_libraries(m33mu_lib PUBLIC vdeplug::vdeplug)
-endif()
-
-if(M33MU_HAS_UNICORN)
-  target_compile_definitions(m33mu_lib PUBLIC M33MU_HAS_UNICORN=1)
-  target_link_libraries(m33mu_lib PUBLIC Unicorn::unicorn)
 endif()
 
 if(M33MU_HAS_NCURSES)
@@ -711,7 +679,7 @@ message(STATUS "${M33MU_COLOR_YELLOW}  libelf: ${M33MU_STATUS_LIBELF}${M33MU_COL
 message(STATUS "${M33MU_COLOR_YELLOW}  libdw/libdwfl: ${M33MU_STATUS_LIBDW}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_YELLOW}  tests enabled: ${M33MU_BUILD_TESTS}${M33MU_COLOR_RESET}")
 message(STATUS "${M33MU_COLOR_MAGENTA}  --------------------------------------------${M33MU_COLOR_RESET}")
-message(STATUS "${M33MU_COLOR_YELLOW}  features: capstone=${M33MU_HAS_CAPSTONE} tpm=${M33MU_HAS_LIBTPMS} wolfssl=${M33MU_HAS_WOLFSSL} vde=${M33MU_HAS_VDE} tui=${M33MU_HAS_NCURSES} libelf=${M33MU_HAS_LIBELF} libdw=${M33MU_HAS_LIBDW} unicorn=${M33MU_HAS_UNICORN}${M33MU_COLOR_RESET}")
+message(STATUS "${M33MU_COLOR_YELLOW}  features: capstone=${M33MU_HAS_CAPSTONE} tpm=${M33MU_HAS_LIBTPMS} wolfssl=${M33MU_HAS_WOLFSSL} vde=${M33MU_HAS_VDE} tui=${M33MU_HAS_NCURSES} libelf=${M33MU_HAS_LIBELF} libdw=${M33MU_HAS_LIBDW}${M33MU_COLOR_RESET}")
 
 if(M33MU_CONFIG_WARNINGS)
   foreach(msg IN LISTS M33MU_CONFIG_WARNINGS)

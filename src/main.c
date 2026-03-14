@@ -37,7 +37,6 @@
 #include "m33mu/gdbstub.h"
 #include "m33mu/exec_helpers.h"
 #include "m33mu/execute.h"
-#include "m33mu/unicorn.h"
 #include "m33mu/core_sys.h"
 #include "m33mu/code_cache.h"
 #include "m33mu/trace.h"
@@ -835,65 +834,6 @@ static mm_bool symbol_lookup_name(mm_u32 pc, char *out, size_t out_len)
 }
 
 #ifdef M33MU_HAS_LIBDW
-struct symbol_find_ctx {
-    const char *name;
-    mm_u32 addr;
-    mm_bool found;
-};
-
-static int symbol_find_cb(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Addr start, void *arg)
-{
-    struct symbol_find_ctx *ctx = (struct symbol_find_ctx *)arg;
-    int count;
-    int i;
-    (void)userdata;
-    (void)name;
-    (void)start;
-    if (ctx == 0 || ctx->found) {
-        return 0;
-    }
-    count = dwfl_module_getsymtab(mod);
-    if (count <= 0) {
-        return 0;
-    }
-    for (i = 0; i < count; ++i) {
-        GElf_Sym sym;
-        GElf_Word shndx;
-        const char *sname = dwfl_module_getsym(mod, i, &sym, &shndx);
-        if (sname != 0 && strcmp(sname, ctx->name) == 0) {
-            ctx->addr = (mm_u32)sym.st_value;
-            ctx->found = MM_TRUE;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static mm_bool symbol_lookup_addr_by_name(const char *name, mm_u32 *addr_out)
-{
-    struct symbol_find_ctx ctx;
-    if (name == 0 || name[0] == '\0' || addr_out == 0) {
-        return MM_FALSE;
-    }
-    if (!g_symbol_ctx.ready || g_symbol_ctx.dwfl == 0) {
-        return MM_FALSE;
-    }
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.name = name;
-    (void)dwfl_getmodules(g_symbol_ctx.dwfl, symbol_find_cb, &ctx, 0);
-    if (!ctx.found) {
-        return MM_FALSE;
-    }
-    *addr_out = ctx.addr & ~1u;
-    return MM_TRUE;
-}
-#else
-static mm_bool symbol_lookup_addr_by_name(const char *name, mm_u32 *addr_out)
-{
-    (void)name;
-    (void)addr_out;
-    return MM_FALSE;
-}
 #endif
 
 static const char *path_basename(const char *path)
@@ -3121,22 +3061,12 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         }
 
         if (!execute_it && d.kind != MM_OP_IT) {
-            if (mm_unicorn_active()) {
-                mm_unicorn_clear_m33mu_write();
-                mm_unicorn_snapshot_pre(cpu);
-            }
             if (*it_remaining > 0u) {
                 mm_u8 raw = itstate_get(cpu->xpsr);
                 *it_pattern >>= 1;
                 (*it_remaining)--;
                 raw = itstate_advance(raw);
                 cpu->xpsr = itstate_set(cpu->xpsr, raw);
-            }
-            if (mm_unicorn_active()) {
-                if (mm_unicorn_step_compare(cpu, map, &f, &d, execute_it) == MM_UNICORN_STEP_FAIL) {
-                    if (done) *done = MM_TRUE;
-                    return MM_FALSE;
-                }
             }
             result = MM_TRUE;
             goto out;
@@ -3177,10 +3107,6 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             exec_ctx.raise_usage_fault = raise_usage_fault;
             exec_ctx.exc_return_unstack = exc_return_unstack;
             exec_ctx.enter_exception = enter_exception;
-            if (mm_unicorn_active()) {
-                mm_unicorn_clear_m33mu_write();
-                mm_unicorn_snapshot_pre(cpu);
-            }
             (void)mm_execute_decoded(&exec_ctx);
         }
 
@@ -3974,12 +3900,6 @@ int main(int argc, char **argv)
     mm_u32 opt_record_window = 0;
     mm_bool opt_call_trace = MM_FALSE;
     mm_bool opt_dualbank = MM_FALSE;
-    mm_bool opt_unicorn = MM_FALSE;
-    const char *opt_unicorn_target = 0;
-    mm_u32 opt_unicorn_stack = 256u;
-    mm_u32 opt_unicorn_max_steps = 10000000u;
-    mm_u32 opt_unicorn_entry_pc = 0;
-    mm_bool opt_unicorn_entry_set = MM_FALSE;
     const char *gdb_symbols = 0;
     const char *gdb_symbols_list[32];
     size_t gdb_symbols_count = 0;
@@ -4229,57 +4149,6 @@ int main(int argc, char **argv)
             opt_record = MM_TRUE;
         } else if (strcmp(argv[i], "--call-trace") == 0) {
             opt_call_trace = MM_TRUE;
-        } else if (strcmp(argv[i], "--unicorn") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "missing unicorn target (symbol or address)\n");
-                return 1;
-            }
-            opt_unicorn = MM_TRUE;
-            opt_unicorn_target = argv[i + 1];
-            i++;
-        } else if (strncmp(argv[i], "--unicorn=", 10) == 0) {
-            opt_unicorn = MM_TRUE;
-            opt_unicorn_target = argv[i] + 10;
-        } else if (strcmp(argv[i], "--unicorn-stack") == 0) {
-            unsigned long v;
-            if (i + 1 >= argc) {
-                fprintf(stderr, "missing unicorn-stack value\n");
-                return 1;
-            }
-            v = strtoul(argv[i + 1], 0, 10);
-            if (v == 0u) {
-                fprintf(stderr, "invalid unicorn-stack value: %s\n", argv[i + 1]);
-                return 1;
-            }
-            opt_unicorn_stack = (mm_u32)v;
-            i++;
-        } else if (strncmp(argv[i], "--unicorn-stack=", 16) == 0) {
-            unsigned long v = strtoul(argv[i] + 16, 0, 10);
-            if (v == 0u) {
-                fprintf(stderr, "invalid unicorn-stack value: %s\n", argv[i]);
-                return 1;
-            }
-            opt_unicorn_stack = (mm_u32)v;
-        } else if (strcmp(argv[i], "--unicorn-max-steps") == 0) {
-            unsigned long v;
-            if (i + 1 >= argc) {
-                fprintf(stderr, "missing unicorn-max-steps value\n");
-                return 1;
-            }
-            v = strtoul(argv[i + 1], 0, 10);
-            if (v == 0u) {
-                fprintf(stderr, "invalid unicorn-max-steps value: %s\n", argv[i + 1]);
-                return 1;
-            }
-            opt_unicorn_max_steps = (mm_u32)v;
-            i++;
-        } else if (strncmp(argv[i], "--unicorn-max-steps=", 20) == 0) {
-            unsigned long v = strtoul(argv[i] + 20, 0, 10);
-            if (v == 0u) {
-                fprintf(stderr, "invalid unicorn-max-steps value: %s\n", argv[i]);
-                return 1;
-            }
-            opt_unicorn_max_steps = (mm_u32)v;
         } else if (strcmp(argv[i], "--fault-clock") == 0) {
             unsigned long long t;
             if (i + 1 >= argc) {
@@ -4473,7 +4342,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_USE_LIBCAPSTONE
                         "[--capstone] [--capstone-verbose] "
 #endif
-                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--record] [--record-start <pc>] [--record-start-dump] [--record-start-dump-ram] [--record-end-dump-ram] [--record-trace <path>] [--record-quiet] [--record-dump <n>] [--call-trace] [--dualbank] [--unicorn <symbol|addr>] [--unicorn-stack N] [--unicorn-max-steps N] [--fault-clock N] [--no-tz] [--gdb-symbols <elf>] "
+                        "[--uart-stdout] [--quit-on-faults] [--meminfo] [--record] [--record-start <pc>] [--record-start-dump] [--record-start-dump-ram] [--record-end-dump-ram] [--record-trace <path>] [--record-quiet] [--record-dump <n>] [--call-trace] [--dualbank] [--fault-clock N] [--no-tz] [--gdb-symbols <elf>] "
                         "[--expect-bkpt 0xNN] [--timeout seconds] "
                         "[--boot flash|ram|spiflash] "
                         "[--boot-offset=0xN] "
@@ -4721,38 +4590,6 @@ int main(int argc, char **argv)
     }
 
     build_symbol_db(images, image_count, gdb_symbols_list, gdb_symbols_count);
-
-    if (opt_unicorn) {
-        if (!mm_unicorn_available()) {
-            fprintf(stderr, "Unicorn support not available (built without libunicorn)\n");
-            rc = 1;
-            goto cleanup;
-        }
-        if (opt_unicorn_target == 0 || opt_unicorn_target[0] == '\0') {
-            fprintf(stderr, "missing unicorn target (symbol or address)\n");
-            rc = 1;
-            goto cleanup;
-        }
-        if (parse_hex_u32(opt_unicorn_target, &opt_unicorn_entry_pc)) {
-            opt_unicorn_entry_set = MM_TRUE;
-        } else if (symbol_lookup_addr_by_name(opt_unicorn_target, &opt_unicorn_entry_pc)) {
-            opt_unicorn_entry_set = MM_TRUE;
-        } else {
-            fprintf(stderr, "failed to resolve unicorn target: %s\n", opt_unicorn_target);
-            rc = 1;
-            goto cleanup;
-        }
-        if (!mm_unicorn_configure(opt_unicorn_entry_pc, opt_unicorn_stack, opt_unicorn_max_steps)) {
-            fprintf(stderr, "failed to configure unicorn\n");
-            rc = 1;
-            goto cleanup;
-        }
-        opt_disable_tb = MM_TRUE;
-        printf("[UNICORN] target=0x%08lx stack=%lu max_steps=%lu\n",
-               (unsigned long)opt_unicorn_entry_pc,
-               (unsigned long)opt_unicorn_stack,
-               (unsigned long)opt_unicorn_max_steps);
-    }
 
     memset(&persist, 0, sizeof(persist));
     if (opt_persist) {
@@ -5598,42 +5435,40 @@ int main(int argc, char **argv)
 
                 /* Handle pending system exceptions (SysTick, PendSV). */
 handle_pending:
-                if (!mm_unicorn_active()) {
-                    if (cpu.mode == MM_THREAD && scs.pend_sv &&
-                        !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_PENDSV)) {
-                        if (!enter_exception(&cpu, &map, &scs, MM_VECT_PENDSV, cpu.r[15] & ~1u, cpu.xpsr)) {
-                            done = MM_TRUE;
-                        } else {
-                            itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
-                        }
-                        continue;
+                if (cpu.mode == MM_THREAD && scs.pend_sv &&
+                    !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_PENDSV)) {
+                    if (!enter_exception(&cpu, &map, &scs, MM_VECT_PENDSV, cpu.r[15] & ~1u, cpu.xpsr)) {
+                        done = MM_TRUE;
+                    } else {
+                        itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                     }
-                    if (cpu.mode == MM_THREAD && scs.pend_st &&
-                        !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_SYSTICK)) {
-                        if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {
-                            done = MM_TRUE;
-                        } else {
-                            itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
-                        }
-                        continue;
+                    continue;
+                }
+                if (cpu.mode == MM_THREAD && scs.pend_st &&
+                    !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_SYSTICK)) {
+                    if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {
+                        done = MM_TRUE;
+                    } else {
+                        itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                     }
+                    continue;
+                }
 
-                    /* Manage interrupts */
-                    {
-                        enum mm_sec_state irq_sec = MM_SECURE;
-                        pend_irq = mm_nvic_select_routed(&nvic, &cpu, &irq_sec);
-                        if (pend_irq >= 0) {
-                            mm_u32 exc_num = 16u + (mm_u32)pend_irq;
-                            /* Clear pending when accepted. */
-                            mm_nvic_set_pending(&nvic, (mm_u32)pend_irq, MM_FALSE);
-                            mm_nvic_set_active(&nvic, (mm_u32)pend_irq, MM_TRUE);
-                            if (!enter_exception_ex(&cpu, &map, &scs, exc_num, cpu.r[15] & ~1u, cpu.xpsr, irq_sec)) {
-                                done = MM_TRUE;
-                            } else {
-                                itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
-                            }
-                            continue;
+                /* Manage interrupts */
+                {
+                    enum mm_sec_state irq_sec = MM_SECURE;
+                    pend_irq = mm_nvic_select_routed(&nvic, &cpu, &irq_sec);
+                    if (pend_irq >= 0) {
+                        mm_u32 exc_num = 16u + (mm_u32)pend_irq;
+                        /* Clear pending when accepted. */
+                        mm_nvic_set_pending(&nvic, (mm_u32)pend_irq, MM_FALSE);
+                        mm_nvic_set_active(&nvic, (mm_u32)pend_irq, MM_TRUE);
+                        if (!enter_exception_ex(&cpu, &map, &scs, exc_num, cpu.r[15] & ~1u, cpu.xpsr, irq_sec)) {
+                            done = MM_TRUE;
+                        } else {
+                            itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                         }
+                        continue;
                     }
                 }
 
@@ -5652,14 +5487,6 @@ handle_pending:
                         mm_gdb_stub_notify_stop(&gdb, 5);
                     }
                     continue;
-                }
-
-                if (opt_unicorn && opt_unicorn_entry_set && !mm_unicorn_active() &&
-                    ((cpu.r[15] & ~1u) == opt_unicorn_entry_pc)) {
-                    if (!mm_unicorn_maybe_start(&cpu, &map)) {
-                        rc = 1;
-                        goto cleanup;
-                    }
                 }
 
                 /* Fast path: translation block cache */
@@ -6073,18 +5900,7 @@ handle_pending:
                                 (unsigned long long)cycle_total);
                     }
                     if (!execute_it && d.kind != MM_OP_IT) {
-                        if (opt_unicorn && mm_unicorn_active()) {
-                            mm_unicorn_clear_m33mu_write();
-                            mm_unicorn_snapshot_pre(&cpu);
-                        }
                         mm_it_advance(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
-                        if (opt_unicorn && mm_unicorn_active()) {
-                            if (mm_unicorn_step_compare(&cpu, &map, &f, &d, execute_it) == MM_UNICORN_STEP_FAIL) {
-                                rc = 1;
-                                done = MM_TRUE;
-                                goto cleanup;
-                            }
-                        }
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);
@@ -6124,13 +5940,9 @@ handle_pending:
                         continue;
                     }
 
-                        {
-                            struct mm_execute_ctx exec_ctx;
-                            calltrace_handle_decoded(&cpu, &f, &d);
-                            if (opt_unicorn && mm_unicorn_active()) {
-                                mm_unicorn_clear_m33mu_write();
-                                mm_unicorn_snapshot_pre(&cpu);
-                        }
+                    {
+                        struct mm_execute_ctx exec_ctx;
+                        calltrace_handle_decoded(&cpu, &f, &d);
                         exec_ctx.cpu = &cpu;
                         exec_ctx.map = &map;
                         exec_ctx.scs = &scs;
@@ -6153,14 +5965,6 @@ handle_pending:
                             if (exec_res == MM_EXEC_CONTINUE) {
                                 if (execute_it && d.kind != MM_OP_IT) {
                                     mm_it_advance(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
-                                }
-                                if (opt_unicorn && mm_unicorn_active()) {
-                                    mm_unicorn_step_result uni_res = mm_unicorn_step_compare(&cpu, &map, &f, &d, execute_it);
-                                    if (uni_res == MM_UNICORN_STEP_FAIL) {
-                                        rc = 1;
-                                        done = MM_TRUE;
-                                        goto cleanup;
-                                    }
                                 }
                                 if (trace_started) {
                                     mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
@@ -6270,7 +6074,6 @@ handle_pending:
     }
 
 cleanup:
-    mm_unicorn_stop();
     mm_spiflash_shutdown_all();
 #ifdef M33MU_HAS_LIBTPMS
     mm_tpm_tis_shutdown_all();

@@ -168,6 +168,86 @@ static void aes_build_iv_rev(const struct aes_state *a, mm_u8 *iv_out)
         iv_out[i * 4u + 3u] = (mm_u8)(w & 0xffu);
     }
 }
+
+static void aes_gcm_shift_right(mm_u8 *block)
+{
+    int i;
+    mm_u8 carry = 0u;
+    for (i = 0; i < 16; ++i) {
+        mm_u8 next_carry = (mm_u8)(block[i] & 1u);
+        block[i] = (mm_u8)((block[i] >> 1) | (carry << 7));
+        carry = next_carry;
+    }
+}
+
+static void aes_gcm_mul(mm_u8 *x, const mm_u8 *y)
+{
+    mm_u8 z[16] = {0};
+    mm_u8 v[16];
+    mm_u32 bit;
+    memcpy(v, y, sizeof(v));
+    for (bit = 0u; bit < 128u; ++bit) {
+        mm_u32 byte_idx = bit / 8u;
+        mm_u32 bit_idx = 7u - (bit % 8u);
+        mm_u8 lsb;
+        if (((x[byte_idx] >> bit_idx) & 1u) != 0u) {
+            mm_u32 i;
+            for (i = 0u; i < 16u; ++i) {
+                z[i] ^= v[i];
+            }
+        }
+        lsb = (mm_u8)(v[15] & 1u);
+        aes_gcm_shift_right(v);
+        if (lsb != 0u) {
+            v[0] ^= 0xe1u;
+        }
+    }
+    memcpy(x, z, sizeof(z));
+}
+
+static void aes_gcm_ghash_update(mm_u8 *state, const mm_u8 *h,
+                                 const mm_u8 *data, mm_u32 len)
+{
+    while (len >= 16u) {
+        mm_u32 i;
+        for (i = 0u; i < 16u; ++i) {
+            state[i] ^= data[i];
+        }
+        aes_gcm_mul(state, h);
+        data += 16u;
+        len -= 16u;
+    }
+    if (len > 0u) {
+        mm_u8 tail[16] = {0};
+        mm_u32 i;
+        memcpy(tail, data, len);
+        for (i = 0u; i < 16u; ++i) {
+            state[i] ^= tail[i];
+        }
+        aes_gcm_mul(state, h);
+    }
+}
+
+static void aes_gcm_ghash(Aes *aes, const mm_u8 *aad, mm_u32 aad_len,
+                          const mm_u8 *payload, mm_u32 payload_len,
+                          mm_u8 *tag_out)
+{
+    mm_u8 h[16];
+    mm_u8 zero[16] = {0};
+    mm_u8 lens[16] = {0};
+    mm_u64 aad_bits = (mm_u64)aad_len * 8u;
+    mm_u64 payload_bits = (mm_u64)payload_len * 8u;
+    int i;
+    (void)wc_AesEcbEncrypt(aes, h, zero, 16u);
+    memset(tag_out, 0, 16u);
+    aes_gcm_ghash_update(tag_out, h, aad, aad_len);
+    aes_gcm_ghash_update(tag_out, h, payload, payload_len);
+    for (i = 0; i < 8; ++i) {
+        lens[7 - i] = (mm_u8)((aad_bits >> (i * 8)) & 0xffu);
+        lens[15 - i] = (mm_u8)((payload_bits >> (i * 8)) & 0xffu);
+    }
+    aes_gcm_ghash_update(tag_out, h, lens, sizeof(lens));
+}
 #endif
 
 #ifdef M33MU_HAS_WOLFSSL
@@ -865,7 +945,7 @@ static void aes_finalize_gcm(struct aes_state *a, mm_bool decrypt)
             }
             wc_AesInit(&tmp, NULL, INVALID_DEVID);
             wc_AesGcmSetKey(&tmp, key, key_len);
-            GHASH(&tmp.gcm, a->aad, aad_len, a->payload, payload_len, a->tag, 16u);
+            aes_gcm_ghash(&tmp, a->aad, aad_len, a->payload, payload_len, a->tag);
             (void)wc_AesEcbEncrypt(&tmp, scratch, j0, 16u);
             {
                 mm_u32 i;

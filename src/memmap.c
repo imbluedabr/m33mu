@@ -20,7 +20,6 @@
  */
 
 #include "m33mu/memmap.h"
-#include "m33mu/unicorn.h"
 #include "m33mu/trace.h"
 #include "m33mu/code_cache.h"
 #include <stdio.h>
@@ -463,10 +462,6 @@ mm_bool mm_memmap_write(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 add
                 memmap_read_old_bytes(map, sec, addr, size, old_bytes, &trace_flags)) {
                 mm_trace_log_mem_write(addr, size, old_bytes, trace_flags);
             }
-            if (mm_unicorn_active()) {
-                mm_unicorn_record_m33mu_write(sec, addr, size, value);
-                return MM_TRUE;
-            }
             buf = (mm_u8 *)map->ram.buffer;
             if (size == 4u) {
                 buf[offset] = (mm_u8)(value & 0xffu);
@@ -639,10 +634,6 @@ mm_bool mm_memmap_write8(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 ad
             if (mm_trace_step_active() &&
                 memmap_read_old_bytes(map, sec, addr, 1u, old_bytes, &trace_flags)) {
                 mm_trace_log_mem_write(addr, 1u, old_bytes, trace_flags);
-            }
-            if (mm_unicorn_active()) {
-                mm_unicorn_record_m33mu_write(sec, addr, 1u, (mm_u32)value);
-                return MM_TRUE;
             }
             buf = (mm_u8 *)map->ram.buffer;
             buf[offset] = value;
