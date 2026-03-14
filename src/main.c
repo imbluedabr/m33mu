@@ -42,6 +42,7 @@
 #include "m33mu/code_cache.h"
 #include "m33mu/trace.h"
 #include "mcxn947/mcxn947_romapi.h"
+#include "lpc55s69/lpc55s69_romapi.h"
 #include "rp2350/rp2350_mmio.h"
 #include "stm32h533/stm32h533_mmio.h"
 #include "stm32h563/stm32h563_mmio.h"
@@ -3060,6 +3061,10 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             result = MM_TRUE;
             goto out;
         }
+        if (mm_lpc55s69_romapi_handle(cpu, map)) {
+            result = MM_TRUE;
+            goto out;
+        }
 
         f = mm_fetch_t32_memmap(cpu, map, cpu->sec_state);
         if (f.fault) {
@@ -4996,6 +5001,16 @@ int main(int argc, char **argv)
                 mm_prot_add_region(&prot, 0x1303fc00u, 0x00000200u, MM_PROT_PERM_READ, MM_SECURE);
                 mm_prot_add_region(&prot, 0x1303fc00u, 0x00000200u, MM_PROT_PERM_READ, MM_NONSECURE);
             }
+            if (cpu_name != 0 && strcmp(cpu_name, "lpc55s69") == 0) {
+                /* LPC55S69 ROM is at 0x03000000 (NS alias) / 0x13000000 (S alias).
+                 * The hardware IDAU hardwires this range as NS-accessible.
+                 * Register both S and NS attributions so S and NS code can access
+                 * the ROM API bootloader tree and stubs. */
+                mm_prot_add_region(&prot, 0x03000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
+                mm_prot_add_region(&prot, 0x03000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                mm_prot_add_region(&prot, 0x13000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
+                mm_prot_add_region(&prot, 0x13000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+            }
             if (cpu_name != 0 &&
                 (strcmp(cpu_name, "stm32h563") == 0 || strcmp(cpu_name, "stm32h533") == 0)) {
                 mm_prot_add_region(&prot, 0x0CFFF000u, 0x800u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
@@ -5888,6 +5903,14 @@ handle_pending:
                         continue;
                     }
                     if (mm_mcxn947_romapi_handle(&cpu, &map)) {
+                        if (trace_started) {
+                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
+                            mm_trace_end_step(&cpu);
+                            record_window_step(&cpu, &map);
+                        }
+                        continue;
+                    }
+                    if (mm_lpc55s69_romapi_handle(&cpu, &map)) {
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                             mm_trace_end_step(&cpu);

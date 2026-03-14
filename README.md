@@ -28,6 +28,7 @@ These are the current valid `--cpu` option values:
 - stm32h563 (default)
 - stm32u585
 - stm32l552
+- lpc55s69
 - mcxw71c
 - mcxn947
 - nrf5340

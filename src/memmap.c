@@ -222,6 +222,8 @@ void mm_memmap_init(struct mm_memmap *map, struct mmio_region *regions, size_t r
     map->interceptor_opaque = 0;
     map->flash_write = 0;
     map->flash_write_opaque = 0;
+    map->flash_ecc_check = 0;
+    map->flash_ecc_check_opaque = 0;
     map->code_cache = 0;
     map->flash_base_s = map->flash_base_ns = 0;
     map->flash_size_s = map->flash_size_ns = 0;
@@ -245,6 +247,12 @@ void mm_memmap_set_flash_writer(struct mm_memmap *map, mm_flash_write_cb fn, voi
 {
     map->flash_write = fn;
     map->flash_write_opaque = opaque;
+}
+
+void mm_memmap_set_flash_ecc_check(struct mm_memmap *map, mm_flash_ecc_check_cb fn, void *opaque)
+{
+    map->flash_ecc_check = fn;
+    map->flash_ecc_check_opaque = opaque;
 }
 
 void mm_memmap_set_code_cache(struct mm_memmap *map, struct mm_code_cache *cc)
@@ -336,6 +344,9 @@ mm_bool mm_memmap_read(const struct mm_memmap *map, enum mm_sec_state sec, mm_u3
         }
         if (addr >= base && (addr - base) + size <= size_limit) {
             offset = addr - base;
+            if (map->flash_ecc_check != 0 && !map->flash_ecc_check(map->flash_ecc_check_opaque, offset)) {
+                return MM_FALSE;
+            }
             if (read_buf_le(map->flash.buffer, offset, size, &tmp)) { *value_out = tmp; return MM_TRUE; }
         }
         /* Try non-secure flash window. */
@@ -347,6 +358,9 @@ mm_bool mm_memmap_read(const struct mm_memmap *map, enum mm_sec_state sec, mm_u3
         }
         if (addr >= base && (addr - base) + size <= size_limit) {
             offset = addr - base;
+            if (map->flash_ecc_check != 0 && !map->flash_ecc_check(map->flash_ecc_check_opaque, offset)) {
+                return MM_FALSE;
+            }
             if (read_buf_le(map->flash.buffer, offset, size, &tmp)) { *value_out = tmp; return MM_TRUE; }
         }
     }
@@ -518,6 +532,9 @@ mm_bool mm_memmap_fetch_read16(const struct mm_memmap *map, enum mm_sec_state se
         }
         if (addr >= base && (addr - base) + 2u <= size_limit) {
             offset = addr - base;
+            if (map->flash_ecc_check != 0 && !map->flash_ecc_check(map->flash_ecc_check_opaque, offset)) {
+                return MM_FALSE;
+            }
             if (read_buf_le(map->flash.buffer, offset, 2u, &tmp)) { *value_out = tmp; return MM_TRUE; }
             return MM_FALSE;
         }
@@ -530,6 +547,9 @@ mm_bool mm_memmap_fetch_read16(const struct mm_memmap *map, enum mm_sec_state se
         }
         if (addr >= base && (addr - base) + 2u <= size_limit) {
             offset = addr - base;
+            if (map->flash_ecc_check != 0 && !map->flash_ecc_check(map->flash_ecc_check_opaque, offset)) {
+                return MM_FALSE;
+            }
             if (read_buf_le(map->flash.buffer, offset, 2u, &tmp)) { *value_out = tmp; return MM_TRUE; }
             return MM_FALSE;
         }
@@ -562,7 +582,11 @@ mm_bool mm_memmap_read8(const struct mm_memmap *map, enum mm_sec_state sec, mm_u
             size_limit = (mm_u32)map->flash.length;
         }
         if (addr >= base && (addr - base) < size_limit) {
-            *value_out = map->flash.buffer[addr - base];
+            mm_u32 flash_off = addr - base;
+            if (map->flash_ecc_check != 0 && !map->flash_ecc_check(map->flash_ecc_check_opaque, flash_off)) {
+                return MM_FALSE;
+            }
+            *value_out = map->flash.buffer[flash_off];
             return MM_TRUE;
         }
         base = map->flash_base_ns;
@@ -572,7 +596,11 @@ mm_bool mm_memmap_read8(const struct mm_memmap *map, enum mm_sec_state sec, mm_u
             size_limit = (mm_u32)map->flash.length;
         }
         if (addr >= base && (addr - base) < size_limit) {
-            *value_out = map->flash.buffer[addr - base];
+            mm_u32 flash_off = addr - base;
+            if (map->flash_ecc_check != 0 && !map->flash_ecc_check(map->flash_ecc_check_opaque, flash_off)) {
+                return MM_FALSE;
+            }
+            *value_out = map->flash.buffer[flash_off];
             return MM_TRUE;
         }
     }

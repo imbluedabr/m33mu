@@ -48,6 +48,13 @@ typedef mm_bool (*mm_flash_write_cb)(void *opaque,
                                      mm_u32 size_bytes,
                                      mm_u32 value);
 
+/*
+ * ECC check callback: called before every flash read/fetch with the byte
+ * offset within the flash buffer.  Return MM_TRUE to allow the read, or
+ * MM_FALSE to signal a bus fault (e.g. erased ECC word on LPC55S69).
+ */
+typedef mm_bool (*mm_flash_ecc_check_cb)(void *opaque, mm_u32 byte_offset);
+
 struct mm_memmap {
     struct mm_mem flash;
     struct mm_mem ram;
@@ -69,12 +76,15 @@ struct mm_memmap {
     void *interceptor_opaque;
     mm_flash_write_cb flash_write;
     void *flash_write_opaque;
+    mm_flash_ecc_check_cb flash_ecc_check;
+    void *flash_ecc_check_opaque;
 };
 
 void mm_memmap_init(struct mm_memmap *map, struct mmio_region *regions, size_t region_capacity);
 struct mm_memmap *mm_memmap_current(void);
 void mm_memmap_set_interceptor(struct mm_memmap *map, mm_access_interceptor fn, void *opaque);
 void mm_memmap_set_flash_writer(struct mm_memmap *map, mm_flash_write_cb fn, void *opaque);
+void mm_memmap_set_flash_ecc_check(struct mm_memmap *map, mm_flash_ecc_check_cb fn, void *opaque);
 void mm_memmap_set_code_cache(struct mm_memmap *map, struct mm_code_cache *cc);
 mm_bool mm_memmap_configure_flash(struct mm_memmap *map, const struct mm_target_cfg *cfg, const mm_u8 *backing, mm_bool secure_view);
 mm_bool mm_memmap_configure_ram(struct mm_memmap *map, const struct mm_target_cfg *cfg, mm_u8 *backing, mm_bool secure_view);

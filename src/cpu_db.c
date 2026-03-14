@@ -64,6 +64,10 @@
 #include "rp2350/rp2350_uart_spi.h"
 #include "rp2350/rp2350_timers.h"
 #include "rp2350/cpu_config.h"
+#include "lpc55s69/lpc55s69_mmio.h"
+#include "lpc55s69/lpc55s69_flexcomm.h"
+#include "lpc55s69/lpc55s69_timers.h"
+#include "lpc55s69/cpu_config.h"
 
 struct mm_cpu_entry {
     const char *name;
@@ -384,6 +388,41 @@ static const struct mm_cpu_entry cpu_table[] = {
             RP2350_TIMER_INIT,
             RP2350_TIMER_RESET,
             RP2350_TIMER_TICK
+        }
+    },
+    {
+        "lpc55s69",
+        {
+            LPC55S69_FLASH_BASE_S,
+            LPC55S69_FLASH_SIZE,
+            LPC55S69_FLASH_BASE_NS,
+            LPC55S69_FLASH_SIZE,
+            LPC55S69_RAM_BASE_S,
+            LPC55S69_RAM_SIZE,
+            LPC55S69_RAM_BASE_NS,
+            LPC55S69_RAM_SIZE,
+            1,
+            LPC55S69_RAM_REGIONS,
+            LPC55S69_RAM_REGION_COUNT,
+            LPC55S69_MPCBB_BLOCK_SIZE,
+            LPC55S69_MPCBB_SECURE,
+            LPC55S69_FLAGS,
+            LPC55S69_SOC_RESET,
+            LPC55S69_SOC_REGISTER,
+            LPC55S69_FLASH_BIND,
+            LPC55S69_CLOCK_GET_HZ,
+            LPC55S69_USART_INIT,
+            LPC55S69_USART_RESET,
+            LPC55S69_USART_POLL,
+            LPC55S69_SPI_INIT,
+            LPC55S69_SPI_RESET,
+            LPC55S69_SPI_POLL,
+            0,
+            0,
+            0,
+            LPC55S69_TIMER_INIT,
+            LPC55S69_TIMER_RESET,
+            LPC55S69_TIMER_TICK
         }
     }
 };
