@@ -24,11 +24,7 @@
 #include <wchar.h>
 #include <stdint.h>
 #include <time.h>
-#if defined(M33MU_USE_NCURSESW)
-#include <ncursesw/curses.h>
-#else
 #include <curses.h>
-#endif
 
 #include <fcntl.h>
 #include <termios.h>

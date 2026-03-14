@@ -307,7 +307,16 @@ if(PKG_CONFIG_FOUND)
   pkg_check_modules(PC_NCURSESW QUIET ncursesw)
 endif()
 
-if(PC_NCURSESW_FOUND)
+find_path(NCURSESW_INCLUDE_DIR
+  NAMES curses.h
+  HINTS ${PC_NCURSESW_INCLUDE_DIRS}
+)
+find_library(NCURSESW_LIBRARY
+  NAMES ncursesw cursesw
+  HINTS ${PC_NCURSESW_LIBRARY_DIRS}
+)
+
+if(NCURSESW_INCLUDE_DIR AND NCURSESW_LIBRARY)
   set(M33MU_HAS_NCURSES TRUE)
   set(M33MU_USE_NCURSESW TRUE)
 else()
@@ -377,8 +386,11 @@ if(M33MU_HAS_NCURSES)
   target_compile_definitions(m33mu_lib PUBLIC M33MU_HAS_NCURSES=1)
   if(M33MU_USE_NCURSESW)
     target_compile_definitions(m33mu_lib PUBLIC M33MU_USE_NCURSESW=1)
-    target_include_directories(m33mu_lib PUBLIC ${PC_NCURSESW_INCLUDE_DIRS})
-    target_link_libraries(m33mu_lib PUBLIC ${PC_NCURSESW_LIBRARIES})
+    target_include_directories(m33mu_lib PUBLIC ${NCURSESW_INCLUDE_DIR})
+    target_link_libraries(m33mu_lib PUBLIC ${NCURSESW_LIBRARY})
+    if(PC_NCURSESW_LDFLAGS_OTHER)
+      target_link_options(m33mu_lib PUBLIC ${PC_NCURSESW_LDFLAGS_OTHER})
+    endif()
   else()
     target_include_directories(m33mu_lib PUBLIC ${CURSES_INCLUDE_DIRS})
     target_link_libraries(m33mu_lib PUBLIC ${CURSES_LIBRARIES})
