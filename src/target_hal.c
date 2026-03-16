@@ -34,6 +34,7 @@ mm_bool mm_tui_is_active(void);
 
 static mm_bool g_uart_stdout = MM_FALSE;
 static int g_uart_rx_trace = -1;
+static const struct mm_target_cfg *g_target_cfg = 0;
 
 static mm_bool uart_rx_trace_enabled(void)
 {
@@ -232,6 +233,7 @@ void mm_target_soc_reset(const struct mm_target_cfg *cfg)
 
 mm_bool mm_target_register_mmio(const struct mm_target_cfg *cfg, struct mmio_bus *bus)
 {
+    g_target_cfg = cfg;
     if (cfg == 0 || cfg->soc_register_mmio == 0) {
         return MM_TRUE;
     }
@@ -244,10 +246,16 @@ void mm_target_flash_bind(const struct mm_target_cfg *cfg,
                           mm_u32 flash_size,
                           const struct mm_flash_persist *persist)
 {
+    g_target_cfg = cfg;
     if (cfg == 0 || cfg->flash_bind == 0) {
         return;
     }
     cfg->flash_bind(map, flash, flash_size, persist, cfg->flags);
+}
+
+const struct mm_target_cfg *mm_target_current_cfg(void)
+{
+    return g_target_cfg;
 }
 
 mm_u64 mm_target_cpu_hz(const struct mm_target_cfg *cfg)

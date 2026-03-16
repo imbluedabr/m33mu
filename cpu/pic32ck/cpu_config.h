@@ -42,8 +42,8 @@ static const struct mm_ram_region PIC32CK_RAM_REGIONS[] = {
 #define PIC32CK_TIMER_INIT     mm_pic32ck_timers_init
 #define PIC32CK_TIMER_RESET    mm_pic32ck_timers_reset
 #define PIC32CK_TIMER_TICK     mm_pic32ck_timers_tick
+#define PIC32CK_TZ_ATTR        mm_pic32ck_tz_attr_for_addr
 
 #define PIC32CK_FLAGS (MM_TARGET_FLAG_FPU)
 
 #endif /* M33MU_CPU_PIC32CK_CONFIG_H */
-

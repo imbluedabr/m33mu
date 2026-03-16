@@ -156,6 +156,23 @@ static mm_bool mpcbb_attr_for_addr(const struct mm_prot_ctx *ctx,
     return MM_FALSE;
 }
 
+static mm_bool target_attr_for_addr(const struct mm_prot_ctx *ctx,
+                                    mm_u32 addr,
+                                    enum mm_sau_attr *attr_out,
+                                    enum mm_sec_state *sec_out)
+{
+    mm_u32 region = 0u;
+    if (ctx == 0 || ctx->cfg == 0 || ctx->cfg->tz_attr_for_addr == 0 ||
+        attr_out == 0 || sec_out == 0) {
+        return MM_FALSE;
+    }
+    if (!ctx->cfg->tz_attr_for_addr(addr, attr_out, &region)) {
+        return MM_FALSE;
+    }
+    *sec_out = (*attr_out == MM_SAU_NONSECURE) ? MM_NONSECURE : MM_SECURE;
+    return MM_TRUE;
+}
+
 static const char *attr_name(enum mm_sau_attr attr)
 {
     switch (attr) {
@@ -438,22 +455,24 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
         enum mm_sau_attr mpc_attr = MM_SAU_SECURE;
         enum mm_sec_state mpc_addr_sec = MM_SECURE;
 
-        if (ctx->scs != 0) {
+        if (target_attr_for_addr(ctx, addr, &attr, &addr_sec)) {
+            mpcbb_hit = MM_FALSE;
+        } else if (ctx->scs != 0) {
             sau_attr = mm_sau_attr_for_addr(ctx->scs, addr);
-        }
-        mpcbb_hit = mpcbb_attr_for_addr(ctx, addr, &mpc_attr, &mpc_addr_sec);
-        if (mpcbb_hit) {
-            /* For SRAM on STM32H5, MPCBB (IDAU) and SAU both apply.
-             * Treat the most restrictive attribution as effective. */
-            if (mpc_attr == MM_SAU_SECURE) {
-                attr = MM_SAU_SECURE;
+            mpcbb_hit = mpcbb_attr_for_addr(ctx, addr, &mpc_attr, &mpc_addr_sec);
+            if (mpcbb_hit) {
+                /* For SRAM on STM32H5, MPCBB (IDAU) and SAU both apply.
+                 * Treat the most restrictive attribution as effective. */
+                if (mpc_attr == MM_SAU_SECURE) {
+                    attr = MM_SAU_SECURE;
+                } else {
+                    attr = sau_attr;
+                }
             } else {
                 attr = sau_attr;
             }
-        } else {
-            attr = sau_attr;
+            addr_sec = (attr == MM_SAU_NONSECURE) ? MM_NONSECURE : MM_SECURE;
         }
-        addr_sec = (attr == MM_SAU_NONSECURE) ? MM_NONSECURE : MM_SECURE;
         if (sec == MM_NONSECURE) {
             if (attr == MM_SAU_SECURE) {
                 memfault_reason(ctx, type, sec, addr, "secure-attr", attr, addr_sec, mpcbb_hit);

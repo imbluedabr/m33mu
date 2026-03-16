@@ -23,6 +23,7 @@
 #include "m33mu/mpu.h"
 #include "m33mu/sau.h"
 #include "m33mu/mem_prot.h"
+#include "m33mu/target_hal.h"
 
 mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 addr,
                    mm_bool alt, mm_bool forceunpriv)
@@ -31,6 +32,7 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
     enum mm_sec_state query_sec;
     mm_u32 rbar, rlar;
     mm_bool mpu_match;
+    const struct mm_target_cfg *cfg = mm_target_current_cfg();
     
     /* Determine security state for query:
      * - If alt=1 and we're in Secure state, query Non-secure MPU
@@ -97,9 +99,19 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
         result |= (1u << 0);  /* MRVALID = 1 (region matched) */
     }
     
-    /* IREGION/IRVALID - IDAU not implemented, always 0 */
-    result |= (0u << 23);  /* IRVALID = 0 */
-    result |= (0u << 24);  /* IREGION[7:0] = 0 */
-    
+    if (cfg != 0 && cfg->tz_attr_for_addr != 0) {
+        enum mm_sau_attr idau_attr = MM_SAU_SECURE;
+        mm_u32 idau_region = 0u;
+        if (cfg->tz_attr_for_addr(addr, &idau_attr, &idau_region)) {
+            result |= (1u << 23);                 /* IRVALID */
+            result |= ((idau_region & 0xFFu) << 24);
+            if (idau_attr == MM_SAU_NONSECURE) {
+                result &= ~(1u << 6);
+            } else {
+                result |= (1u << 6);
+            }
+        }
+    }
+
     return result;
 }

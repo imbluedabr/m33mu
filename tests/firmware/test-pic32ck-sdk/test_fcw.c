@@ -28,6 +28,15 @@
 #define FCW_INTFLAG_DONE (1u << 0)
 
 #define FCW_WRKEY        0x91C32C01u
+#define FCW_OP_SDW       1u
+#define FCW_OP_QDW       2u
+#define FCW_OP_ROW       3u
+#define FCW_OP_PAGE_ERASE 4u
+
+#define TEST_FLASH_ADDR  0x0C1FF000u
+
+static volatile uint32_t *const test_flash = (volatile uint32_t *)TEST_FLASH_ADDR;
+static uint32_t row_buf[256];
 
 static void fcw_wait_busy(void)
 {
@@ -37,6 +46,7 @@ static void fcw_wait_busy(void)
 int main(void)
 {
     int all = 1;
+    int i;
     printf("=== PIC32CK FCW test ===\n");
 
     /* Test 1: STATUS reads not-busy at init */
@@ -63,25 +73,64 @@ int main(void)
     printf("FCW DONE cleared: %s\n", t3 ? "PASS" : "FAIL");
     all &= t3;
 
-    /* Test 4: Write DATA registers (verify no fault, check read-back) */
-    for (int i = 0; i < 8; ++i) {
-        FCW_DATA(i) = (uint32_t)(0xA0000000u | (uint32_t)i);
+    /* Test 4: Erase a page and verify the backing flash changes. */
+    FCW_KEY = FCW_WRKEY;
+    FCW_ADDR = TEST_FLASH_ADDR;
+    FCW_CTRLA = FCW_OP_PAGE_ERASE;
+    fcw_wait_busy();
+    int t4 = 1;
+    for (i = 0; i < 8; ++i) {
+        if (test_flash[i] != 0xFFFFFFFFu) {
+            t4 = 0;
+        }
     }
-    int t4 = (FCW_DATA(0) == 0xA0000000u) && (FCW_DATA(7) == 0xA0000007u);
-    printf("FCW DATA r/w: %s\n", t4 ? "PASS" : "FAIL");
+    printf("FCW page erase: %s\n", t4 ? "PASS" : "FAIL");
     all &= t4;
 
-    /* Test 5: SWAP register read/write */
-    FCW_SWAP = 0u;
-    int t5 = (FCW_SWAP == 0u);
-    printf("FCW SWAP r/w: %s\n", t5 ? "PASS" : "FAIL");
+    /* Test 5: Quad double-word program updates emulated flash. */
+    for (i = 0; i < 8; ++i) {
+        FCW_DATA(i) = (uint32_t)(0xA0000000u | (uint32_t)i);
+    }
+    FCW_KEY = FCW_WRKEY;
+    FCW_ADDR = TEST_FLASH_ADDR;
+    FCW_CTRLA = FCW_OP_QDW;
+    fcw_wait_busy();
+    int t5 = 1;
+    for (i = 0; i < 8; ++i) {
+        if (test_flash[i] != (uint32_t)(0xA0000000u | (uint32_t)i)) {
+            t5 = 0;
+        }
+    }
+    printf("FCW quad program: %s\n", t5 ? "PASS" : "FAIL");
     all &= t5;
 
-    /* Test 6: SRCADDR */
-    FCW_SRCADDR = 0x20001000u;
-    int t6 = (FCW_SRCADDR == 0x20001000u);
-    printf("FCW SRCADDR r/w: %s\n", t6 ? "PASS" : "FAIL");
+    /* Test 6: Row program copies data from RAM via SRCADDR. */
+    for (i = 0; i < 256; ++i) {
+        row_buf[i] = 0x5A5A0000u | (uint32_t)i;
+    }
+    FCW_KEY = FCW_WRKEY;
+    FCW_ADDR = TEST_FLASH_ADDR;
+    FCW_CTRLA = FCW_OP_PAGE_ERASE;
+    fcw_wait_busy();
+    FCW_SRCADDR = (uint32_t)row_buf;
+    FCW_KEY = FCW_WRKEY;
+    FCW_ADDR = TEST_FLASH_ADDR;
+    FCW_CTRLA = FCW_OP_ROW;
+    fcw_wait_busy();
+    int t6 = 1;
+    for (i = 0; i < 8; ++i) {
+        if (test_flash[i] != row_buf[i]) {
+            t6 = 0;
+        }
+    }
+    printf("FCW row program: %s\n", t6 ? "PASS" : "FAIL");
     all &= t6;
+
+    /* Test 7: SWAP register read/write */
+    FCW_SWAP = 0u;
+    int t7 = (FCW_SWAP == 0u);
+    printf("FCW SWAP r/w: %s\n", t7 ? "PASS" : "FAIL");
+    all &= t7;
 
     printf("=== %s ===\n", all ? "ALL PASS" : "SOME FAIL");
     return all ? 0 : 1;

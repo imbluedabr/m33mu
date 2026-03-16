@@ -12,7 +12,7 @@ LDLIBS  := -Wl,--start-group -lc -lm -lgcc -lnosys -Wl,--end-group
 COMMON_SRCS := ivt.c syscalls.c emu_board.c
 COMMON_OBJS := $(COMMON_SRCS:.c=.o)
 
-TESTS := test_uart test_gpio test_tcc test_trng test_fcw
+TESTS := test_uart test_gpio test_tcc test_trng test_fcw test_idau
 
 ALL_BINS := $(addsuffix .bin, $(TESTS))
 

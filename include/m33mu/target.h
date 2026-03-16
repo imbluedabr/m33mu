@@ -24,6 +24,7 @@
 
 #include "m33mu/types.h"
 #include "m33mu/flash_persist.h"
+#include "m33mu/sau.h"
 
 struct mmio_bus;
 struct mm_nvic;
@@ -79,6 +80,10 @@ struct mm_target_cfg {
     void (*timer_init)(struct mmio_bus *bus, struct mm_nvic *nvic);
     void (*timer_reset)(void);
     void (*timer_tick)(mm_u64 cycles);
+
+    mm_bool (*tz_attr_for_addr)(mm_u32 addr,
+                                enum mm_sau_attr *attr_out,
+                                mm_u32 *region_out);
 };
 
 #define MM_TARGET_FLAG_NVM_WRITEONCE (1u << 0)

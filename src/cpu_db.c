@@ -111,7 +111,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             STM32H563_ETH_POLL,
             STM32H563_TIMER_INIT,
             STM32H563_TIMER_RESET,
-            STM32H563_TIMER_TICK
+            STM32H563_TIMER_TICK,
+            0
         }
     },
     {
@@ -146,7 +147,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             STM32H533_ETH_POLL,
             STM32H533_TIMER_INIT,
             STM32H533_TIMER_RESET,
-            STM32H533_TIMER_TICK
+            STM32H533_TIMER_TICK,
+            0
         }
     },
     {
@@ -181,7 +183,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             0,
             STM32U585_TIMER_INIT,
             STM32U585_TIMER_RESET,
-            STM32U585_TIMER_TICK
+            STM32U585_TIMER_TICK,
+            0
         }
     },
     {
@@ -216,7 +219,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             0,
             STM32L552_TIMER_INIT,
             STM32L552_TIMER_RESET,
-            STM32L552_TIMER_TICK
+            STM32L552_TIMER_TICK,
+            0
         }
     },
     {
@@ -251,7 +255,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             0,
             MCXW71C_TIMER_INIT,
             MCXW71C_TIMER_RESET,
-            MCXW71C_TIMER_TICK
+            MCXW71C_TIMER_TICK,
+            0
         }
     },
     {
@@ -286,7 +291,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             0,
             MCXN947_TIMER_INIT,
             MCXN947_TIMER_RESET,
-            MCXN947_TIMER_TICK
+            MCXN947_TIMER_TICK,
+            0
         }
     },
     {
@@ -321,7 +327,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             0,
             NRF5340_TIMER_INIT,
             NRF5340_TIMER_RESET,
-            NRF5340_TIMER_TICK
+            NRF5340_TIMER_TICK,
+            0
         }
     },
     {
@@ -356,7 +363,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             0,
             NRF54LM20_TIMER_INIT,
             NRF54LM20_TIMER_RESET,
-            NRF54LM20_TIMER_TICK
+            NRF54LM20_TIMER_TICK,
+            0
         }
     },
     {
@@ -391,7 +399,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             0,
             RP2350_TIMER_INIT,
             RP2350_TIMER_RESET,
-            RP2350_TIMER_TICK
+            RP2350_TIMER_TICK,
+            0
         }
     },
     {
@@ -426,7 +435,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             0,
             LPC55S69_TIMER_INIT,
             LPC55S69_TIMER_RESET,
-            LPC55S69_TIMER_TICK
+            LPC55S69_TIMER_TICK,
+            0
         }
     },
     {
@@ -461,7 +471,8 @@ static const struct mm_cpu_entry cpu_table[] = {
             0,
             PIC32CK_TIMER_INIT,
             PIC32CK_TIMER_RESET,
-            PIC32CK_TIMER_TICK
+            PIC32CK_TIMER_TICK,
+            PIC32CK_TZ_ATTR
         }
     }
 };
