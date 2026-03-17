@@ -735,9 +735,9 @@ static void launch_gdb_tui(const struct mm_tui *tui)
             return;
         }
         if (pid == 0) {
-        execl("/usr/bin/x-terminal-emulator", "/usr/bin/x-terminal-emulator",
-              "-e", "/bin/sh", "-c", cmd, (char *)0);
-        _exit(127);
+            execl("/usr/bin/x-terminal-emulator", "/usr/bin/x-terminal-emulator",
+                  "-e", "/bin/sh", "-c", cmd, (char *)0);
+            _exit(127);
         }
     }
     return;
