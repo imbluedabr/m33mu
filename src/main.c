@@ -728,10 +728,17 @@ static void launch_gdb_tui(const struct mm_tui *tui)
                  "exec arm-none-eabi-gdb -n -q -ex \"tar rem:%d\" -ex \"tui enable\" -ex \"focus cmd\"",
                  port);
     }
-    if (fork() == 0) {
+    {
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            return;
+        }
+        if (pid == 0) {
         execl("/usr/bin/x-terminal-emulator", "/usr/bin/x-terminal-emulator",
               "-e", "/bin/sh", "-c", cmd, (char *)0);
         _exit(127);
+        }
     }
     return;
 }

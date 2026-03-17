@@ -60,9 +60,56 @@ static int test_gdb_send_packet_keeps_full_1020_char_payload(void)
     return 0;
 }
 
+static int test_monitor_fault_clock_with_argument_adds_clock(void)
+{
+    int fds[2];
+    struct mm_gdb_stub stub;
+    struct mm_memmap map;
+    char payload[512];
+    char encoded[sizeof(payload)];
+    const char *cmd = "monitor fault clock 123";
+    struct mmio_region regions[1];
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        printf("gdbstub_packet_test: socketpair failed\n");
+        return 1;
+    }
+
+    memset(&stub, 0, sizeof(stub));
+    memset(&map, 0, sizeof(map));
+    memset(regions, 0, sizeof(regions));
+    mm_memmap_init(&map, regions, 1u);
+    mm_gdb_stub_init(&stub);
+    stub.connected = MM_TRUE;
+    stub.client_fd = fds[1];
+
+    strcpy(payload, "qRcmd,");
+    if (hex_encode_bytes(cmd, strlen(cmd), encoded, sizeof(encoded)) == 0u) {
+        printf("gdbstub_packet_test: failed to encode monitor command\n");
+        close(fds[0]);
+        close(fds[1]);
+        return 1;
+    }
+    strcat(payload, encoded);
+    gdb_send_packet(fds[0], payload);
+
+    mm_gdb_stub_handle(&stub, 0, &map);
+
+    close(fds[0]);
+    close(fds[1]);
+
+    if (stub.fault_clock_count != 1u || stub.fault_clocks[0] != 123u) {
+        printf("gdbstub_packet_test: monitor fault clock argument was not accepted\n");
+        return 1;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
     if (test_gdb_send_packet_keeps_full_1020_char_payload() != 0) return 1;
+    if (test_monitor_fault_clock_with_argument_adds_clock() != 0) return 1;
     {
         struct mm_gdb_stub stub;
         struct mm_memmap map;

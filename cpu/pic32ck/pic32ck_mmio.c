@@ -1028,9 +1028,9 @@ static mm_bool idau_write(void *opaque, mm_u32 offset, mm_u32 size_bytes,
     return MM_TRUE;
 }
 
-DECL_STUB(osc32kctrl, 0x20u);   /* 0x44016000 */
+DECL_STUB(osc32kctrl, 0x20u);   /* 0x4400E000 */
 DECL_STUB(pm,         0x20u);   /* 0x44010000 */
-DECL_STUB(wdt,        0x10u);   /* 0x44011000 */
+DECL_STUB(wdt,        0x10u);   /* 0x44016000 */
 DECL_STUB(rtc,        0x80u);   /* 0x44013000 */
 DECL_STUB(eic,        0x40u);   /* 0x44015000 */
 DECL_STUB(eic_sec,    0x40u);   /* 0x44015200 */

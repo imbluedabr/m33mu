@@ -975,18 +975,18 @@ void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_
                 gdb_send_console(stub, "fault-clock cleared\n");
                 gdb_send_packet(stub->client_fd, "OK");
             } else if (strncmp(cmd, "monitor fault-clock ", 20) == 0 ||
-                       strncmp(cmd, "monitor fault clock ", 21) == 0 ||
-                       strncmp(cmd, "fault-clock ", 11) == 0 ||
+                       strncmp(cmd, "monitor fault clock ", 20) == 0 ||
+                       strncmp(cmd, "fault-clock ", 12) == 0 ||
                        strncmp(cmd, "fault clock ", 12) == 0) {
                 const char *arg = NULL;
                 unsigned long long v;
                 char *endp = NULL;
                 if (strncmp(cmd, "monitor fault-clock ", 20) == 0) {
                     arg = cmd + 20;
-                } else if (strncmp(cmd, "monitor fault clock ", 21) == 0) {
-                    arg = cmd + 21;
-                } else if (strncmp(cmd, "fault-clock ", 11) == 0) {
-                    arg = cmd + 11;
+                } else if (strncmp(cmd, "monitor fault clock ", 20) == 0) {
+                    arg = cmd + 20;
+                } else if (strncmp(cmd, "fault-clock ", 12) == 0) {
+                    arg = cmd + 12;
                 } else {
                     arg = cmd + 12;
                 }

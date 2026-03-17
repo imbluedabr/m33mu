@@ -915,7 +915,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  if (!fpu_check_or_fault(ctx)) {
                                                      return MM_EXEC_CONTINUE;
                                                  }
-                                                 if (d.rd >= 32u || d.rn >= 15u) {
+                                                 if (d.rd >= 32u || d.rn >= 16u) {
                                                      EXEC_RAISE_UNDEF();
                                                  }
                                                  cpu.s[d.rd] = cpu.r[d.rn];
@@ -926,7 +926,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  if (!fpu_check_or_fault(ctx)) {
                                                      return MM_EXEC_CONTINUE;
                                                  }
-                                                 if (d.rn >= 32u || d.rd >= 15u) {
+                                                 if (d.rn >= 32u || d.rd >= 16u) {
                                                      EXEC_RAISE_UNDEF();
                                                  }
                                                  cpu.r[d.rd] = cpu.s[d.rn];

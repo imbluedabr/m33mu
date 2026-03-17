@@ -109,9 +109,6 @@ void mm_nvic_set_pending(struct mm_nvic *nvic, mm_u32 irq, mm_bool pending)
 
 void mm_nvic_set_itns(struct mm_nvic *nvic, mm_u32 irq, mm_bool target_nonsecure)
 {
-    if (irq == 74u) {
-        printf("[NVIC_ITNS_SET] irq=74 target=%s\n", target_nonsecure ? "NS" : "S");
-    }
     bitop(nvic->itns_mask, irq, target_nonsecure);
 }
 

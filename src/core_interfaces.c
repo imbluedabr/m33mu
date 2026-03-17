@@ -97,7 +97,6 @@ mm_bool mmio_bus_register_region(struct mmio_bus *bus, const struct mmio_region 
     }
 
     clean = *region;
-    clean = *region;
     if ((clean.flags & MMIO_REGION_F_EXT) == 0u || clean.magic != MMIO_REGION_MAGIC) {
         clean.magic = MMIO_REGION_MAGIC;
         clean.flags = 0;

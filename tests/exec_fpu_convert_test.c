@@ -181,6 +181,150 @@ static int run_vcvt_case(enum mm_op_kind kind, float input, mm_u32 expected, con
     return 0;
 }
 
+static int run_vmov_sr_case(mm_u32 src_reg, mm_u32 value, mm_u32 dest_s, const char *name)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_gdb_stub gdb;
+    struct mm_fetch_result fetch;
+    struct mm_decoded dec;
+    struct mm_execute_ctx ctx;
+    struct mmio_region regions[1];
+    mm_u8 it_pattern = 0;
+    mm_u8 it_remaining = 0;
+    mm_u8 it_cond = 0;
+    mm_bool done = MM_FALSE;
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&map, 0, sizeof(map));
+    memset(&scs, 0, sizeof(scs));
+    memset(&gdb, 0, sizeof(gdb));
+    memset(&fetch, 0, sizeof(fetch));
+    memset(&dec, 0, sizeof(dec));
+    memset(&ctx, 0, sizeof(ctx));
+    memset(regions, 0, sizeof(regions));
+
+    mm_memmap_init(&map, regions, 1u);
+
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[src_reg] = value;
+
+    scs.fpu_present = MM_TRUE;
+    scs.cpacr_s = 0x00f00000u;
+
+    dec.kind = MM_OP_VMOV_SR;
+    dec.rd = dest_s;
+    dec.rn = src_reg;
+    dec.len = 4u;
+
+    ctx.cpu = &cpu;
+    ctx.map = &map;
+    ctx.scs = &scs;
+    ctx.gdb = &gdb;
+    ctx.fetch = &fetch;
+    ctx.dec = &dec;
+    ctx.it_pattern = &it_pattern;
+    ctx.it_remaining = &it_remaining;
+    ctx.it_cond = &it_cond;
+    ctx.done = &done;
+    ctx.handle_pc_write = stub_handle_pc_write;
+    ctx.raise_mem_fault = stub_raise_mem_fault;
+    ctx.raise_usage_fault = stub_raise_usage_fault;
+    ctx.exc_return_unstack = stub_exc_return_unstack;
+    ctx.enter_exception = stub_enter_exception;
+
+    if (mm_execute_decoded(&ctx) != MM_EXEC_OK) {
+        printf("%s: execution failed\n", name);
+        return 1;
+    }
+    if (done) {
+        printf("%s: unexpected undef\n", name);
+        return 1;
+    }
+    if (cpu.s[dest_s] != value) {
+        printf("%s: got=0x%08lx expected=0x%08lx\n",
+               name,
+               (unsigned long)cpu.s[dest_s],
+               (unsigned long)value);
+        return 1;
+    }
+    return 0;
+}
+
+static int run_vmov_rs_case(mm_u32 src_s, mm_u32 value, mm_u32 dest_reg, const char *name)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_gdb_stub gdb;
+    struct mm_fetch_result fetch;
+    struct mm_decoded dec;
+    struct mm_execute_ctx ctx;
+    struct mmio_region regions[1];
+    mm_u8 it_pattern = 0;
+    mm_u8 it_remaining = 0;
+    mm_u8 it_cond = 0;
+    mm_bool done = MM_FALSE;
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&map, 0, sizeof(map));
+    memset(&scs, 0, sizeof(scs));
+    memset(&gdb, 0, sizeof(gdb));
+    memset(&fetch, 0, sizeof(fetch));
+    memset(&dec, 0, sizeof(dec));
+    memset(&ctx, 0, sizeof(ctx));
+    memset(regions, 0, sizeof(regions));
+
+    mm_memmap_init(&map, regions, 1u);
+
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.s[src_s] = value;
+
+    scs.fpu_present = MM_TRUE;
+    scs.cpacr_s = 0x00f00000u;
+
+    dec.kind = MM_OP_VMOV_RS;
+    dec.rn = src_s;
+    dec.rd = dest_reg;
+    dec.len = 4u;
+
+    ctx.cpu = &cpu;
+    ctx.map = &map;
+    ctx.scs = &scs;
+    ctx.gdb = &gdb;
+    ctx.fetch = &fetch;
+    ctx.dec = &dec;
+    ctx.it_pattern = &it_pattern;
+    ctx.it_remaining = &it_remaining;
+    ctx.it_cond = &it_cond;
+    ctx.done = &done;
+    ctx.handle_pc_write = stub_handle_pc_write;
+    ctx.raise_mem_fault = stub_raise_mem_fault;
+    ctx.raise_usage_fault = stub_raise_usage_fault;
+    ctx.exc_return_unstack = stub_exc_return_unstack;
+    ctx.enter_exception = stub_enter_exception;
+
+    if (mm_execute_decoded(&ctx) != MM_EXEC_OK) {
+        printf("%s: execution failed\n", name);
+        return 1;
+    }
+    if (done) {
+        printf("%s: unexpected undef\n", name);
+        return 1;
+    }
+    if (cpu.r[dest_reg] != value) {
+        printf("%s: got=0x%08lx expected=0x%08lx\n",
+               name,
+               (unsigned long)cpu.r[dest_reg],
+               (unsigned long)value);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (run_vcvt_case(MM_OP_VCVT_S32_F32, NAN, 0u, "vcvt_s32_f32_nan_zero") != 0) return 1;
@@ -189,5 +333,7 @@ int main(void)
     if (run_vcvt_case(MM_OP_VCVT_U32_F32, -1.0f, 0u, "vcvt_u32_f32_sat_zero") != 0) return 1;
     if (run_vcvt_case(MM_OP_VCVTR_U32_F32, 0.5f, 0u, "vcvtr_u32_f32_half_even") != 0) return 1;
     if (run_vcvt_case(MM_OP_VCVTR_U32_F32, 4294967296.0f, 0xffffffffu, "vcvtr_u32_f32_sat_max") != 0) return 1;
+    if (run_vmov_sr_case(14u, 0x12345678u, 3u, "vmov_sr_lr_allowed") != 0) return 1;
+    if (run_vmov_rs_case(5u, 0x89abcdefu, 14u, "vmov_rs_lr_allowed") != 0) return 1;
     return 0;
 }

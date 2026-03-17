@@ -624,14 +624,6 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                         if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
                         nvic->enable_mask[idx] |= v;
                         mm_nvic_notify_enable_mask(idx, old_enable, nvic->enable_mask[idx]);
-                        if (idx == (14u / 32u)) {
-                            mm_u32 bit = 1u << (14u % 32u);
-                            if ((old_enable ^ nvic->enable_mask[idx]) & bit) {
-                                printf("[NVIC_IRQ14_ENABLE] sec=%d enable=%u\n",
-                                       (int)eff_sec,
-                                       (unsigned)((nvic->enable_mask[idx] & bit) != 0u));
-                            }
-                        }
                         if (nvic_trace_enabled() &&
                             old_enable != nvic->enable_mask[idx] &&
                             !nvic_enable_log_suppressed(idx, nvic->enable_mask[idx])) {
@@ -651,14 +643,6 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                         if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
                         nvic->enable_mask[idx] &= ~v;
                         mm_nvic_notify_enable_mask(idx, old_enable, nvic->enable_mask[idx]);
-                        if (idx == (14u / 32u)) {
-                            mm_u32 bit = 1u << (14u % 32u);
-                            if ((old_enable ^ nvic->enable_mask[idx]) & bit) {
-                                printf("[NVIC_IRQ14_ENABLE] sec=%d enable=%u\n",
-                                       (int)eff_sec,
-                                       (unsigned)((nvic->enable_mask[idx] & bit) != 0u));
-                            }
-                        }
                         if (nvic_trace_enabled() &&
                             old_enable != nvic->enable_mask[idx] &&
                             !nvic_enable_log_suppressed(idx, nvic->enable_mask[idx])) {
@@ -710,14 +694,6 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                         mm_u32 old_itns = nvic->itns_mask[idx];
                         if (eff_sec == MM_SECURE) {
                             nvic->itns_mask[idx] = value;
-                        }
-                        if (idx == (74u / 32u)) {
-                            mm_u32 bit = 1u << (74u % 32u);
-                            if ((old_itns ^ nvic->itns_mask[idx]) & bit) {
-                                printf("[NVIC_ITNS_WRITE_IRQ74] sec=%d itns=0x%08lx\n",
-                                       (int)eff_sec,
-                                       (unsigned long)nvic->itns_mask[idx]);
-                            }
                         }
                         if (nvic_trace_enabled() && old_itns != nvic->itns_mask[idx]) {
                             printf("[NVIC_ITNS_WRITE] sec=%d idx=%lu val=0x%08lx itns=0x%08lx\n",
