@@ -56,6 +56,7 @@ typedef uint32_t uintattr_t;
 #define TUI_FG_GREY  TUI_RGB(0x88, 0x88, 0x88)
 #define TUI_FG_CYAN  TUI_RGB(0x4D, 0xD0, 0xE1)
 #define TUI_FG_RED   TUI_RGB(0xE5, 0x39, 0x35)
+#define TUI_FG_YELLOW TUI_RGB(0xF9, 0xA8, 0x25)
 #define TUI_FG_GREEN TUI_RGB(0x43, 0xA0, 0x47)
 #define TUI_FG_MAGENTA TUI_RGB(0xBA, 0x68, 0xC8)
 #define TUI_FG_BLACK TUI_RGB(0x00, 0x00, 0x00)
@@ -76,6 +77,7 @@ enum tui_color_slot {
     TUI_COLOR_GREY,
     TUI_COLOR_CYAN,
     TUI_COLOR_RED,
+    TUI_COLOR_YELLOW,
     TUI_COLOR_GREEN,
     TUI_COLOR_MAGENTA,
     TUI_COLOR_BLACK,
@@ -91,6 +93,8 @@ static short tui_color_ids[TUI_COLOR_COUNT];
 static short tui_pair_map[TUI_COLOR_COUNT][TUI_COLOR_COUNT];
 static short tui_next_pair = 1;
 static mm_bool tui_colors_ready = MM_FALSE;
+
+static void tui_put_cell(int x, int y, uint32_t ch, uintattr_t fg, uintattr_t bg);
 
 static uintattr_t tui_attr(uintattr_t v)
 {
@@ -110,6 +114,7 @@ static int tui_color_index(uintattr_t rgb)
         case TUI_FG_GREY: return TUI_COLOR_GREY;
         case TUI_FG_CYAN: return TUI_COLOR_CYAN;
         case TUI_FG_RED: return TUI_COLOR_RED;
+        case TUI_FG_YELLOW: return TUI_COLOR_YELLOW;
         case TUI_FG_GREEN: return TUI_COLOR_GREEN;
         case TUI_FG_MAGENTA: return TUI_COLOR_MAGENTA;
         case TUI_FG_BLACK: return TUI_COLOR_BLACK;
@@ -130,6 +135,7 @@ static uintattr_t tui_color_rgb_from_slot(mm_u8 slot)
         case TUI_COLOR_GREY: return TUI_FG_GREY;
         case TUI_COLOR_CYAN: return TUI_FG_CYAN;
         case TUI_COLOR_RED: return TUI_FG_RED;
+        case TUI_COLOR_YELLOW: return TUI_FG_YELLOW;
         case TUI_COLOR_GREEN: return TUI_FG_GREEN;
         case TUI_COLOR_MAGENTA: return TUI_FG_MAGENTA;
         case TUI_COLOR_BLACK: return TUI_FG_BLACK;
@@ -177,6 +183,10 @@ static void tui_init_colors(void)
                    tui_rgb_to_curses(0xE5),
                    tui_rgb_to_curses(0x39),
                    tui_rgb_to_curses(0x35));
+        init_color(tui_color_ids[TUI_COLOR_YELLOW],
+                   tui_rgb_to_curses(0xF9),
+                   tui_rgb_to_curses(0xA8),
+                   tui_rgb_to_curses(0x25));
         init_color(tui_color_ids[TUI_COLOR_GREEN],
                    tui_rgb_to_curses(0x43),
                    tui_rgb_to_curses(0xA0),
@@ -215,6 +225,7 @@ static void tui_init_colors(void)
         tui_color_ids[TUI_COLOR_GREY] = COLOR_WHITE;
         tui_color_ids[TUI_COLOR_CYAN] = COLOR_CYAN;
         tui_color_ids[TUI_COLOR_RED] = COLOR_RED;
+        tui_color_ids[TUI_COLOR_YELLOW] = COLOR_YELLOW;
         tui_color_ids[TUI_COLOR_GREEN] = COLOR_GREEN;
         tui_color_ids[TUI_COLOR_MAGENTA] = COLOR_MAGENTA;
         tui_color_ids[TUI_COLOR_BLACK] = COLOR_BLACK;
@@ -257,6 +268,61 @@ static void tui_format_size(char *buf, size_t buf_len, mm_u32 bytes)
     } else {
         snprintf(buf, buf_len, "%.1f%s", size, unit);
     }
+}
+
+static uintattr_t tui_stack_usage_color(mm_u32 used, mm_u32 total)
+{
+    mm_u64 pct;
+    if (total == 0u) return TUI_FG_GREY;
+    pct = ((mm_u64)used * 100u) / (mm_u64)total;
+    if (pct >= 90u) return TUI_FG_RED;
+    if (pct >= 75u) return TUI_FG_YELLOW;
+    return TUI_FG_GREEN;
+}
+
+static void tui_draw_stack_bar(int x, int y, int max_x, mm_u32 used, mm_u32 total)
+{
+    int width;
+    int inner;
+    int fill;
+    int i;
+    uintattr_t fill_fg;
+
+    width = max_x - x + 1;
+    if (width < 3) return;
+
+    inner = width - 2;
+    fill = 0;
+    if (total != 0u) {
+        if (used > total) used = total;
+        fill = (int)(((mm_u64)used * (mm_u64)inner) / (mm_u64)total);
+        if (fill > inner) fill = inner;
+    }
+
+    fill_fg = tui_stack_usage_color(used, total);
+    tui_put_cell(x, y, '[', TUI_FG_DIM, TUI_BG_BLACK);
+    for (i = 0; i < inner; ++i) {
+        tui_put_cell(x + 1 + i, y, (i < fill) ? '#' : '-',
+                     (i < fill) ? fill_fg : TUI_FG_GREY, TUI_BG_BLACK);
+    }
+    tui_put_cell(x + width - 1, y, ']', TUI_FG_DIM, TUI_BG_BLACK);
+}
+
+static mm_u32 tui_stack_floor(mm_u32 sp_limit, mm_u32 ram_base, mm_u32 ram_size)
+{
+    mm_u32 ram_end;
+
+    if (ram_size == 0u) return sp_limit;
+
+    ram_end = ram_base + ram_size;
+    if (ram_end < ram_base) {
+        ram_end = 0xffffffffu;
+    }
+
+    if (sp_limit < ram_base || sp_limit >= ram_end) {
+        return ram_base;
+    }
+    return (sp_limit > ram_base) ? sp_limit : ram_base;
 }
 
 static void tui_put_cell(int x, int y, uint32_t ch, uintattr_t fg, uintattr_t bg)
@@ -950,9 +1016,11 @@ static void tui_draw(struct mm_tui *tui)
     uintattr_t title_fg = TUI_FG_BLACK;
     uintattr_t control_bg = TUI_BG_RUN;
     uintattr_t control_fg = TUI_FG_WHITE;
+    mm_bool show_nonsecure_stack;
 
     getmaxyx(stdscr, h, w);
     if (w <= 0 || h <= 3) return;
+    show_nonsecure_stack = (tui->core_sec != MM_SECURE) ? MM_TRUE : MM_FALSE;
     tui->width = w;
     tui->height = h;
     tui_draw_filled(0, 0, w - 1, h - 1, TUI_FG_WHITE, TUI_BG_BLACK);
@@ -1075,7 +1143,8 @@ static void tui_draw(struct mm_tui *tui)
         if (!tui->target_running && tui->func_valid && tui->func_name[0] != '\0') {
             tui_draw_text(1, h - 1, w - 1, status_fg, status_bg, tui->func_name);
         } else {
-            tui_draw_text(1, h - 1, w - 1, status_fg, status_bg, "m33mu --tui");
+            tui_draw_text(1, h - 1, w - 1, status_fg, status_bg,
+                          (tui->command_line[0] != '\0') ? tui->command_line : "m33mu --tui");
         }
     }
 
@@ -1111,10 +1180,16 @@ static void tui_draw(struct mm_tui *tui)
         }
     } else {
         int line = 0;
-        int col = (log_w >= 30) ? (log_w / 2) : log_w;
-        char buf[128];
+        int reg_cell_w = 14;
+        int reg_gap = 1;
+        int reg_cols = 1;
+        char buf[192];
         char size_buf[32];
-        char range_buf[64];
+        if (log_w >= ((reg_cell_w * 3) + (reg_gap * 2))) {
+            reg_cols = 3;
+        } else if (log_w >= ((reg_cell_w * 2) + reg_gap)) {
+            reg_cols = 2;
+        }
         if (line < log_h) {
             const char *name = (tui->cpu_name[0] != '\0') ? tui->cpu_name : "unknown";
             tui_format_size(size_buf, sizeof(size_buf), tui->flash_total_size);
@@ -1130,98 +1205,53 @@ static void tui_draw(struct mm_tui *tui)
             line++;
         }
         if (line < log_h) {
+            buf[0] = '\0';
             if (tui->flash_size_s > 0u) {
-                snprintf(range_buf, sizeof(range_buf), "FLASH S 0x%08lx-0x%08lx",
-                         (unsigned long)tui->flash_base_s,
-                         (unsigned long)(tui->flash_base_s + tui->flash_size_s - 1u));
                 tui_format_size(size_buf, sizeof(size_buf), tui->flash_size_s);
-                snprintf(buf, sizeof(buf), "%s (%s)", range_buf, size_buf);
-                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
-                line++;
+                snprintf(buf, sizeof(buf), "FLASH S 0x%08lx-0x%08lx (%s)",
+                         (unsigned long)tui->flash_base_s,
+                         (unsigned long)(tui->flash_base_s + tui->flash_size_s - 1u),
+                         size_buf);
             }
-        }
-        if (line < log_h) {
             if (tui->flash_size_ns > 0u) {
-                snprintf(range_buf, sizeof(range_buf), "FLASH NS 0x%08lx-0x%08lx",
-                         (unsigned long)tui->flash_base_ns,
-                         (unsigned long)(tui->flash_base_ns + tui->flash_size_ns - 1u));
+                size_t len = strlen(buf);
                 tui_format_size(size_buf, sizeof(size_buf), tui->flash_size_ns);
-                snprintf(buf, sizeof(buf), "%s (%s)", range_buf, size_buf);
+                snprintf(buf + len, sizeof(buf) - len, "%sNS 0x%08lx-0x%08lx (%s)",
+                         (len > 0u) ? ", " : "FLASH ",
+                         (unsigned long)tui->flash_base_ns,
+                         (unsigned long)(tui->flash_base_ns + tui->flash_size_ns - 1u),
+                         size_buf);
+            }
+            if (buf[0] != '\0') {
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
                 line++;
             }
         }
         if (line < log_h) {
+            buf[0] = '\0';
             if (tui->ram_size_s > 0u) {
-                snprintf(range_buf, sizeof(range_buf), "RAM S   0x%08lx-0x%08lx",
-                         (unsigned long)tui->ram_base_s,
-                         (unsigned long)(tui->ram_base_s + tui->ram_size_s - 1u));
                 tui_format_size(size_buf, sizeof(size_buf), tui->ram_size_s);
-                snprintf(buf, sizeof(buf), "%s (%s)", range_buf, size_buf);
-                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
-                line++;
+                snprintf(buf, sizeof(buf), "RAM S 0x%08lx-0x%08lx (%s)",
+                         (unsigned long)tui->ram_base_s,
+                         (unsigned long)(tui->ram_base_s + tui->ram_size_s - 1u),
+                         size_buf);
             }
-        }
-        if (line < log_h) {
             if (tui->ram_size_ns > 0u) {
-                snprintf(range_buf, sizeof(range_buf), "RAM NS  0x%08lx-0x%08lx",
-                         (unsigned long)tui->ram_base_ns,
-                         (unsigned long)(tui->ram_base_ns + tui->ram_size_ns - 1u));
+                size_t len = strlen(buf);
                 tui_format_size(size_buf, sizeof(size_buf), tui->ram_size_ns);
-                snprintf(buf, sizeof(buf), "%s (%s)", range_buf, size_buf);
+                snprintf(buf + len, sizeof(buf) - len, "%sNS 0x%08lx-0x%08lx (%s)",
+                         (len > 0u) ? ", " : "RAM ",
+                         (unsigned long)tui->ram_base_ns,
+                         (unsigned long)(tui->ram_base_ns + tui->ram_size_ns - 1u),
+                         size_buf);
+            }
+            if (buf[0] != '\0') {
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
                 line++;
             }
         }
         if (line < log_h) {
             line++;
-        }
-        if (line < log_h) {
-            tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "CPU Registers:");
-            line++;
-        }
-        if (line < log_h) {
-            tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "=============");
-            line++;
-        }
-        for (i = 0; i < 8 && line < log_h; ++i, ++line) {
-            snprintf(buf, sizeof(buf), "r%-2d 0x%08lx", i, (unsigned long)tui->regs[i]);
-            tui_draw_text(inner_x, log_y + line, inner_x + col - 1, console_fg, console_bg, buf);
-            if (col < log_w && (i + 8) < 16) {
-                snprintf(buf, sizeof(buf), "r%-2d 0x%08lx", i + 8, (unsigned long)tui->regs[i + 8]);
-                tui_draw_text(inner_x + col, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
-            }
-        }
-        if (line < log_h) {
-            snprintf(buf, sizeof(buf), "xpsr 0x%08lx", (unsigned long)tui->xpsr);
-            tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
-            line++;
-        }
-        if (tui->fpu_enabled) {
-            if (line < log_h) {
-                line++;
-            }
-            if (line < log_h) {
-                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "FPU Registers:");
-                line++;
-            }
-            if (line < log_h) {
-                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "==============");
-                line++;
-            }
-            if (line < log_h) {
-                snprintf(buf, sizeof(buf), "fpscr 0x%08lx", (unsigned long)tui->fpscr);
-                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
-                line++;
-            }
-            for (i = 0; i < 16 && line < log_h; ++i, ++line) {
-                snprintf(buf, sizeof(buf), "s%-2d 0x%08lx", i, (unsigned long)tui->fpu_regs[i]);
-                tui_draw_text(inner_x, log_y + line, inner_x + col - 1, console_fg, console_bg, buf);
-                if (col < log_w) {
-                    snprintf(buf, sizeof(buf), "s%-2d 0x%08lx", i + 16, (unsigned long)tui->fpu_regs[i + 16]);
-                    tui_draw_text(inner_x + col, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
-                }
-            }
         }
         if (line < log_h) {
             snprintf(buf, sizeof(buf), "msp_s 0x%08lx  psp_s 0x%08lx",
@@ -1229,7 +1259,7 @@ static void tui_draw(struct mm_tui *tui)
             tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
             line++;
         }
-        if (line < log_h) {
+        if (show_nonsecure_stack && line < log_h) {
             snprintf(buf, sizeof(buf), "msp_ns 0x%08lx  psp_ns 0x%08lx",
                      (unsigned long)tui->msp_ns, (unsigned long)tui->psp_ns);
             tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
@@ -1241,7 +1271,7 @@ static void tui_draw(struct mm_tui *tui)
             tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
             line++;
         }
-        if (line < log_h) {
+        if (show_nonsecure_stack && line < log_h) {
             snprintf(buf, sizeof(buf), "msplim_ns 0x%08lx  psplim_ns 0x%08lx",
                      (unsigned long)tui->msplim_ns, (unsigned long)tui->psplim_ns);
             tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
@@ -1277,6 +1307,12 @@ static void tui_draw(struct mm_tui *tui)
         if (line < log_h) {
             mm_u32 cur_used = 0;
             mm_u32 max_used = 0;
+            mm_u32 total = 0;
+            mm_u32 floor = tui_stack_floor(tui->msplim_s, tui->ram_base_s, tui->ram_size_s);
+            mm_bool unbounded = (tui->msplim_s == 0u) ? MM_TRUE : MM_FALSE;
+            char cur_buf[32];
+            char total_buf[32];
+            char max_buf[32];
             if (tui->msp_top_s_valid) {
                 if (tui->msp_top_s >= tui->msp_s) {
                     cur_used = tui->msp_top_s - tui->msp_s;
@@ -1284,33 +1320,121 @@ static void tui_draw(struct mm_tui *tui)
                 if (tui->msp_top_s >= tui->msp_min_s) {
                     max_used = tui->msp_top_s - tui->msp_min_s;
                 }
-                snprintf(buf, sizeof(buf), "Secure stack: current %lu max %lu",
-                         (unsigned long)cur_used, (unsigned long)max_used);
+                if (tui->msp_top_s >= floor) {
+                    total = tui->msp_top_s - floor;
+                }
+                tui_format_size(cur_buf, sizeof(cur_buf), cur_used);
+                tui_format_size(total_buf, sizeof(total_buf), total);
+                tui_format_size(max_buf, sizeof(max_buf), max_used);
+                snprintf(buf, sizeof(buf), "Secure stack: %s used/%s max. %s total%s",
+                         cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+                line++;
+                if (line < log_h) {
+                    tui_draw_stack_bar(inner_x, log_y + line, inner_x + log_w - 1, cur_used, max_used);
+                }
             } else {
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w, TUI_FG_DIM, console_bg,
                               "Secure stack: Unused");
             }
             line++;
         }
-        if (line < log_h) {
+        if (show_nonsecure_stack && line < log_h) {
             if (tui->msp_top_ns_valid) {
                 mm_u32 cur_used = 0;
                 mm_u32 max_used = 0;
+                mm_u32 total = 0;
+                mm_u32 floor = tui_stack_floor(tui->msplim_ns, tui->ram_base_ns, tui->ram_size_ns);
+                mm_bool unbounded = (tui->msplim_ns == 0u) ? MM_TRUE : MM_FALSE;
+                char cur_buf[32];
+                char total_buf[32];
+                char max_buf[32];
                 if (tui->msp_top_ns >= tui->msp_ns) {
                     cur_used = tui->msp_top_ns - tui->msp_ns;
                 }
                 if (tui->msp_top_ns >= tui->msp_min_ns) {
                     max_used = tui->msp_top_ns - tui->msp_min_ns;
                 }
-                snprintf(buf, sizeof(buf), "Non-Secure stack: current %lu max %lu",
-                         (unsigned long)cur_used, (unsigned long)max_used);
+                if (tui->msp_top_ns >= floor) {
+                    total = tui->msp_top_ns - floor;
+                }
+                tui_format_size(cur_buf, sizeof(cur_buf), cur_used);
+                tui_format_size(total_buf, sizeof(total_buf), total);
+                tui_format_size(max_buf, sizeof(max_buf), max_used);
+                snprintf(buf, sizeof(buf), "Non-Secure stack: %s used/%s max. %s total%s",
+                         cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+                line++;
+                if (line < log_h) {
+                    tui_draw_stack_bar(inner_x, log_y + line, inner_x + log_w - 1, cur_used, max_used);
+                }
             } else {
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w, TUI_FG_DIM, console_bg,
                               "Non-Secure stack: Unused");
             }
             line++;
+        }
+        if (line < log_h) {
+            line++;
+        }
+        if (line < log_h) {
+            tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "CPU Registers:");
+            line++;
+        }
+        if (line < log_h) {
+            tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "=============");
+            line++;
+        }
+        {
+            int reg_rows = (16 + reg_cols - 1) / reg_cols;
+            int reg;
+            for (i = 0; i < reg_rows && line < log_h; ++i, ++line) {
+                int c;
+                for (c = 0; c < reg_cols; ++c) {
+                    int x = inner_x + c * (reg_cell_w + reg_gap);
+                    reg = i + (c * reg_rows);
+                    if (reg >= 16 || x >= inner_x + log_w) continue;
+                    snprintf(buf, sizeof(buf), "r%-2d 0x%08lx", reg, (unsigned long)tui->regs[reg]);
+                    tui_draw_text(x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+                }
+            }
+        }
+        if (line < log_h) {
+            snprintf(buf, sizeof(buf), "xpsr 0x%08lx", (unsigned long)tui->xpsr);
+            tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+            line++;
+        }
+        if (tui->fpu_enabled) {
+            if (line < log_h) {
+                line++;
+            }
+            if (line < log_h) {
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "FPU Registers:");
+                line++;
+            }
+            if (line < log_h) {
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, "==============");
+                line++;
+            }
+            if (line < log_h) {
+                snprintf(buf, sizeof(buf), "fpscr 0x%08lx", (unsigned long)tui->fpscr);
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+                line++;
+            }
+            {
+                int fpu_rows = (32 + reg_cols - 1) / reg_cols;
+                int reg;
+                for (i = 0; i < fpu_rows && line < log_h; ++i, ++line) {
+                    int c;
+                    for (c = 0; c < reg_cols; ++c) {
+                        int x = inner_x + c * (reg_cell_w + reg_gap);
+                        reg = i + (c * fpu_rows);
+                        if (reg >= 32 || x >= inner_x + log_w) continue;
+                        snprintf(buf, sizeof(buf), "s%-2d 0x%08lx", reg, (unsigned long)tui->fpu_regs[reg]);
+                        tui_draw_text(x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+                    }
+                }
+            }
         }
     }
 
@@ -1777,6 +1901,22 @@ void mm_tui_set_cpu_name(struct mm_tui *tui, const char *name)
         return;
     }
     snprintf(tui->cpu_name, sizeof(tui->cpu_name), "%s", name);
+}
+
+void mm_tui_set_command_line(struct mm_tui *tui, const char *cmdline)
+{
+    size_t len;
+    if (tui == 0) return;
+    if (cmdline == 0 || cmdline[0] == '\0') {
+        tui->command_line[0] = '\0';
+        return;
+    }
+    len = strlen(cmdline);
+    if (len >= sizeof(tui->command_line)) {
+        len = sizeof(tui->command_line) - 1u;
+    }
+    memcpy(tui->command_line, cmdline, len);
+    tui->command_line[len] = '\0';
 }
 
 void mm_tui_set_function(struct mm_tui *tui, mm_u32 pc, const char *name)

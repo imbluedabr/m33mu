@@ -70,6 +70,7 @@ struct mm_tui {
     volatile mm_u32 func_pc;
     volatile mm_bool func_valid;
     char func_name[128];
+    char command_line[512];
     volatile mm_bool capstone_supported;
     volatile mm_bool capstone_enabled;
     char cpu_name[64];
@@ -172,6 +173,7 @@ void mm_tui_set_gdb_status(struct mm_tui *tui, mm_bool connected, int port);
 void mm_tui_set_capstone(struct mm_tui *tui, mm_bool supported, mm_bool enabled);
 void mm_tui_set_image0(struct mm_tui *tui, const char *path);
 void mm_tui_set_cpu_name(struct mm_tui *tui, const char *name);
+void mm_tui_set_command_line(struct mm_tui *tui, const char *cmdline);
 void mm_tui_set_function(struct mm_tui *tui, mm_u32 pc, const char *name);
 void mm_tui_set_core_state(struct mm_tui *tui,
                            mm_u32 pc,

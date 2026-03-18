@@ -3878,6 +3878,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
 int main(int argc, char **argv)
 {
     struct mm_image_spec images[16];
+    char tui_command_line[512];
     int image_count = 0;
     size_t loaded_total = 0;
     size_t loaded_max_end = 0;
@@ -4521,11 +4522,26 @@ int main(int argc, char **argv)
     }
 
     memset(&tui, 0, sizeof(tui));
+    tui_command_line[0] = '\0';
+    for (i = 0; i < argc; ++i) {
+        size_t len = strlen(tui_command_line);
+        size_t arg_len = strlen(argv[i]);
+        if (len + arg_len + ((len > 0u) ? 1u : 0u) >= sizeof(tui_command_line)) {
+            break;
+        }
+        if (len > 0u) {
+            tui_command_line[len++] = ' ';
+            tui_command_line[len] = '\0';
+        }
+        memcpy(tui_command_line + len, argv[i], arg_len);
+        tui_command_line[len + arg_len] = '\0';
+    }
     if (opt_tui) {
         if (!mm_tui_init(&tui) || !mm_tui_redirect_stdio(&tui)) {
             fprintf(stderr, "failed to initialize TUI\n");
             return 1;
         }
+        mm_tui_set_command_line(&tui, tui_command_line);
         set_tui_image0(&tui, images, image_count);
         tui_active = MM_TRUE;
         mm_tui_register(&tui);
