@@ -25,6 +25,8 @@
 #include "m33mu/capstone.h"
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -233,6 +235,7 @@ mm_bool mm_gdb_stub_take_quit(struct mm_gdb_stub *stub)
 mm_bool mm_gdb_stub_start(struct mm_gdb_stub *stub, int port)
 {
     int fd;
+    int flags;
     struct sockaddr_in addr;
     int opt;
 
@@ -257,6 +260,10 @@ mm_bool mm_gdb_stub_start(struct mm_gdb_stub *stub, int port)
         close(fd);
         return MM_FALSE;
     }
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
     stub->listen_fd = fd;
     return MM_TRUE;
 }
@@ -273,6 +280,9 @@ mm_bool mm_gdb_stub_wait_client(struct mm_gdb_stub *stub)
     alen = (socklen_t)sizeof(addr);
     cfd = accept(stub->listen_fd, (struct sockaddr *)&addr, &alen);
     if (cfd < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            return MM_FALSE;
+        }
         perror("accept");
         return MM_FALSE;
     }
@@ -282,6 +292,34 @@ mm_bool mm_gdb_stub_wait_client(struct mm_gdb_stub *stub)
     stub->step_pending = MM_FALSE;
     printf("[GDB] Client connected\n");
     return MM_TRUE;
+}
+
+mm_bool mm_gdb_stub_wait_client_blocking(struct mm_gdb_stub *stub)
+{
+    struct pollfd pfd;
+    int rc;
+
+    if (stub == 0 || stub->listen_fd < 0) {
+        return MM_FALSE;
+    }
+    pfd.fd = stub->listen_fd;
+    pfd.events = POLLIN;
+    for (;;) {
+        rc = poll(&pfd, 1, -1);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("poll");
+            return MM_FALSE;
+        }
+        if ((pfd.revents & POLLIN) != 0) {
+            return mm_gdb_stub_wait_client(stub);
+        }
+        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+            return MM_FALSE;
+        }
+    }
 }
 
 void mm_gdb_stub_notify_stop(struct mm_gdb_stub *stub, int sig)

@@ -54,6 +54,7 @@ struct mm_gdb_stub {
 void mm_gdb_stub_init(struct mm_gdb_stub *stub);
 mm_bool mm_gdb_stub_start(struct mm_gdb_stub *stub, int port);
 mm_bool mm_gdb_stub_wait_client(struct mm_gdb_stub *stub);
+mm_bool mm_gdb_stub_wait_client_blocking(struct mm_gdb_stub *stub);
 void mm_gdb_stub_notify_stop(struct mm_gdb_stub *stub, int sig);
 void mm_gdb_stub_close(struct mm_gdb_stub *stub);
 void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_memmap *map);

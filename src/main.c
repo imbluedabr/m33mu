@@ -728,6 +728,7 @@ static void launch_gdb_tui(const struct mm_tui *tui)
                  "exec arm-none-eabi-gdb -n -q -ex \"tar rem:%d\" -ex \"tui enable\" -ex \"focus cmd\"",
                  port);
     }
+    printf("GDB launch command: %s\n", cmd);
     {
         pid_t pid = fork();
         if (pid < 0) {
@@ -737,6 +738,7 @@ static void launch_gdb_tui(const struct mm_tui *tui)
         if (pid == 0) {
             execl("/usr/bin/x-terminal-emulator", "/usr/bin/x-terminal-emulator",
                   "-e", "/bin/sh", "-c", cmd, (char *)0);
+            perror("execl(/usr/bin/x-terminal-emulator)");
             _exit(127);
         }
     }
@@ -1078,7 +1080,6 @@ static mm_bool handle_tui(struct mm_tui *tui,
                           mm_bool *opt_gdb,
                           struct mm_gdb_stub *gdb,
                           const char *cpu_name,
-                          const char *gdb_symbols,
                           struct mm_cpu *cpu,
                           struct mm_scs *scs,
                           struct mm_memmap *map,
@@ -1221,15 +1222,7 @@ static mm_bool handle_tui(struct mm_tui *tui,
             if (mm_gdb_stub_start(gdb, gdb_port)) {
                 *opt_gdb = MM_TRUE;
                 (void)launch_gdb_tui(tui);
-                printf("Waiting for GDB connection...\n");
-                if (mm_gdb_stub_wait_client(gdb)) {
-                    const char *exec_path = (gdb_symbols != 0) ? gdb_symbols : tui->image0_path;
-                    if (exec_path != 0 && exec_path[0] != '\0') {
-                        mm_gdb_stub_set_exec_path(gdb, exec_path);
-                    }
-                } else {
-                    fprintf(stderr, "Failed to accept GDB connection\n");
-                }
+                printf("Waiting for GDB connection in background...\n");
             } else {
                 fprintf(stderr, "Failed to start GDB server\n");
             }
@@ -4647,7 +4640,7 @@ int main(int argc, char **argv)
             goto cleanup;
         }
         printf("Waiting for GDB connection...\n");
-        if (!mm_gdb_stub_wait_client(&gdb)) {
+        if (!mm_gdb_stub_wait_client_blocking(&gdb)) {
             fprintf(stderr, "Failed to accept GDB connection\n");
             rc = 1;
             goto cleanup;
@@ -5202,7 +5195,7 @@ int main(int argc, char **argv)
                 if (opt_tui) {
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                              &tui_steps_offset, &tui_steps_latched);
-                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                         done = MM_TRUE;
                         continue;
                     }
@@ -5279,7 +5272,7 @@ int main(int argc, char **argv)
                     mm_usbdev_poll();
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                              &tui_steps_offset, &tui_steps_latched);
-                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                         done = MM_TRUE;
                         continue;
                     }
@@ -5390,7 +5383,7 @@ int main(int argc, char **argv)
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                                      &tui_steps_offset, &tui_steps_latched);
-                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                                 done = MM_TRUE;
                                 continue;
                             }
@@ -5426,7 +5419,7 @@ int main(int argc, char **argv)
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                                      &tui_steps_offset, &tui_steps_latched);
-                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                                 done = MM_TRUE;
                                 continue;
                             }
@@ -5666,7 +5659,7 @@ handle_pending:
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                                      &tui_steps_offset, &tui_steps_latched);
-                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                            if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                                 done = MM_TRUE;
                                 continue;
                             }
@@ -6037,7 +6030,7 @@ handle_pending:
                     mm_usbdev_poll();
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
                                              &tui_steps_offset, &tui_steps_latched);
-                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, gdb_symbols, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
+                    if (handle_tui(&tui, opt_tui, &opt_capstone, &opt_gdb, &gdb, cpu_name, &cpu, &scs, &map, cycle_total, &tui_steps_offset, &tui_steps_latched, &tui_paused, &tui_step, &reload_pending, gdb_port)) {
                         done = MM_TRUE;
                         continue;
                     }
