@@ -1,10 +1,45 @@
 # Getting Started
 
-## Requirements
+## Build Dependencies
 
-- `ncurses` for `--tui`
-- `libcapstone` for optional decode/execute cross-checking
-- `libtpms` for optional TPM 2.0 emulation
+`m33mu` has a small core build plus several optional feature-dependent libraries.
+The CMake configuration summary reports what was detected and which features will be enabled.
+
+Core build tooling:
+
+- C compiler
+- CMake
+- `make` or another CMake-supported build tool
+
+Optional libraries and what they enable:
+
+- `ncurses`: interactive `--tui` mode
+- `libcapstone`: decode/execute cross-checking and related diagnostics
+- `libtpms`: TPM 2.0 emulation
+- `wolfSSL`: TA-100 and related cryptographic integration
+- `vde-2` / `libvdeplug` plus `vde_switch`: VDE Ethernet backend
+- `libelf`: ELF loading and ELF-aware symbol/debug support
+- `libdw` / `libdwfl`: richer symbolization and call-trace naming
+
+Optional build outputs:
+
+- tests: enabled by default with `M33MU_BUILD_TESTS=ON`
+
+Example configuration summary:
+
+```text
+-- m33mu configuration summary:
+--   capstone: detected
+--   TPM/libtpms: detected
+--   wolfSSL: detected
+--   vde-2: detected (vde_switch)
+--   ncurses: detected
+--   libelf: detected
+--   libdw/libdwfl: detected
+--   tests enabled: ON
+--   --------------------------------------------
+--   features: capstone=TRUE tpm=TRUE wolfssl=TRUE vde=TRUE tui=TRUE libelf=TRUE libdw=TRUE
+```
 
 ## Build
 
