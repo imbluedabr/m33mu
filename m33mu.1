@@ -1,167 +1,357 @@
 .TH M33MU 1 "" "m33mu" "User Commands"
 .SH NAME
-m33mu \- Cortex-M33 emulator
+m33mu \- embedded Cortex\-M33 microcontroller emulator for testing, debugging, and hardware\-free firmware runs
 .SH SYNOPSIS
 .B m33mu
 .RI [ options ]
 .IR image.bin [:offset]
 .RI [ image.bin[:offset] ...]
 .SH DESCRIPTION
-m33mu emulates ARMv8-M Cortex-M targets with TrustZone awareness.
-It can load one or more images into flash. Raw binaries may include a byte
-offset suffix (hex supported). ELF and Intel HEX images are auto-detected and
-scattered into flash by their load addresses.
+.B m33mu
+is an ARMv8\-M / Cortex\-M33 embedded microcontroller emulator with TrustZone awareness.
+It is intended for firmware testing, interactive debugging, CI automation, and demonstrations where no physical hardware is available.
+
+The emulator can be used in three main ways:
+
+.IP \(bu 2
+as an interactive terminal UI with
+.BR --tui ,
+useful for stepping through execution, inspecting state, and observing peripherals
+
+.IP \(bu 2
+as a pure command\-line emulator, useful for scripted runs and reproducible host\-side firmware execution
+
+.IP \(bu 2
+as an automated test target, especially when combined with
+.BR --uart-stdout ,
+.BR --expect-bkpt ,
+and
+.BR --timeout
+
+The program can load one or more images into flash or other boot sources. Raw binaries may include a byte offset suffix. ELF, Intel HEX, and UF2 images are interpreted by their encoded addresses.
 .SH OPTIONS
 .TP
 .BR --cpu " " <cpu>
-Select the CPU profile (default: stm32h563).
-Supported profiles: stm32h533, stm32h563, stm32u585, stm32l552, lpc55s69, mcxw71c, mcxn947, nrf5340, nrf54lm20, rp2350, pic32ck.
+Select the CPU profile. The default is
+.BR stm32h563 .
+
+Use this to match the target firmware's memory map and peripheral set. Run
+.B --cpu list
+or
+.B --cpu ?
+to print the supported values.
+
+Supported profiles at the time of writing:
+.BR stm32h533 ,
+.BR stm32h563 ,
+.BR stm32u585 ,
+.BR stm32l552 ,
+.BR lpc55s69 ,
+.BR mcxw71c ,
+.BR mcxn947 ,
+.BR nrf5340 ,
+.BR nrf54lm20 ,
+.BR rp2350 ,
+.BR pic32ck .
 .TP
 .BR --gdb
-Start the GDB remote server (RSP) on port 1234.
+Start the built\-in GDB remote serial protocol server on port 1234.
+
+Use this when you want to connect
+.BR gdb (1)
+to the emulated target without additional debug hardware.
 .TP
 .BR --port " " <n>
-Set the GDB server port (1-65535).
+Override the GDB server port used by
+.BR --gdb .
+
+Example:
+
+.RS
+.B m33mu --gdb --port 3333 firmware.bin
+.RE
 .TP
 .BR --gdb-symbols " " <elf>
-Load symbols from the specified ELF. Can be specified multiple times; user-provided ELFs take priority over auto-detected ones.
+Load symbols from the specified ELF file.
+This option may be repeated. User\-provided ELFs take priority over any symbols auto\-detected from loaded images.
+
+Use it when the runtime image is a raw BIN but you still want function names, line info, and symbolic debugging.
 .TP
 .BR --dump
-Print per-instruction decode and selected TrustZone transitions.
+Print per\-instruction decode output and selected execution details.
+
+This is mainly a debugging and bring\-up aid. It is useful when a firmware image is not behaving as expected and you want an immediate textual trace.
 .TP
 .BR --tui
-Start the interactive terminal UI.
+Start the interactive ncurses terminal UI.
+
+The TUI is intended for interactive sessions where you want CPU state, stack usage, UART output, and basic peripheral status in one screen. It is not meant for automated test logging.
 .TP
 .BR --record
-Enable in-memory execution trace for reverse stepping.
+Enable the in\-memory execution trace used for reverse/debug workflows.
+
+This trace can later be filtered or dumped with the other
+.B --record-*
+options.
 .TP
 .BR --record-start " " <pc>
-Begin a record window when the program counter reaches the given address (hex supported).
+Begin a record window when the program counter reaches the given address.
+Hex values are accepted.
+
+This is useful when startup noise is large and you only want to capture the interesting region of execution.
 .TP
 .BR --record-start-dump
-Dump register context and selected buffers when record-start is hit.
+Dump register context and selected buffers when the record\-start PC is reached.
+
+Use this when you need a snapshot exactly at the beginning of an interesting execution window.
 .TP
 .BR --record-start-dump-ram
-Include full RAM dump at record-start (implies --record-start-dump).
+Include a full RAM dump at the record\-start point.
+This implies
+.BR --record-start-dump .
+
+This is heavier than the plain start dump and is most useful when you intend to compare complete memory state.
 .TP
 .BR --record-end-dump-ram
-Include full RAM dump at record window end.
+Include a full RAM dump at the end of the record window.
+
+Use this together with
+.B --record-window
+when you want before/after memory comparisons.
 .TP
 .BR --record-window " " N
-Capture N steps starting at record-start and emit a trace window.
+Capture a bounded window of
+.I N
+steps starting at the record\-start trigger.
+
+This is useful when you want a deterministic trace slice rather than an unbounded execution history.
 .TP
 .BR --record-dump " " N
-Dump the last N traced steps on exit.
+Dump the last
+.I N
+recorded steps on exit.
+
+This is useful when you want a short failure tail instead of the full trace.
 .TP
 .BR --record-trace " " <path>
-Write live trace lines to the given file.
+Write live trace output to the specified file.
+
+Use this when CI or local debug workflows need an artifact that can be archived and inspected later.
 .TP
 .BR --record-quiet
-Disable live trace output while recording.
+Disable live trace output while still collecting recorded state.
+
+This is useful when recording should remain active but stdout/stderr should stay small and stable.
 .TP
 .BR --call-trace
-Log call/return, interrupt, and TrustZone SG transitions with symbol names when available.
-.TP
-.BR --unicorn " " <symbol|addr>
-Start side-by-side Unicorn execution when the target function/address is reached.
-This debug feature requires building with \fBM33MU_ENABLE_UNICORN=1\fR.
-.TP
-.BR --unicorn-stack " " N
-Compare and sync N bytes of stack around SP during Unicorn pairing.
-.TP
-.BR --unicorn-max-steps " " N
-Stop Unicorn pairing after N steps (fails if reached).
+Log calls, returns, interrupt transitions, and TrustZone SG transitions, including symbol names when available.
+
+This is lower volume than
+.BR --dump
+and is often a better first pass for understanding higher\-level firmware flow.
 .TP
 .BR --expect-bkpt " " NN
-Exit with code 0 only if a BKPT with the given immediate (hex) is hit.
+Exit with code 0 only if a
+.B BKPT
+instruction with the given immediate value is hit.
+Hex values are accepted.
+
+This is especially useful for automated tests and CI. A common pattern is to have test firmware execute a reserved BKPT immediate to signal success.
+
+If the expected BKPT is not reached, the process exits nonzero.
+
+Example:
+
+.RS
+.B m33mu --expect-bkpt 0x42 firmware.bin
+.RE
 .TP
 .BR --fault-clock " " NNN
-Skip execution of the instruction fetched when the virtual cycle counter reaches NNN. May be specified multiple times (up to 16), but values cannot be contiguous. Used to emulate "fault injection" attacks, to skip single instructions (based on clock time).
+Skip execution of the instruction fetched when the virtual cycle counter reaches
+.IR NNN .
+This option may be specified multiple times, up to 16 entries, but values may not be contiguous.
+
+This is primarily intended for fault\-injection and instruction\-skip experiments.
 .TP
 .BR --timeout " " seconds
-Exit with code 127 if the host timeout elapses (SIGALRM).
+Install a host\-side timeout.
+If the timeout elapses, the process exits with code 127.
+
+Use this in unattended runs to avoid hanging forever on deadlocks, infinite loops, or firmware waiting for events that never arrive.
+
+Example:
+
+.RS
+.B m33mu --timeout 10 firmware.bin
+.RE
 .TP
 .BR --persist
-Write modified flash contents back to the input image files.
+Write modified flash contents back to the original input image files when supported.
+
+This is only supported for flash boot and only for raw BIN inputs. Non\-BIN images or non\-flash boot modes are skipped with warnings.
 .TP
 .BR --capstone
-Enable Capstone-based cross-check logging for decode/execute.
+Enable Capstone\-based cross\-check logging for decode and execute behavior.
+
+Use this when validating emulator behavior or collecting extra diagnostics for bug reports.
 .TP
 .BR --capstone-verbose
-Include operand cross-check details in Capstone logs.
+Enable Capstone checking and include more operand\-level detail in the emitted logs.
+
+This is noisier than
+.BR --capstone
+and is intended for deeper decode/execute debugging.
 .TP
 .BR --uart-stdout
 Route UART output to stdout instead of a PTY device.
+
+This is the preferred mode for CI and shell scripts because logs become visible directly in process output and can be piped, grepped, or archived.
+
+When the TUI is active, stdout UART routing is disabled.
+
+Example:
+
+.RS
+.B m33mu --uart-stdout firmware.bin | tee uart.log
+.RE
 .TP
 .BR --quit-on-faults
-Stop execution after the first fault is raised.
+Stop execution as soon as the first fault is raised.
+
+This is useful in automated runs where continuing after a fault only adds noise.
 .TP
 .BR --dualbank
-Enable dual-bank flash mode for STM32 targets (allows runtime bank swap).
+Enable dual\-bank flash mode for STM32 targets.
+
+Use this when firmware depends on runtime bank swap behavior or banked flash layout.
 .TP
 .BR --meminfo
-Emit SAU/MPU layout and register write logs.
+Emit SAU/MPU layout information and related register write logs.
+
+This is mainly a bring\-up and TrustZone/memory\-protection debugging aid.
 .TP
 .BR --no-tz
-Force non-secure boot and disable TrustZone protections for the session.
+Disable TrustZone protections for the session and force non\-secure boot behavior.
+
+Use this only when you explicitly want to remove secure/non\-secure separation from the run.
+.TP
+.BR --boot " " flash|ram|spiflash
+Select the boot source.
+
+The default is
+.BR flash .
+Use
+.B ram
+when firmware should execute from RAM, or
+.B spiflash
+when testing memory\-mapped external flash flows.
+.TP
+.BR --boot-offset=0xN
+Apply an additional offset within the selected boot source.
+
+This is useful when a bootable image does not start at the base of flash, RAM, or mapped SPI flash.
 .TP
 .BR --spiflash:SPIx:file=PATH:size=N[:mmap=ADDR][:cs=GPIONAME]
-Attach a SPI flash image.
+Attach a SPI flash image to the selected SPI bus.
+
+The optional
+.B mmap
+component exposes the flash through a memory\-mapped window, which is required for
+.BR --boot spiflash .
 .TP
 .BR --usb
-Enable GadgetFS USB backend (default UDC: dummy_udc.0). Requires gadgetfs
-mounted under /dev/gadget and dummy_hcd loaded.
+Enable the GadgetFS USB backend using the default UDC name
+.BR dummy_udc.0 .
+
+This requires gadgetfs mounted under
+.I /dev/gadget
+and a usable host gadget controller such as
+.BR dummy_hcd .
 .TP
 .BR --usb:udc=NAME
-Enable GadgetFS USB backend and select UDC name (e.g., dummy_udc.0). Requires
-gadgetfs mounted under /dev/gadget and dummy_hcd loaded.
+Enable the GadgetFS backend and use the specified UDC name.
+
+Example:
+
+.RS
+.B m33mu --usb:udc=dummy_udc.0 firmware.bin
+.RE
 .TP
 .BR --usb:path=PATH
-Enable GadgetFS USB backend and select UDC path (e.g., /dev/gadget/dummy_udc.0).
-Requires gadgetfs mounted under /dev/gadget and dummy_hcd loaded.
+Enable the GadgetFS backend using an explicit path, for example:
+
+.RS
+.B m33mu --usb:path=/dev/gadget/dummy_udc.0 firmware.bin
+.RE
 .TP
 .BR --tap[:tap0]
-Enable Ethernet TAP backend (default interface: tap0).
+Enable the Ethernet TAP backend.
+If no interface name is supplied, the default is
+.BR tap0 .
+
+Only one Ethernet backend may be active at a time.
 .TP
 .BR --vde[:/var/run/vde.ctl]
-Enable Ethernet VDE backend (default socket: /var/run/vde.ctl).
+Enable the Ethernet VDE backend.
+If no socket path is supplied, the default is
+.IR /var/run/vde.ctl .
+
+This backend must be available at build time; otherwise the option is rejected.
 .TP
 .BR --tpm:SPIx:cs=GPIONAME[:file=PATH]
-Attach a TPM TIS device (optional NV backing file).
+Attach a TPM TIS device on the selected SPI bus.
+
+The optional backing file is used for NV storage.
 .TP
 .BR --ta100:SPIx:cs=GPIONAME[:file=PATH][:profile=NAME][:serial=HEX]
-Attach a Microchip TA-100 Trust Anchor secure element. The device emulates a TA-100 over SPI with 4KB NV storage (128B config zone + 3968B data/key zone). Supports cryptographic operations (RNG, ECC P-256 key generation, ECDSA signing, SHA-256) via WolfSSL. Optional NV backing file (default: ta100.bin), profile name, and 4-byte serial number override (hex). Example: --ta100:SPI2:cs=PB5:file=/tmp/ta100.bin
+Attach a Microchip TA\-100 Trust Anchor secure element over SPI.
+
+The emulated device provides 4KB of NV storage and supports a subset of common cryptographic operations including RNG, ECC P\-256 key generation, ECDSA signing, and SHA\-256.
+
+Use this when firmware expects a TA\-100 peripheral and should run without physical hardware.
 .SH ENVIRONMENT
 .TP
 .B CAPSTONE_PC
-Limit Capstone cross-check logging to a specific PC (hex).
-.TP
-.B M33MU_STRCMP_TRACE
-Trace strcmp-like loops over a PC range (hex start:end).
-.TP
-.B M33MU_STRCMP_ENTRY
-Override the entry PC for strcmp tracing (hex).
+Limit Capstone cross\-check logging to a specific PC value.
+Hex format is expected.
 .TP
 .B M33MU_MEMWATCH
-Watch a memory range (hex addr:size).
+Watch a memory range in the form
+.IR addr:size .
 .TP
 .B M33MU_NVIC_TRACE
-Trace NVIC state changes when set to 1.
+When set to 1, trace NVIC state changes.
 .TP
 .B M33MU_SYSTICK_TRACE
-Trace SysTick register access and tick behavior when set to 1.
+When set to 1, trace SysTick register access and tick behavior.
 .TP
 .B M33MU_SLEEP_TRACE
-Trace WFE/WFI sleep and wake decisions when set to 1.
+When set to 1, trace WFE/WFI sleep and wake decisions.
 .TP
 .B M33MU_PROT_TRACE
-Print SAU/MPU attribution decisions (1-3 for verbosity).
+Print SAU/MPU attribution decisions.
+Values 1 through 3 increase verbosity.
 .SH EXAMPLES
 .TP
 .B m33mu tests/firmware/test-stm32h563/app.bin
-Run a basic STM32H563 firmware test.
+Run a basic firmware image in plain CLI mode.
 .TP
-.B m33mu --tap tests/firmware/test-stm32h563/app.bin
-Run with Ethernet TAP backend.
+.B m33mu --tui tests/firmware/test-stm32h563/app.bin
+Run the same firmware in the interactive TUI.
+.TP
+.B m33mu --gdb --gdb-symbols firmware.elf firmware.bin
+Run a BIN image while supplying ELF symbols for source\-level debugging.
+.TP
+.B m33mu secure.bin nonsecure.bin:0x2000
+Load two firmware images into flash, for example Secure and Non\-secure images in a TrustZone setup.
+.TP
+.B m33mu --uart-stdout --expect-bkpt 0x42 --timeout 10 firmware.bin
+Run a firmware test suitable for CI: log UART to stdout, fail if the expected BKPT is not reached, and abort if the host timeout expires.
+.TP
+.B m33mu --boot spiflash --spiflash:SPI1:file=flash.img:size=0x200000:mmap=0x90000000 firmware.bin
+Attach memory\-mapped SPI flash and boot from it.
+.TP
+.B m33mu --tap firmware.bin
+Run with the TAP Ethernet backend using the default interface name.
 .SH SEE ALSO
 .BR gdb (1)

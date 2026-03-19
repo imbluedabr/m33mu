@@ -94,6 +94,12 @@ void mm_tui_set_cpu_name(struct mm_tui *tui, const char *name)
     (void)name;
 }
 
+void mm_tui_set_command_line(struct mm_tui *tui, const char *cmdline)
+{
+    (void)tui;
+    (void)cmdline;
+}
+
 void mm_tui_set_function(struct mm_tui *tui, mm_u32 pc, const char *name)
 {
     (void)tui;

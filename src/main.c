@@ -426,29 +426,6 @@ static void dump_exc_stack_state(const struct mm_cpu *cpu, const char *tag)
     }
 }
 
-static mm_bool parse_pc_trace_range(const char *s, mm_u32 *start_out, mm_u32 *end_out)
-{
-    const char *dash;
-    mm_u32 start = 0;
-    mm_u32 end = 0;
-    if (s == 0 || start_out == 0 || end_out == 0) {
-        return MM_FALSE;
-    }
-    dash = strchr(s, '-');
-    if (dash == 0) {
-        return MM_FALSE;
-    }
-    if (!parse_hex_u32(s, &start)) {
-        return MM_FALSE;
-    }
-    if (!parse_hex_u32(dash + 1, &end)) {
-        return MM_FALSE;
-    }
-    *start_out = start;
-    *end_out = end;
-    return MM_TRUE;
-}
-
 static mm_bool parse_addr_size(const char *s, mm_u32 *addr_out, mm_u32 *size_out)
 {
     const char *sep;
@@ -3941,7 +3918,6 @@ int main(int argc, char **argv)
     mm_u64 tui_steps_offset = 0;
     mm_u64 tui_steps_latched = 0;
     mm_bool last_running = MM_TRUE;
-    mm_bool opt_strcmp_trace = MM_FALSE;
     mm_bool opt_usb = MM_FALSE;
     char usb_udc[128];
     enum mm_eth_backend_type eth_backend = MM_ETH_BACKEND_NONE;
@@ -3954,15 +3930,7 @@ int main(int argc, char **argv)
 #endif
     struct mm_ta100_cfg ta100_cfgs[4];
     int ta100_count = 0;
-    mm_u32 strcmp_trace_start = 0;
-    mm_u32 strcmp_trace_end = 0;
-    mm_u32 strcmp_entry = 0;
-    mm_bool strcmp_active = MM_FALSE;
-    mm_u32 strcmp_entry_r0 = 0;
-    mm_bool strcmp_after_it = MM_FALSE;
     mm_bool opt_no_tz = MM_FALSE;
-    const char *strcmp_trace_env = getenv("M33MU_STRCMP_TRACE");
-    const char *strcmp_entry_env = getenv("M33MU_STRCMP_ENTRY");
     const char *memwatch_env = getenv("M33MU_MEMWATCH");
     const char *capstone_pc_env = getenv("CAPSTONE_PC");
     const char *disable_tb_env = getenv("M33MU_DISABLE_TB");
@@ -3987,15 +3955,6 @@ int main(int argc, char **argv)
 
     snprintf(usb_udc, sizeof(usb_udc), "dummy_udc.0");
 
-    if (strcmp_trace_env != 0 && strcmp_trace_env[0] != '\0') {
-        if (parse_pc_trace_range(strcmp_trace_env, &strcmp_trace_start, &strcmp_trace_end)) {
-            opt_strcmp_trace = MM_TRUE;
-            strcmp_entry = strcmp_trace_start;
-        }
-    }
-    if (strcmp_entry_env != 0 && strcmp_entry_env[0] != '\0') {
-        (void)parse_hex_u32(strcmp_entry_env, &strcmp_entry);
-    }
     if (memwatch_env != 0 && memwatch_env[0] != '\0') {
         if (parse_addr_size(memwatch_env, &memwatch_addr, &memwatch_size)) {
             mm_memmap_set_watch(memwatch_addr, memwatch_size);
@@ -5116,9 +5075,6 @@ int main(int argc, char **argv)
             last_running = target_should_run(opt_gdb, &gdb, tui_paused, tui_step);
 
             /* Main loop */
-            strcmp_active = MM_FALSE;
-            strcmp_entry_r0 = 0;
-            strcmp_after_it = MM_FALSE;
             while (!done) {
                 int pend_irq;
                 mm_bool running_now;
@@ -5804,37 +5760,6 @@ handle_pending:
                         mm_icache_store(&code_cache, &f, cpu.sec_state, fpu_ok, &d);
                     }
                     mm_memmap_set_last_pc(f.pc_fetch);
-                    if (opt_strcmp_trace) {
-                        mm_u32 pc = f.pc_fetch | 1u;
-                        if (pc >= strcmp_trace_start && pc <= strcmp_trace_end) {
-                            if (!strcmp_active && cpu.r[0] == cpu.r[1]) {
-                                strcmp_active = MM_TRUE;
-                                strcmp_after_it = MM_FALSE;
-                                strcmp_entry_r0 = cpu.r[0];
-                                printf("[STRCMP_TRACE] entry PC=0x%08lx ptr=0x%08lx\n",
-                                       (unsigned long)pc,
-                                       (unsigned long)strcmp_entry_r0);
-                            }
-                            if (strcmp_active && d.kind == MM_OP_IT) {
-                                strcmp_after_it = MM_TRUE;
-                            }
-                            if (strcmp_active && strcmp_after_it && d.kind != MM_OP_IT &&
-                                it_remaining == 0u && cpu.r[0] != cpu.r[1]) {
-                                printf("[STRCMP_TRACE] divergence PC=0x%08lx r0=0x%08lx r1=0x%08lx r2=0x%08lx r3=0x%08lx sp=0x%08lx lr=0x%08lx xpsr=0x%08lx\n",
-                                       (unsigned long)pc,
-                                       (unsigned long)cpu.r[0],
-                                       (unsigned long)cpu.r[1],
-                                       (unsigned long)cpu.r[2],
-                                       (unsigned long)cpu.r[3],
-                                       (unsigned long)mm_cpu_get_active_sp(&cpu),
-                                       (unsigned long)cpu.r[14],
-                                       (unsigned long)cpu.xpsr);
-                                done = MM_TRUE;
-                            }
-                        } else if (strcmp_active) {
-                            strcmp_active = MM_FALSE;
-                        }
-                    }
                     if (opt_capstone) {
                         mm_bool capstone_match = MM_TRUE;
                         if (opt_capstone_pc) {
