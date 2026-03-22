@@ -19,409 +19,57 @@
  *
  */
 
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
 #include "stm32h563/stm32h563_usart.h"
 #include "stm32h563/stm32h563_mmio.h"
 #include "stm32h563/stm32h563_usb.h"
-#include "m33mu/mmio.h"
-#include "m33mu/target_hal.h"
+#include "stm32_usart.h"
 
-/* Minimal register offsets */
-#define USART_CR1   0x00u
-#define USART_CR2   0x04u
-#define USART_CR3   0x08u
-#define USART_BRR   0x0Cu
-#define USART_ISR   0x1Cu
-#define USART_ICR   0x20u
-#define USART_RDR   0x24u
-#define USART_TDR   0x28u
+static struct stm32_usart_state g_usart;
 
-/* Bits we care about */
-#define CR1_UE  (1u << 0)
-#define CR1_RE  (1u << 2)
-#define CR1_TE  (1u << 3)
-#define CR1_RXNEIE (1u << 5)
-#define CR1_TXEIE (1u << 7)
-
-#define ISR_RXNE (1u << 5)
-#define ISR_TC   (1u << 6)
-#define ISR_TXE  (1u << 7)
-#define ISR_TEACK (1u << 21)
-#define ISR_REACK (1u << 22)
-
-struct usart_snapshot {
-    mm_u32 regs[0x30 / 4];
-    mm_u8 tx_buf[1024];
-    mm_u32 tx_head;
-    mm_u32 tx_tail;
-    mm_u32 rx_pending;
-    mm_u32 rx_byte;
-    mm_u32 stdout_only;
-    mm_u32 enabled;
-    mm_u32 macro_match;
-    mm_u32 watch_macro;
-    mm_u32 rx_trace;
-    mm_u32 secure_only;
-    mm_u32 current_sec;
-};
-
-struct usart_inst {
-    mm_u32 base;
-    mm_u32 regs[0x30 / 4];
-    struct mm_uart_io io;
-    char label[16];
-    mm_bool enabled;
-    int irq;
-    mm_u32 *rcc_regs;
-    mm_bool (*clock_on)(struct usart_inst *u);
-    volatile mm_u32 *sec_reg; /* GTZC SECCFGR word controlling secure attribution (or NULL) */
-    mm_u32 sec_bitmask;       /* Bit within sec_reg */
-    mm_bool secure_only;      /* Derived each access from GTZC */
-    enum mm_sec_state current_sec;
-    mm_u8 macro_match;
-    mm_bool watch_macro;
-    mm_bool rx_trace;
-};
-
-static struct usart_inst usarts[13];
-static size_t usart_count = 0;
-static struct mm_nvic *g_nvic = 0;
-
-static mm_bool uart_rx_trace_enabled(void)
-{
-    const char *v = getenv("M33MU_UART_RX_TRACE");
-    return (v && v[0] != '\0') ? MM_TRUE : MM_FALSE;
-}
-
-static mmio_peek_result_t usart_peek(void *opaque, mm_u32 offset, mm_u32 size_bytes, void *dst)
-{
-    struct usart_inst *u = (struct usart_inst *)opaque;
-    mm_u32 val = 0;
-    mm_u32 cr1;
-    mm_u32 isr;
-    mm_u8 *out = (mm_u8 *)dst;
-    enum mm_sec_state access_sec;
-    mm_bool secure_only;
-
-    if (u == 0 || dst == 0 || size_bytes == 0u || size_bytes > 4u) {
-        return MMIO_PEEK_UNSUPPORTED;
-    }
-    access_sec = mmio_active_sec();
-    secure_only = (u->sec_reg != 0 && ((*(u->sec_reg)) & u->sec_bitmask) != 0u);
-    if (secure_only && access_sec == MM_NONSECURE) {
-        memset(out, 0, size_bytes);
-        return MMIO_PEEK_OK;
-    }
-    if (offset >= sizeof(u->regs)) {
-        return MMIO_PEEK_UNSUPPORTED;
-    }
-
-    if (offset == USART_RDR) {
-        val = u->io.rx_pending ? u->io.rx_byte : 0u;
-    } else if (offset == USART_ISR) {
-        cr1 = u->regs[USART_CR1 / 4];
-        isr = u->regs[USART_ISR / 4];
-        isr |= ISR_TXE;
-        isr |= ISR_TC;
-        if ((cr1 & (CR1_UE | CR1_TE)) == (CR1_UE | CR1_TE)) {
-            isr |= ISR_TEACK;
-        } else {
-            isr &= ~ISR_TEACK;
-        }
-        if ((cr1 & (CR1_UE | CR1_RE)) == (CR1_UE | CR1_RE)) {
-            isr |= ISR_REACK;
-        } else {
-            isr &= ~ISR_REACK;
-        }
-        val = isr;
-    } else {
-        memcpy(&val, (mm_u8 *)u->regs + offset, size_bytes);
-    }
-
-    if (size_bytes == 1u) {
-        out[0] = (mm_u8)(val & 0xffu);
-    } else if (size_bytes == 2u) {
-        out[0] = (mm_u8)(val & 0xffu);
-        out[1] = (mm_u8)((val >> 8) & 0xffu);
-    } else {
-        out[0] = (mm_u8)(val & 0xffu);
-        out[1] = (mm_u8)((val >> 8) & 0xffu);
-        out[2] = (mm_u8)((val >> 16) & 0xffu);
-        out[3] = (mm_u8)((val >> 24) & 0xffu);
-    }
-    return MMIO_PEEK_OK;
-}
-
-static mm_bool usart_save(void *opaque, struct mm_snapshot_writer *w)
-{
-    struct usart_inst *u = (struct usart_inst *)opaque;
-    struct usart_snapshot snap;
-    if (u == 0 || w == 0) {
-        return MM_FALSE;
-    }
-    memset(&snap, 0, sizeof(snap));
-    memcpy(snap.regs, u->regs, sizeof(snap.regs));
-    memcpy(snap.tx_buf, u->io.tx_buf, sizeof(snap.tx_buf));
-    snap.tx_head = (mm_u32)u->io.tx_head;
-    snap.tx_tail = (mm_u32)u->io.tx_tail;
-    snap.rx_pending = u->io.rx_pending ? 1u : 0u;
-    snap.rx_byte = (mm_u32)u->io.rx_byte;
-    snap.stdout_only = u->io.stdout_only ? 1u : 0u;
-    snap.enabled = u->enabled ? 1u : 0u;
-    snap.macro_match = u->macro_match;
-    snap.watch_macro = u->watch_macro ? 1u : 0u;
-    snap.rx_trace = u->rx_trace ? 1u : 0u;
-    snap.secure_only = u->secure_only ? 1u : 0u;
-    snap.current_sec = (mm_u32)u->current_sec;
-    return mm_snapshot_write(w, &snap, (mm_u32)sizeof(snap));
-}
-
-static mm_bool usart_load(void *opaque, struct mm_snapshot_reader *r)
-{
-    struct usart_inst *u = (struct usart_inst *)opaque;
-    struct usart_snapshot snap;
-    if (u == 0 || r == 0) {
-        return MM_FALSE;
-    }
-    if ((r->size - r->offset) < (mm_u32)sizeof(snap)) {
-        return MM_FALSE;
-    }
-    if (!mm_snapshot_read(r, &snap, (mm_u32)sizeof(snap))) {
-        return MM_FALSE;
-    }
-    memcpy(u->regs, snap.regs, sizeof(snap.regs));
-    memcpy(u->io.tx_buf, snap.tx_buf, sizeof(snap.tx_buf));
-    u->io.tx_head = (size_t)(snap.tx_head % (mm_u32)sizeof(u->io.tx_buf));
-    u->io.tx_tail = (size_t)(snap.tx_tail % (mm_u32)sizeof(u->io.tx_buf));
-    u->io.rx_pending = snap.rx_pending ? MM_TRUE : MM_FALSE;
-    u->io.rx_byte = (mm_u8)(snap.rx_byte & 0xffu);
-    u->io.stdout_only = snap.stdout_only ? MM_TRUE : MM_FALSE;
-    u->enabled = snap.enabled ? MM_TRUE : MM_FALSE;
-    u->macro_match = (mm_u8)(snap.macro_match & 0xffu);
-    u->watch_macro = snap.watch_macro ? MM_TRUE : MM_FALSE;
-    u->rx_trace = snap.rx_trace ? MM_TRUE : MM_FALSE;
-    u->secure_only = snap.secure_only ? MM_TRUE : MM_FALSE;
-    u->current_sec = (enum mm_sec_state)snap.current_sec;
-    return MM_TRUE;
-}
-
-static mm_bool clock_apb2_usart1(struct usart_inst *u)
+static mm_bool clock_apb2_usart1(struct stm32_usart_inst *u)
 {
     if (u->rcc_regs == 0) return MM_TRUE;
     return ((u->rcc_regs[0xa4 / 4] >> 14) & 1u) != 0u;
 }
 
-static mm_bool clock_apb1lenr_generic(struct usart_inst *u)
+static mm_bool clock_apb1lenr_generic(struct stm32_usart_inst *u)
 {
-    mm_u32 idx = (mm_u32)(u - usarts);
     mm_u32 bit = 0;
-    switch (idx) {
-    case 1: bit = 17; break; /* USART2 */
-    case 2: bit = 18; break; /* USART3 */
-    case 3: bit = 19; break; /* UART4 */
-    case 4: bit = 20; break; /* UART5 */
-    case 5: bit = 25; break; /* USART6 */
-    case 6: bit = 30; break; /* UART7 */
-    case 7: bit = 31; break; /* UART8 */
+    switch (u->index) {
+    case 1: bit = 17; break;
+    case 2: bit = 18; break;
+    case 3: bit = 19; break;
+    case 4: bit = 20; break;
+    case 5: bit = 25; break;
+    case 6: bit = 30; break;
+    case 7: bit = 31; break;
     default: return MM_TRUE;
     }
     if (u->rcc_regs == 0) return MM_TRUE;
     return ((u->rcc_regs[0x9c / 4] >> bit) & 1u) != 0u;
 }
 
-static mm_bool clock_apb1henr_generic(struct usart_inst *u)
+static mm_bool clock_apb1henr_generic(struct stm32_usart_inst *u)
 {
-    mm_u32 idx = (mm_u32)(u - usarts);
     mm_u32 bit = 0;
-    switch (idx) {
-    case 8: bit = 0; break;  /* UART9 */
-    case 11: bit = 1; break; /* UART12 */
+    switch (u->index) {
+    case 8: bit = 0; break;
+    case 11: bit = 1; break;
     default: return MM_TRUE;
     }
     if (u->rcc_regs == 0) return MM_TRUE;
     return ((u->rcc_regs[0xa0 / 4] >> bit) & 1u) != 0u;
 }
 
-static mm_bool clock_apb3_lpuart1(struct usart_inst *u)
+static mm_bool clock_apb3_lpuart1(struct stm32_usart_inst *u)
 {
     if (u->rcc_regs == 0) return MM_TRUE;
     return ((u->rcc_regs[0xa8 / 4] >> 6) & 1u) != 0u;
 }
 
-static void ensure_enabled(struct usart_inst *u)
-{
-    mm_bool was;
-    mm_u32 cr1 = u->regs[USART_CR1 / 4];
-    mm_bool ue = (cr1 & CR1_UE) != 0u;
-    if (u->clock_on != 0) {
-        if (!u->clock_on(u)) {
-            ue = MM_FALSE;
-        }
-    }
-    was = u->enabled;
-    u->enabled = ue;
-    if (ue && !was) {
-        if (mm_uart_io_open(&u->io, u->base)) {
-            /* Mark TXE empty */
-            u->regs[USART_ISR / 4] |= ISR_TXE;
-            u->regs[USART_ISR / 4] |= ISR_TC;
-            if (mm_tui_is_active()) {
-                mm_tui_attach_uart(u->label, u->io.name);
-            }
-        }
-    } else if (!ue && was) {
-        mm_uart_io_close(&u->io);
-    }
-}
-
-static void usart_update_ack(struct usart_inst *u)
-{
-    mm_u32 cr1 = u->regs[USART_CR1 / 4];
-    mm_u32 isr = u->regs[USART_ISR / 4];
-    if ((cr1 & (CR1_UE | CR1_TE)) == (CR1_UE | CR1_TE)) {
-        isr |= ISR_TEACK;
-    } else {
-        isr &= ~ISR_TEACK;
-    }
-    if ((cr1 & (CR1_UE | CR1_RE)) == (CR1_UE | CR1_RE)) {
-        isr |= ISR_REACK;
-    } else {
-        isr &= ~ISR_REACK;
-    }
-    u->regs[USART_ISR / 4] = isr;
-}
-
-static mm_bool usart_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
-{
-    struct usart_inst *u = (struct usart_inst *)opaque;
-    u->current_sec = mmio_active_sec();
-    u->secure_only = (u->sec_reg != 0 && ((*(u->sec_reg)) & u->sec_bitmask) != 0u);
-    if (u->secure_only && u->current_sec == MM_NONSECURE) {
-        if (value_out) *value_out = 0;
-        return MM_TRUE;
-    }
-    if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (offset >= sizeof(u->regs)) return MM_FALSE;
-    ensure_enabled(u);
-    if (offset == USART_RDR) {
-        mm_u32 v = 0u;
-        if (mm_uart_io_has_rx(&u->io)) {
-            v = mmio_peek_mode() ? mm_uart_io_peek(&u->io) : mm_uart_io_read(&u->io);
-        }
-        *value_out = v;
-        if (!mmio_peek_mode()) {
-            u->regs[USART_ISR / 4] &= ~ISR_RXNE;
-        }
-        if (u->rx_trace && !mmio_peek_mode()) {
-            printf("[USART_RX_RDR] base=0x%08lx byte=0x%02lx\n",
-                   (unsigned long)u->base,
-                   (unsigned long)(v & 0xffu));
-        }
-        return MM_TRUE;
-    }
-    if (offset == USART_ISR) {
-        /* Keep TXE/TC set so firmware polls see the line idle immediately. */
-        u->regs[USART_ISR / 4] |= ISR_TXE;
-        u->regs[USART_ISR / 4] |= ISR_TC;
-        usart_update_ack(u);
-        if (u->rx_trace) {
-            printf("[USART_ISR_READ] base=0x%08lx isr=0x%08lx\n",
-                   (unsigned long)u->base,
-                   (unsigned long)u->regs[USART_ISR / 4]);
-        }
-    }
-    memcpy(value_out, (mm_u8 *)u->regs + offset, size_bytes);
-    return MM_TRUE;
-}
-
-static mm_bool usart_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
-{
-    struct usart_inst *u = (struct usart_inst *)opaque;
-    static const char macro_pat[] = "macro   error";
-    u->current_sec = mmio_active_sec();
-    u->secure_only = (u->sec_reg != 0 && ((*(u->sec_reg)) & u->sec_bitmask) != 0u);
-    if (u->secure_only && u->current_sec == MM_NONSECURE) {
-        return MM_TRUE;
-    }
-    if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    if (offset >= sizeof(u->regs)) return MM_FALSE;
-    if (offset == USART_TDR) {
-        ensure_enabled(u);
-        if (!u->enabled) return MM_TRUE;
-        if (u->watch_macro) {
-            mm_u8 ch = (mm_u8)value;
-            if ((size_t)u->macro_match < (sizeof(macro_pat) - 1u) &&
-                ch == (mm_u8)macro_pat[u->macro_match]) {
-                u->macro_match++;
-                if ((size_t)u->macro_match == (sizeof(macro_pat) - 1u)) {
-                    mm_uart_break_on_macro_set();
-                    u->macro_match = 0;
-                }
-            } else if (ch == (mm_u8)macro_pat[0]) {
-                u->macro_match = 1;
-            } else {
-                u->macro_match = 0;
-            }
-        }
-        mm_uart_io_queue_tx(&u->io, (mm_u8)value);
-        u->regs[USART_ISR / 4] &= ~ISR_TXE;
-        u->regs[USART_ISR / 4] &= ~ISR_TC;
-        if (mm_uart_io_flush(&u->io) && mm_uart_io_tx_empty(&u->io)) {
-            u->regs[USART_ISR / 4] |= ISR_TXE;
-            u->regs[USART_ISR / 4] |= ISR_TC;
-        }
-        return MM_TRUE;
-    }
-    if (offset == USART_ICR) {
-        /* Clear flags by writing 1 to ICR bits. */
-        if ((value & ISR_TC) != 0u) {
-            u->regs[USART_ISR / 4] &= ~ISR_TC;
-        }
-        return MM_TRUE;
-    }
-    memcpy((mm_u8 *)u->regs + offset, &value, size_bytes);
-    if (offset == USART_CR1) {
-        usart_update_ack(u);
-    }
-    return MM_TRUE;
-}
-
-static void poll_instance(struct usart_inst *u)
-{
-    ensure_enabled(u);
-    if (!u->enabled) return;
-
-    if (mm_uart_io_poll(&u->io)) {
-        u->regs[USART_ISR / 4] |= ISR_RXNE;
-        if (u->rx_trace) {
-            printf("[USART_RXNE_SET] base=0x%08lx\n", (unsigned long)u->base);
-        }
-    }
-    if (mm_uart_io_tx_empty(&u->io)) {
-        u->regs[USART_ISR / 4] |= ISR_TXE;
-        u->regs[USART_ISR / 4] |= ISR_TC;
-    }
-    /* Interrupts */
-    if (g_nvic != 0 && u->irq >= 0) {
-        mm_u32 cr1 = u->regs[USART_CR1 / 4];
-        mm_u32 isr = u->regs[USART_ISR / 4];
-        if (((cr1 & CR1_RXNEIE) != 0u) && ((isr & ISR_RXNE) != 0u)) {
-            mm_nvic_set_pending(g_nvic, (mm_u32)u->irq, MM_TRUE);
-        }
-        if (((cr1 & CR1_TXEIE) != 0u) && ((isr & ISR_TXE) != 0u)) {
-            mm_nvic_set_pending(g_nvic, (mm_u32)u->irq, MM_TRUE);
-        }
-    }
-}
-
 void mm_stm32h563_usart_poll(void)
 {
-    size_t i;
-    for (i = 0; i < usart_count; ++i) {
-        poll_instance(&usarts[i]);
-    }
+    stm32_usart_poll(&g_usart);
 }
 
 void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
@@ -440,98 +88,43 @@ void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
         "UART7", "UART8", "UART9", "USART10", "USART11", "UART12",
         "LPUART1"
     };
-    size_t i;
     mm_u32 *tz = mm_stm32h563_tzsc_regs();
-    mm_u32 *tz2 = tz != 0 ? tz + (0x14u / 4u) : 0; /* SECCFGR2 offset */
-    mm_u32 *tz1 = tz != 0 ? tz + (0x10u / 4u) : 0; /* SECCFGR1 offset */
-    g_nvic = nvic;
+    mm_u32 *tz2 = tz != 0 ? tz + (0x14u / 4u) : 0;
+    mm_u32 *tz1 = tz != 0 ? tz + (0x10u / 4u) : 0;
+    size_t i;
+    stm32_usart_state_init(&g_usart, sizeof(bases) / sizeof(bases[0]), nvic);
     mm_stm32h563_rng_set_nvic(nvic);
     mm_stm32h563_usb_set_nvic(nvic);
-    if (usart_count == 0) {
-        usart_count = sizeof(bases) / sizeof(bases[0]);
-    }
-    for (i = 0; i < usart_count && i < (sizeof(usarts) / sizeof(usarts[0])); ++i) {
-        struct usart_inst *u = &usarts[i];
-        struct mmio_region reg;
-        memset(&reg, 0, sizeof(reg));
-        memset(u, 0, sizeof(*u));
-        u->base = bases[i];
-        u->regs[USART_ISR / 4] = ISR_TXE; /* idle empty */
-        u->rx_trace = uart_rx_trace_enabled();
-        mm_uart_io_init(&u->io);
-        if (i < (sizeof(labels) / sizeof(labels[0]))) {
-            strncpy(u->label, labels[i], sizeof(u->label) - 1u);
-            u->label[sizeof(u->label) - 1u] = '\0';
-        } else {
-            mm_u32 idx = (mm_u32)(i + 1u);
-            u->label[0] = 'U';
-            u->label[1] = 'S';
-            u->label[2] = 'A';
-            u->label[3] = 'R';
-            u->label[4] = 'T';
-            if (idx < 10u) {
-                u->label[5] = (char)('0' + idx);
-                u->label[6] = '\0';
-            } else {
-                u->label[5] = (char)('0' + ((idx / 10u) % 10u));
-                u->label[6] = (char)('0' + (idx % 10u));
-                u->label[7] = '\0';
-            }
-        }
-        u->irq = (i < (sizeof(irq_map)/sizeof(irq_map[0]))) ? irq_map[i] : -1;
+    for (i = 0; i < g_usart.usart_count; ++i) {
+        struct stm32_usart_inst *u;
+        stm32_usart_register_instance(&g_usart, bus, i, bases[i], irq_map[i], labels[i],
+                                      MM_TRUE, MM_TRUE, stm32_usart_uart_rx_trace_enabled());
+        u = &g_usart.usarts[i];
         u->rcc_regs = mm_stm32h563_rcc_regs();
-        u->clock_on = 0;
-        u->current_sec = MM_SECURE;
-        u->watch_macro = (i == 2u) ? MM_TRUE : MM_FALSE; /* USART3 */
+        u->watch_macro = (i == 2u) ? MM_TRUE : MM_FALSE;
         u->sec_reg = tz1;
         if (i == 0) {
             u->clock_on = clock_apb2_usart1;
-            u->sec_bitmask = (1u << 11); /* SECCFGR2 USART1SEC bit11 */
+            u->sec_bitmask = (1u << 11);
             u->sec_reg = tz2;
         } else if (i >= 1 && i <= 7) {
             u->clock_on = clock_apb1lenr_generic;
-            if (i == 1) { u->sec_bitmask = (1u << 13); }
-            else if (i == 2) { u->sec_bitmask = (1u << 14); }
-            else if (i == 5) { u->sec_bitmask = (1u << 21); }
-            else if (i == 9) { u->sec_bitmask = (1u << 22); }
-            else if (i == 10) { u->sec_bitmask = (1u << 23); }
-            else { u->sec_bitmask = 0; }
+            if (i == 1) u->sec_bitmask = (1u << 13);
+            else if (i == 2) u->sec_bitmask = (1u << 14);
+            else if (i == 5) u->sec_bitmask = (1u << 21);
+            else if (i == 9) u->sec_bitmask = (1u << 22);
+            else if (i == 10) u->sec_bitmask = (1u << 23);
         } else if (i == 12u) {
             u->clock_on = clock_apb3_lpuart1;
             u->sec_reg = tz2;
-            u->sec_bitmask = (1u << 25); /* SECCFGR2 LPUART1SEC bit25 */
+            u->sec_bitmask = (1u << 25);
         } else {
             u->clock_on = clock_apb1henr_generic;
-            u->sec_bitmask = 0;
         }
-        reg.base = bases[i];
-        reg.size = 0x400u;
-        reg.opaque = u;
-        reg.read = usart_read;
-        reg.write = usart_write;
-        reg.magic = MMIO_REGION_MAGIC;
-        reg.flags = MMIO_REGION_F_EXT;
-        reg.peek = usart_peek;
-        reg.name = u->label;
-        reg.version = 1u;
-        reg.save = usart_save;
-        reg.load = usart_load;
-        mmio_bus_register_region(bus, &reg);
-        reg.base = bases[i] + 0x10000000u;
-        reg.name = 0;
-        reg.save = 0;
-        reg.load = 0;
-        mmio_bus_register_region(bus, &reg);
     }
 }
 
 void mm_stm32h563_usart_reset(void)
 {
-    size_t i;
-    for (i = 0; i < sizeof(usarts)/sizeof(usarts[0]); ++i) {
-        struct usart_inst *u = &usarts[i];
-        mm_uart_io_close(&u->io);
-        memset(u, 0, sizeof(*u));
-    }
-    usart_count = 0;
+    stm32_usart_reset(&g_usart);
 }
