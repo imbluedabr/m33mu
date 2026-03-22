@@ -871,6 +871,7 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
         mm_bool send = MM_FALSE;
         const char *seq = 0;
         size_t seq_len = 0;
+        ssize_t w;
         if (key == KEY_ENTER || ch == '\n' || ch == '\r') {
             b = '\r';
             send = MM_TRUE;
@@ -894,12 +895,12 @@ static void tui_handle_key(struct mm_tui *tui, int key, uint32_t ch, uint8_t mod
             send = MM_TRUE;
         }
         if (seq != 0 && uart != 0 && uart->fd >= 0) {
-            ssize_t w = write(uart->fd, seq, seq_len);
+            w = write(uart->fd, seq, seq_len);
             (void)w;
             return;
         }
         if (send && uart != 0 && uart->fd >= 0) {
-            ssize_t w = write(uart->fd, &b, 1);
+            w = write(uart->fd, &b, 1);
             (void)w;
         }
     }
