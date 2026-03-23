@@ -36,6 +36,22 @@ static mm_bool g_uart_stdout = MM_FALSE;
 static int g_uart_rx_trace = -1;
 static const struct mm_target_cfg *g_target_cfg = 0;
 
+#define MM_TARGET_CALL0(field) \
+    do { \
+        if (cfg == 0 || cfg->field == 0) { \
+            return; \
+        } \
+        cfg->field(); \
+    } while (0)
+
+#define MM_TARGET_CALL2(field, arg0, arg1) \
+    do { \
+        if (cfg == 0 || cfg->field == 0) { \
+            return; \
+        } \
+        cfg->field((arg0), (arg1)); \
+    } while (0)
+
 static mm_bool uart_rx_trace_enabled(void)
 {
     if (g_uart_rx_trace < 0) {
@@ -268,72 +284,45 @@ mm_u64 mm_target_cpu_hz(const struct mm_target_cfg *cfg)
 
 void mm_target_usart_init(const struct mm_target_cfg *cfg, struct mmio_bus *bus, struct mm_nvic *nvic)
 {
-    if (cfg == 0 || cfg->usart_init == 0) {
-        return;
-    }
-    cfg->usart_init(bus, nvic);
+    MM_TARGET_CALL2(usart_init, bus, nvic);
 }
 
 void mm_target_usart_reset(const struct mm_target_cfg *cfg)
 {
-    if (cfg == 0 || cfg->usart_reset == 0) {
-        return;
-    }
-    cfg->usart_reset();
+    MM_TARGET_CALL0(usart_reset);
 }
 
 void mm_target_usart_poll(const struct mm_target_cfg *cfg)
 {
-    if (cfg == 0 || cfg->usart_poll == 0) {
-        return;
-    }
-    cfg->usart_poll();
+    MM_TARGET_CALL0(usart_poll);
 }
 
 void mm_target_spi_init(const struct mm_target_cfg *cfg, struct mmio_bus *bus, struct mm_nvic *nvic)
 {
-    if (cfg == 0 || cfg->spi_init == 0) {
-        return;
-    }
-    cfg->spi_init(bus, nvic);
+    MM_TARGET_CALL2(spi_init, bus, nvic);
 }
 
 void mm_target_spi_reset(const struct mm_target_cfg *cfg)
 {
-    if (cfg == 0 || cfg->spi_reset == 0) {
-        return;
-    }
-    cfg->spi_reset();
+    MM_TARGET_CALL0(spi_reset);
 }
 
 void mm_target_spi_poll(const struct mm_target_cfg *cfg)
 {
-    if (cfg == 0 || cfg->spi_poll == 0) {
-        return;
-    }
-    cfg->spi_poll();
+    MM_TARGET_CALL0(spi_poll);
 }
 
 void mm_target_eth_init(const struct mm_target_cfg *cfg, struct mmio_bus *bus, struct mm_nvic *nvic)
 {
-    if (cfg == 0 || cfg->eth_init == 0) {
-        return;
-    }
-    cfg->eth_init(bus, nvic);
+    MM_TARGET_CALL2(eth_init, bus, nvic);
 }
 
 void mm_target_eth_reset(const struct mm_target_cfg *cfg)
 {
-    if (cfg == 0 || cfg->eth_reset == 0) {
-        return;
-    }
-    cfg->eth_reset();
+    MM_TARGET_CALL0(eth_reset);
 }
 
 void mm_target_eth_poll(const struct mm_target_cfg *cfg)
 {
-    if (cfg == 0 || cfg->eth_poll == 0) {
-        return;
-    }
-    cfg->eth_poll();
+    MM_TARGET_CALL0(eth_poll);
 }
