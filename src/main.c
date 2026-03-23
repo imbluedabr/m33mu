@@ -352,6 +352,32 @@ static void record_window_step(struct mm_cpu *cpu, struct mm_memmap *map)
     }
 }
 
+static mm_bool mm_bootapi_handle(struct mm_cpu *cpu, struct mm_memmap *map)
+{
+    if (mm_rp2350_bootrom_handle(cpu, map)) {
+        return MM_TRUE;
+    }
+    if (mm_mcxn947_romapi_handle(cpu, map)) {
+        return MM_TRUE;
+    }
+    if (mm_lpc55s69_romapi_handle(cpu, map)) {
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static void finish_trace_step_if_started(mm_bool trace_started,
+                                         struct mm_cpu *cpu,
+                                         struct mm_memmap *map)
+{
+    if (!trace_started) {
+        return;
+    }
+    mmio_bus_end_step(&map->mmio, mm_trace_get_undo_sink());
+    mm_trace_end_step(cpu);
+    record_window_step(cpu, map);
+}
+
 static mm_u32 cfg_total_ram(const struct mm_target_cfg *cfg)
 {
     mm_u32 total = 0;
@@ -2970,15 +2996,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
 
         cpu->r[13] = mm_cpu_get_active_sp(cpu);
 
-        if (mm_rp2350_bootrom_handle(cpu, map)) {
-            result = MM_TRUE;
-            goto out;
-        }
-        if (mm_mcxn947_romapi_handle(cpu, map)) {
-            result = MM_TRUE;
-            goto out;
-        }
-        if (mm_lpc55s69_romapi_handle(cpu, map)) {
+        if (mm_bootapi_handle(cpu, map)) {
             result = MM_TRUE;
             goto out;
         }
@@ -5701,28 +5719,8 @@ handle_pending:
                         trace_started = MM_TRUE;
                     }
 
-                    if (mm_rp2350_bootrom_handle(&cpu, &map)) {
-                        if (trace_started) {
-                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
-                            mm_trace_end_step(&cpu);
-                            record_window_step(&cpu, &map);
-                        }
-                        continue;
-                    }
-                    if (mm_mcxn947_romapi_handle(&cpu, &map)) {
-                        if (trace_started) {
-                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
-                            mm_trace_end_step(&cpu);
-                            record_window_step(&cpu, &map);
-                        }
-                        continue;
-                    }
-                    if (mm_lpc55s69_romapi_handle(&cpu, &map)) {
-                        if (trace_started) {
-                            mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
-                            mm_trace_end_step(&cpu);
-                            record_window_step(&cpu, &map);
-                        }
+                    if (mm_bootapi_handle(&cpu, &map)) {
+                        finish_trace_step_if_started(trace_started, &cpu, &map);
                         continue;
                     }
 
