@@ -60,6 +60,7 @@ struct mm_memmap {
     struct mm_mem ram;
     struct mm_ram_region ram_regions[8];
     mm_u32 ram_region_count;
+    mm_u32 ram_region_last_hit;
     mm_u32 ram_total_size;
     mm_u32 ram_region_offsets[8];
     mm_u32 flash_base_s;

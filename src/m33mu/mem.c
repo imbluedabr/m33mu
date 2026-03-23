@@ -31,52 +31,60 @@
  * `fault` is set to MM_TRUE if the address is out of range.
  */
 mm_bool mem_read16(const struct mm_mem *m, mm_u32 addr, mm_u32 *value_out) {
+    size_t off;
+
     if (m == 0 || value_out == 0) {
         return MM_FALSE;
     }
     if (addr < m->base) {
         return MM_FALSE;
     }
-    if ((size_t)(addr - m->base) + 2u > m->length) {
+    off = (size_t)(addr - m->base);
+    if (off + 2u > m->length) {
         return MM_FALSE;
     }
-    *value_out = ((mm_u32)m->buffer[addr - m->base] << 0) |
-                 ((mm_u32)m->buffer[addr - m->base + 1] << 8);
+    *value_out = ((mm_u32)m->buffer[off] << 0) |
+                 ((mm_u32)m->buffer[off + 1u] << 8);
     return MM_TRUE;
 }
 
 /* Read a 32-bit value. */
 mm_bool mem_read32(const struct mm_mem *m, mm_u32 addr, mm_u32 *value_out) {
+    size_t off;
+
     if (m == 0 || value_out == 0) {
         return MM_FALSE;
     }
     if (addr < m->base) {
         return MM_FALSE;
     }
-    if ((size_t)(addr - m->base) + 4u > m->length) {
+    off = (size_t)(addr - m->base);
+    if (off + 4u > m->length) {
         return MM_FALSE;
     }
-    *value_out = ((mm_u32)m->buffer[addr - m->base] << 0) |
-                 ((mm_u32)m->buffer[addr - m->base + 1] << 8) |
-                 ((mm_u32)m->buffer[addr - m->base + 2] << 16) |
-                 ((mm_u32)m->buffer[addr - m->base + 3] << 24);
+    *value_out = ((mm_u32)m->buffer[off] << 0) |
+                 ((mm_u32)m->buffer[off + 1u] << 8) |
+                 ((mm_u32)m->buffer[off + 2u] << 16) |
+                 ((mm_u32)m->buffer[off + 3u] << 24);
     return MM_TRUE;
 }
 
 mm_bool mem_read(const struct mm_mem *m, mm_u32 addr, mm_u8 *dst, size_t len)
 {
+    size_t off;
+
     if (m == 0 || dst == 0) {
         return MM_FALSE;
     }
     if (addr < m->base) {
         return MM_FALSE;
     }
-    if ((size_t)(addr - m->base) + len > m->length) {
+    off = (size_t)(addr - m->base);
+    if (off + len > m->length) {
         return MM_FALSE;
     }
     while (len--) {
-        *dst++ = m->buffer[addr - m->base];
-        addr++;
+        *dst++ = m->buffer[off++];
     }
     return MM_TRUE;
 }

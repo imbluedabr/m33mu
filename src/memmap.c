@@ -32,6 +32,10 @@ static mm_u32 g_memwatch_size = 0;
 static mm_u32 g_memwatch_pc = 0;
 static struct mm_memmap *g_current_map = 0;
 
+#define MM_INTERCEPT_OK(map, type, sec, addr, size) \
+    ((map)->interceptor == 0 || \
+     (map)->interceptor((map)->interceptor_opaque, (type), (sec), (addr), (size)))
+
 static mm_bool read_buf_le(const mm_u8 *buf, mm_u32 offset, mm_u32 size, mm_u32 *value_out)
 {
     mm_u32 v;
@@ -147,6 +151,31 @@ static mm_bool memmap_read_old_bytes(const struct mm_memmap *map, enum mm_sec_st
     return MM_FALSE;
 }
 
+static mm_bool ram_region_offset_for_addr(const struct mm_memmap *map,
+                                          mm_u32 region_index,
+                                          mm_u32 addr,
+                                          mm_u32 size,
+                                          mm_u32 *offset_out)
+{
+    const struct mm_ram_region *r;
+    mm_u32 end;
+
+    if (map == 0 || offset_out == 0 || region_index >= map->ram_region_count) {
+        return MM_FALSE;
+    }
+    r = &map->ram_regions[region_index];
+    end = r->size;
+    if (addr >= r->base_s && (addr - r->base_s) + size <= end) {
+        *offset_out = map->ram_region_offsets[region_index] + (addr - r->base_s);
+        return MM_TRUE;
+    }
+    if (addr >= r->base_ns && (addr - r->base_ns) + size <= end) {
+        *offset_out = map->ram_region_offsets[region_index] + (addr - r->base_ns);
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
 static mm_bool ram_offset_for_addr(const struct mm_memmap *map, mm_u32 addr, mm_u32 size, mm_u32 *offset_out)
 {
     mm_u32 i;
@@ -154,15 +183,16 @@ static mm_bool ram_offset_for_addr(const struct mm_memmap *map, mm_u32 addr, mm_
         return MM_FALSE;
     }
     if (map->ram_region_count > 0u) {
+        if (map->ram_region_last_hit < map->ram_region_count &&
+            ram_region_offset_for_addr(map, map->ram_region_last_hit, addr, size, offset_out)) {
+            return MM_TRUE;
+        }
         for (i = 0; i < map->ram_region_count; ++i) {
-            const struct mm_ram_region *r = &map->ram_regions[i];
-            mm_u32 end = r->size;
-            if (addr >= r->base_s && (addr - r->base_s) + size <= end) {
-                *offset_out = map->ram_region_offsets[i] + (addr - r->base_s);
-                return MM_TRUE;
+            if (i == map->ram_region_last_hit) {
+                continue;
             }
-            if (addr >= r->base_ns && (addr - r->base_ns) + size <= end) {
-                *offset_out = map->ram_region_offsets[i] + (addr - r->base_ns);
+            if (ram_region_offset_for_addr(map, i, addr, size, offset_out)) {
+                ((struct mm_memmap *)map)->ram_region_last_hit = i;
                 return MM_TRUE;
             }
         }
@@ -190,14 +220,6 @@ static mm_bool ram_offset_for_addr(const struct mm_memmap *map, mm_u32 addr, mm_
     return MM_FALSE;
 }
 
-static mm_bool intercept_ok(const struct mm_memmap *map, enum mm_access_type type, enum mm_sec_state sec, mm_u32 addr, mm_u32 size)
-{
-    if (map->interceptor == 0) {
-        return MM_TRUE;
-    }
-    return map->interceptor(map->interceptor_opaque, type, sec, addr, size);
-}
-
 void mm_memmap_init(struct mm_memmap *map, struct mmio_region *regions, size_t region_capacity)
 {
     mmio_bus_init(&map->mmio, regions, region_capacity);
@@ -208,6 +230,7 @@ void mm_memmap_init(struct mm_memmap *map, struct mmio_region *regions, size_t r
     map->ram.length = 0;
     map->ram.base = 0;
     map->ram_region_count = 0;
+    map->ram_region_last_hit = ~0u;
     map->ram_total_size = 0;
     map->ram_region_offsets[0] = 0;
     map->ram_region_offsets[1] = 0;
@@ -292,6 +315,7 @@ mm_bool mm_memmap_configure_ram(struct mm_memmap *map, const struct mm_target_cf
     map->ram_base_ns = cfg->ram_base_ns;
     map->ram_size_s = cfg->ram_size_s;
     map->ram_size_ns = cfg->ram_size_ns;
+    map->ram_region_last_hit = ~0u;
     if (cfg->ram_regions != 0 && cfg->ram_region_count > 0u) {
         mm_u32 total = 0;
         mm_u32 i;
@@ -329,7 +353,7 @@ mm_bool mm_memmap_read(const struct mm_memmap *map, enum mm_sec_state sec, mm_u3
     if (map == 0) {
         return MM_FALSE;
     }
-    if (!intercept_ok(map, MM_ACCESS_READ, sec, addr, size)) {
+    if (!MM_INTERCEPT_OK(map, MM_ACCESS_READ, sec, addr, size)) {
         return MM_FALSE;
     }
     /* Flash */
@@ -405,7 +429,7 @@ mm_bool mm_memmap_write(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 add
     if (map == 0) {
         return MM_FALSE;
     }
-    if (!intercept_ok(map, MM_ACCESS_WRITE, sec, addr, size)) {
+    if (!MM_INTERCEPT_OK(map, MM_ACCESS_WRITE, sec, addr, size)) {
         return MM_FALSE;
     }
     if (g_memwatch_enabled) {
@@ -512,7 +536,7 @@ mm_bool mm_memmap_fetch_read16(const struct mm_memmap *map, enum mm_sec_state se
     if (map == 0) {
         return MM_FALSE;
     }
-    if (!intercept_ok(map, MM_ACCESS_EXEC, sec, addr, 2u)) {
+    if (!MM_INTERCEPT_OK(map, MM_ACCESS_EXEC, sec, addr, 2u)) {
         return MM_FALSE;
     }
     /* Execute from flash only for now. */
@@ -566,7 +590,7 @@ mm_bool mm_memmap_read8(const struct mm_memmap *map, enum mm_sec_state sec, mm_u
     if (map == 0 || value_out == 0) {
         return MM_FALSE;
     }
-    if (!intercept_ok(map, MM_ACCESS_READ, sec, addr, 1u)) {
+    if (!MM_INTERCEPT_OK(map, MM_ACCESS_READ, sec, addr, 1u)) {
         return MM_FALSE;
     }
     if (map->flash.buffer != 0) {
@@ -625,7 +649,7 @@ mm_bool mm_memmap_write8(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 ad
     if (map == 0) {
         return MM_FALSE;
     }
-    if (!intercept_ok(map, MM_ACCESS_WRITE, sec, addr, 1u)) {
+    if (!MM_INTERCEPT_OK(map, MM_ACCESS_WRITE, sec, addr, 1u)) {
         return MM_FALSE;
     }
     if (map->ram.buffer != 0) {
