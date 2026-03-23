@@ -25,6 +25,15 @@
 #include "m33mu/mem_prot.h"
 #include "m33mu/target_hal.h"
 
+#define TT_RESP_MRVALID  (1u << 0)
+#define TT_RESP_S        (1u << 6)
+#define TT_RESP_SRVALID  (1u << 7)
+#define TT_RESP_R        (1u << 16)
+#define TT_RESP_RW       (1u << 17)
+#define TT_RESP_NSR      (1u << 18)
+#define TT_RESP_NSRW     (1u << 19)
+#define TT_RESP_IRVALID  (1u << 23)
+
 mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 addr,
                    mm_bool alt, mm_bool forceunpriv)
 {
@@ -49,16 +58,16 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
         
         /* Set S bit based on SAU attribution */
         if (sau_attr == MM_SAU_SECURE || sau_attr == MM_SAU_NSC) {
-            result |= (1u << 6);  /* S bit = 1 (Secure) */
+            result |= TT_RESP_S;  /* S bit = 1 (Secure) */
         }
         
         /* SRVALID and SREGION - simplified: always mark as invalid for now */
         /* TODO: track actual SAU region number when mm_sau_attr_for_addr is enhanced */
-        result |= (0u << 7);  /* SRVALID = 0 */
+        result |= 0u;  /* SRVALID = 0 */
         result |= (0u << 8);  /* SREGION[7:0] = 0 */
     } else {
         /* When executed from Non-secure state, S bit is always 0 */
-        result |= (0u << 6);
+        result |= 0u;
     }
     
     /* Query MPU for region match and permissions */
@@ -81,34 +90,34 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
         
         /* Determine effective permissions based on forceunpriv flag. */
         if (forceunpriv || !mm_cpu_get_privileged(cpu)) {
-            result |= (unpriv_read ? (1u << 16) : 0);   /* R bit */
-            result |= (unpriv_write ? (1u << 17) : 0);  /* RW bit */
+            result |= (unpriv_read ? TT_RESP_R : 0u);
+            result |= (unpriv_write ? TT_RESP_RW : 0u);
         } else {  /* Privileged */
-            result |= (priv_read ? (1u << 16) : 0);     /* R bit */
-            result |= (priv_write ? (1u << 17) : 0);    /* RW bit */
+            result |= (priv_read ? TT_RESP_R : 0u);
+            result |= (priv_write ? TT_RESP_RW : 0u);
         }
         
         /* NSR/NSRW bits (only when in Secure state querying Non-secure) */
         if (cpu->sec_state != MM_NONSECURE && alt) {  /* Secure state */
             /* These would reflect Non-secure view - for now match R/RW */
-            result |= ((result & (1u << 16)) ? (1u << 18) : 0);  /* NSR */
-            result |= ((result & (1u << 17)) ? (1u << 19) : 0);  /* NSRW */
+            result |= ((result & TT_RESP_R) ? TT_RESP_NSR : 0u);
+            result |= ((result & TT_RESP_RW) ? TT_RESP_NSRW : 0u);
         }
         
         /* MREGION/MRVALID combined in bit 0 for simplicity */
-        result |= (1u << 0);  /* MRVALID = 1 (region matched) */
+        result |= TT_RESP_MRVALID;
     }
     
     if (cfg != 0 && cfg->tz_attr_for_addr != 0) {
         enum mm_sau_attr idau_attr = MM_SAU_SECURE;
         mm_u32 idau_region = 0u;
         if (cfg->tz_attr_for_addr(addr, &idau_attr, &idau_region)) {
-            result |= (1u << 23);                 /* IRVALID */
+            result |= TT_RESP_IRVALID;
             result |= ((idau_region & 0xFFu) << 24);
             if (idau_attr == MM_SAU_NONSECURE) {
-                result &= ~(1u << 6);
+                result &= ~TT_RESP_S;
             } else {
-                result |= (1u << 6);
+                result |= TT_RESP_S;
             }
         }
     }

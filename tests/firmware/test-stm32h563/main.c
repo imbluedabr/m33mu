@@ -31,8 +31,6 @@ extern uint32_t _ebss;
 extern uint32_t _estack;
 extern void __libc_init_array(void);
 
-/* int ISA_SWEEPER_Run(void); */
-
 #define SYSCLK_HZ 64000000u
 
 /* RCC */

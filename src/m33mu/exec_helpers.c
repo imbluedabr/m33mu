@@ -31,6 +31,7 @@ void mm_add_with_carry(mm_u32 a, mm_u32 b, mm_bool carry_in,
     mm_bool carry = (ures >> 32) != 0;
     mm_bool overflow = MM_FALSE;
 
+    /* Signed overflow: inputs share a sign, but the result flips sign. */
     if ((((~(a ^ b)) & (a ^ res)) & 0x80000000u) != 0u) {
         overflow = MM_TRUE;
     }

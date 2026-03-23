@@ -38,15 +38,15 @@ static void mpu_select_banks(const struct mm_scs *scs, enum mm_sec_state sec, co
 
 mm_bool mm_mpu_enabled(const struct mm_scs *scs, enum mm_sec_state sec)
 {
-    const mm_u32 *rbar;
-    const mm_u32 *rlar;
     mm_u32 ctrl;
     if (scs == 0) {
         return MM_FALSE;
     }
-    mpu_select_banks(scs, sec, &rbar, &rlar, &ctrl);
-    (void)rbar;
-    (void)rlar;
+    if (sec == MM_NONSECURE) {
+        ctrl = scs->mpu_ctrl_ns;
+    } else {
+        ctrl = scs->mpu_ctrl_s;
+    }
     return (ctrl & MPU_CTRL_ENABLE) != 0u ? MM_TRUE : MM_FALSE;
 }
 
@@ -110,11 +110,8 @@ mm_bool mm_mpu_region_lookup(const struct mm_scs *scs, enum mm_sec_state sec, mm
 mm_bool mm_mpu_is_xn_exec(const struct mm_scs *scs, enum mm_sec_state sec, mm_u32 addr)
 {
     mm_u32 rbar;
-    mm_u32 rlar;
-    if (!mm_mpu_region_lookup(scs, sec, addr, &rbar, &rlar)) {
+    if (!mm_mpu_region_lookup(scs, sec, addr, &rbar, 0)) {
         return MM_FALSE;
     }
-    (void)rlar;
     return (rbar & 0x1u) != 0u ? MM_TRUE : MM_FALSE;
 }
-

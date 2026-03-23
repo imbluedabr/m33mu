@@ -39,6 +39,14 @@ struct mm_scs_mmio {
 #define SCS_SCB_OFFSET 0x0D00u /* SCB window starts at 0xE000ED00 inside SCS page */
 #define MVFR0_FPV5_SP_D16 0x10110021u
 #define MVFR1_FPV5_SP_D16 0x11000011u
+#define CCR_STKALIGN (1u << 9)
+#define MPU_TYPE_8REGIONS 0x00000800u
+#define SYST_CSR 0x10u
+#define SYST_RVR 0x14u
+#define SYST_CVR 0x18u
+#define SYST_CALIB 0x1Cu
+#define SYST_LOAD_MASK 0x00FFFFFFu
+#define NVIC_REG_BLOCK_END (0x100u + 4u * NVIC_WORDS)
 
 static mm_bool g_meminfo_enabled = MM_FALSE;
 static int g_sau_layout = 0; /* 0=unknown, 1=new(CTRL@0xD0/RNR@0xD4), 2=legacy(RNR@0xD8) */
@@ -47,6 +55,8 @@ static mm_u32 g_nvic_enable_log_first[NVIC_WORDS];
 static mm_u32 g_nvic_enable_log_second[NVIC_WORDS];
 static mm_bool g_nvic_enable_log_first_set[NVIC_WORDS];
 static mm_bool g_nvic_enable_log_second_set[NVIC_WORDS];
+
+static mm_bool nvic_enable_log_suppressed(mm_u32 idx, mm_u32 value);
 
 static mm_bool nvic_trace_enabled(void)
 {
@@ -76,6 +86,446 @@ static void scs_select_ctx(struct mm_scs_mmio *ctx, struct mm_scs **scs_out, str
     }
     if (scs_out) *scs_out = scs;
     if (nvic_out) *nvic_out = nvic;
+}
+
+static enum mm_sec_state scs_effective_sec(const struct mm_scs_mmio *ctx, const struct mm_scs *scs)
+{
+    enum mm_sec_state eff_sec = ctx->sec;
+
+    if (eff_sec == MM_SECURE) {
+        /* For the 0xE000_E000 SCS window, bank by the initiator's security. */
+        eff_sec = scs->last_access_sec;
+    }
+    return eff_sec;
+}
+
+static mm_bool scs_finish_read_subword(mm_u32 offset, mm_u32 size_bytes, mm_u32 val, mm_u32 *value_out)
+{
+    mm_u32 shift;
+    mm_u32 mask;
+
+    shift = (offset & 0x3u) * 8u;
+    if (size_bytes == 1u) {
+        mask = 0xFFu;
+        *value_out = (val >> shift) & mask;
+        return MM_TRUE;
+    }
+    if (size_bytes == 2u) {
+        mask = 0xFFFFu;
+        *value_out = (val >> shift) & mask;
+        return MM_TRUE;
+    }
+    if (size_bytes == 4u) {
+        *value_out = val;
+        return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
+static mm_bool scs_read_systick(struct mm_scs *scs, mm_u32 aligned, mm_bool clear_countflag, mm_bool noisy, mm_u32 *value_out)
+{
+    switch (aligned) {
+    case SYST_CSR:
+        *value_out = scs->systick_ctrl & 0x7u;
+        if (scs->systick_countflag) {
+            *value_out |= (1u << 16);
+        }
+        if (clear_countflag) {
+            scs->systick_countflag = MM_FALSE;
+        }
+        if (noisy && scs->trace_enabled) {
+            printf("[SYSTICK_CTRL_READ] ctrl=0x%08lx\n", (unsigned long)*value_out);
+        }
+        return MM_TRUE;
+    case SYST_RVR:
+        *value_out = scs->systick_load;
+        if (noisy && scs->trace_enabled) {
+            printf("[SYSTICK_LOAD_READ] load=0x%06lx\n", (unsigned long)*value_out);
+        }
+        return MM_TRUE;
+    case SYST_CVR:
+        *value_out = scs->systick_val;
+        if (noisy && scs->trace_enabled) {
+            printf("[SYSTICK_VAL_READ] val=0x%06lx\n", (unsigned long)*value_out);
+        }
+        return MM_TRUE;
+    case SYST_CALIB:
+        *value_out = scs->systick_calib;
+        return MM_TRUE;
+    default:
+        return MM_FALSE;
+    }
+}
+
+static mm_bool scs_read_nvic(struct mm_nvic *nvic, enum mm_sec_state eff_sec,
+                             mm_u32 offset, mm_u32 aligned, mm_u32 size_bytes,
+                             mm_bool noisy, mm_u32 *value_out)
+{
+    mm_u32 word = 0xffffffffu;
+    mm_u32 idx = 0;
+
+    if (nvic == 0) {
+        return MM_FALSE;
+    }
+    idx = (aligned - 0x100u) / 4u;
+    if (aligned >= 0x100u && aligned < 0x108u) {
+        if (idx < NVIC_WORDS) {
+            word = nvic->enable_mask[idx];
+        }
+    } else if (aligned >= 0x180u && aligned < 0x188u) {
+        idx = (aligned - 0x180u) / 4u;
+        if (idx < NVIC_WORDS) {
+            word = nvic->enable_mask[idx];
+        }
+    } else if (aligned >= 0x200u && aligned < 0x208u) {
+        idx = (aligned - 0x200u) / 4u;
+        if (idx < NVIC_WORDS) {
+            word = nvic->pending_mask[idx];
+        }
+    } else if (aligned >= 0x280u && aligned < 0x288u) {
+        idx = (aligned - 0x280u) / 4u;
+        if (idx < NVIC_WORDS) {
+            word = nvic->pending_mask[idx];
+        }
+    } else if (aligned >= 0x300u && aligned < 0x308u) {
+        idx = (aligned - 0x300u) / 4u;
+        if (idx < NVIC_WORDS) {
+            word = nvic->active_mask[idx];
+        }
+    } else if (aligned >= 0x380u && aligned < 0x388u) {
+        idx = (aligned - 0x380u) / 4u;
+        if (idx < NVIC_WORDS) {
+            word = (eff_sec == MM_SECURE) ? nvic->itns_mask[idx] : 0u;
+        }
+    }
+    if (word != 0xffffffffu) {
+        if (eff_sec == MM_NONSECURE && idx < NVIC_WORDS) {
+            word &= nvic->itns_mask[idx];
+        }
+        *value_out = word;
+        return MM_TRUE;
+    }
+
+    if (offset >= 0x400u && offset < 0x500u) {
+        idx = offset - 0x400u;
+        if (size_bytes == 1u) {
+            if (noisy) {
+                printf("[NVIC_IPR_READ] off=0x%03lx idx=%lu -> 0x%02lx\n",
+                       (unsigned long)offset,
+                       (unsigned long)idx,
+                       (unsigned long)((idx < MM_MAX_IRQ) ? nvic->priority[idx] : 0xffu));
+            }
+            *value_out = (idx < MM_MAX_IRQ) ? nvic->priority[idx] : 0xffu;
+            return MM_TRUE;
+        }
+        if (size_bytes == 4u && (idx % 4u) == 0u) {
+            mm_u32 v = 0;
+            mm_u32 i;
+            for (i = 0; i < 4u; ++i) {
+                mm_u32 pidx = idx + i;
+                mm_u8 p = (pidx < MM_MAX_IRQ) ? nvic->priority[pidx] : 0xffu;
+                v |= ((mm_u32)p) << (i * 8u);
+            }
+            *value_out = v;
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
+static mm_u32 scs_read_scb_reg(const struct mm_scs_mmio *ctx, struct mm_scs *scs, enum mm_sec_state eff_sec, mm_u32 reg_off)
+{
+    mm_u32 val = 0;
+
+    switch (reg_off) {
+    case 0x0: val = scs->cpuid; break;
+    case 0x4:
+        val = (ctx->sec == MM_NONSECURE) ? scs->icsr_ns : scs->icsr_s;
+        if (scs->pend_sv) val |= (1u << 28);
+        if (scs->pend_st) val |= (1u << 26);
+        break;
+    case 0x8: val = (eff_sec == MM_NONSECURE) ? scs->vtor_ns : scs->vtor_s; break;
+    case 0xC: val = (eff_sec == MM_NONSECURE) ? scs->aircr_ns : scs->aircr_s; break;
+    case 0x10: val = (eff_sec == MM_NONSECURE) ? scs->scr_ns : scs->scr_s; break;
+    case 0x14: val = scs->ccr; break;
+    case 0x18: val = (eff_sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s; break;
+    case 0x1C: val = (eff_sec == MM_NONSECURE) ? scs->shpr2_ns : scs->shpr2_s; break;
+    case 0x20: val = (eff_sec == MM_NONSECURE) ? scs->shpr3_ns : scs->shpr3_s; break;
+    case 0x24: val = (eff_sec == MM_NONSECURE) ? scs->shcsr_ns : scs->shcsr_s; break;
+    case 0x28: val = scs->cfsr; break;
+    case 0x2C: val = scs->hfsr; break;
+    case 0x30: val = scs->dfsr; break;
+    case 0x34: val = scs->mmfar; break;
+    case 0x38: val = scs->bfar; break;
+    case 0x3C: val = scs->afsr; break;
+    case 0x88:
+        val = (eff_sec == MM_NONSECURE) ? scs->cpacr_ns : scs->cpacr_s;
+        if (!scs->fpu_present) {
+            val &= ~0x00F00000u;
+        }
+        break;
+    case 0x8C: val = (eff_sec == MM_SECURE) ? scs->nsacr : 0u; break;
+    case 0x234: val = scs->fpu_present ? scs->fpccr : 0u; break;
+    case 0x238: val = scs->fpu_present ? scs->fpcar : 0u; break;
+    case 0x23C: val = scs->fpu_present ? scs->fpdscr : 0u; break;
+    case 0x240: val = scs->fpu_present ? scs->mvfr0 : 0u; break;
+    case 0x244: val = scs->fpu_present ? scs->mvfr1 : 0u; break;
+    case 0x248: val = scs->fpu_present ? scs->mvfr2 : 0u; break;
+    case 0x90: val = scs->mpu_type; break;
+    case 0x94: val = (eff_sec == MM_NONSECURE) ? scs->mpu_ctrl_ns : scs->mpu_ctrl_s; break;
+    case 0x98: val = (eff_sec == MM_NONSECURE) ? scs->mpu_rnr_ns : scs->mpu_rnr_s; break;
+    case 0x9C: {
+        mm_u32 r = (eff_sec == MM_NONSECURE) ? (scs->mpu_rnr_ns & 0x7u) : (scs->mpu_rnr_s & 0x7u);
+        val = (eff_sec == MM_NONSECURE) ? scs->mpu_rbar_ns[r] : scs->mpu_rbar_s[r];
+        break;
+    }
+    case 0xA0: {
+        mm_u32 r = (eff_sec == MM_NONSECURE) ? (scs->mpu_rnr_ns & 0x7u) : (scs->mpu_rnr_s & 0x7u);
+        val = (eff_sec == MM_NONSECURE) ? scs->mpu_rlar_ns[r] : scs->mpu_rlar_s[r];
+        break;
+    }
+    case 0xC0: val = (eff_sec == MM_NONSECURE) ? scs->mpu_mair0_ns : scs->mpu_mair0_s; break;
+    case 0xC4: val = (eff_sec == MM_NONSECURE) ? scs->mpu_mair1_ns : scs->mpu_mair1_s; break;
+    case 0xCC: val = (eff_sec == MM_SECURE) ? scs->sau_type : 0u; break;
+    case 0xD0: val = (eff_sec == MM_SECURE) ? scs->sau_ctrl : 0u; break;
+    case 0xD4: val = (eff_sec == MM_SECURE) ? scs->sau_rnr : 0u; break;
+    case 0xD8:
+        if (eff_sec != MM_SECURE) { val = 0; break; }
+        val = (g_sau_layout == 2) ? scs->sau_rnr : scs->sau_rbar[scs->sau_rnr & 0x7u];
+        break;
+    case 0xDC:
+        if (eff_sec != MM_SECURE) { val = 0; break; }
+        val = (g_sau_layout == 2) ? scs->sau_rbar[scs->sau_rnr & 0x7u] : scs->sau_rlar[scs->sau_rnr & 0x7u];
+        break;
+    case 0xE0:
+        if (eff_sec != MM_SECURE) { val = 0; break; }
+        val = (g_sau_layout == 2) ? scs->sau_rlar[scs->sau_rnr & 0x7u] : scs->sau_sfsr;
+        break;
+    case 0xE4:
+        if (eff_sec != MM_SECURE) { val = 0; break; }
+        val = (g_sau_layout == 2) ? scs->sau_sfsr : scs->sau_sfar;
+        break;
+    case 0xE8: val = (eff_sec == MM_SECURE) ? scs->sau_sfar : 0u; break;
+    default: val = 0; break;
+    }
+    return val;
+}
+
+static mm_bool scs_write_systick(struct mm_scs *scs, mm_u32 offset, mm_u32 aligned, mm_u32 size_bytes, mm_u32 value)
+{
+    mm_u32 shift = (offset & 0x3u) * 8u;
+    mm_u32 mask = (size_bytes == 1u) ? 0xFFu : 0xFFFFu;
+
+    switch (aligned) {
+    case SYST_CSR: {
+        mm_u32 cur = scs->systick_ctrl;
+        mm_u32 v = value;
+        if (size_bytes == 1u || size_bytes == 2u) {
+            v = (cur & ~(mask << shift)) | ((value & mask) << shift);
+        }
+        scs->systick_ctrl = v & 0x7u;
+        if (scs->trace_enabled) {
+            printf("[SYSTICK_CTRL_WRITE] ctrl=0x%08lx\n", (unsigned long)scs->systick_ctrl);
+        }
+        return MM_TRUE;
+    }
+    case SYST_RVR:
+        scs->systick_load = ((size_bytes == 4u) ? value : ((value & mask) << shift)) & SYST_LOAD_MASK;
+        if (scs->trace_enabled) {
+            printf("[SYSTICK_LOAD_WRITE] load=0x%06lx\n", (unsigned long)scs->systick_load);
+        }
+        return MM_TRUE;
+    case SYST_CVR:
+        scs->systick_val = 0;
+        scs->systick_countflag = MM_FALSE;
+        if (scs->trace_enabled) {
+            printf("[SYSTICK_VAL_WRITE] val cleared\n");
+        }
+        return MM_TRUE;
+    default:
+        return MM_FALSE;
+    }
+}
+
+static mm_bool scs_write_nvic(struct mm_nvic *nvic, enum mm_sec_state eff_sec,
+                              mm_u32 offset, mm_u32 aligned, mm_u32 size_bytes, mm_u32 value)
+{
+    if (nvic != 0 && size_bytes == 4u) {
+        mm_u32 idx;
+        mm_u32 v = value;
+
+        if (aligned >= 0x100u && aligned < NVIC_REG_BLOCK_END) {
+            idx = (aligned - 0x100u) / 4u;
+            if (idx < NVIC_WORDS) {
+                mm_u32 old_enable = nvic->enable_mask[idx];
+                if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
+                nvic->enable_mask[idx] |= v;
+                mm_nvic_notify_enable_mask(idx, old_enable, nvic->enable_mask[idx]);
+                if (nvic_trace_enabled() &&
+                    old_enable != nvic->enable_mask[idx] &&
+                    !nvic_enable_log_suppressed(idx, nvic->enable_mask[idx])) {
+                    printf("[NVIC_ISER_WRITE] sec=%d idx=%lu val=0x%08lx enable=0x%08lx\n",
+                           (int)eff_sec, (unsigned long)idx,
+                           (unsigned long)value, (unsigned long)nvic->enable_mask[idx]);
+                }
+                return MM_TRUE;
+            }
+        } else if (aligned >= 0x180u && aligned < (0x180u + 4u * NVIC_WORDS)) {
+            idx = (aligned - 0x180u) / 4u;
+            if (idx < NVIC_WORDS) {
+                mm_u32 old_enable = nvic->enable_mask[idx];
+                if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
+                nvic->enable_mask[idx] &= ~v;
+                mm_nvic_notify_enable_mask(idx, old_enable, nvic->enable_mask[idx]);
+                if (nvic_trace_enabled() &&
+                    old_enable != nvic->enable_mask[idx] &&
+                    !nvic_enable_log_suppressed(idx, nvic->enable_mask[idx])) {
+                    printf("[NVIC_ICER_WRITE] sec=%d idx=%lu val=0x%08lx enable=0x%08lx\n",
+                           (int)eff_sec, (unsigned long)idx,
+                           (unsigned long)value, (unsigned long)nvic->enable_mask[idx]);
+                }
+                return MM_TRUE;
+            }
+        } else if (aligned >= 0x200u && aligned < (0x200u + 4u * NVIC_WORDS)) {
+            idx = (aligned - 0x200u) / 4u;
+            if (idx < NVIC_WORDS) {
+                mm_u32 old_pending = nvic->pending_mask[idx];
+                if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
+                nvic->pending_mask[idx] |= v;
+                if (nvic_trace_enabled() && old_pending != nvic->pending_mask[idx]) {
+                    printf("[NVIC_ISPR_WRITE] sec=%d idx=%lu val=0x%08lx pending=0x%08lx itns=0x%08lx\n",
+                           (int)eff_sec, (unsigned long)idx, (unsigned long)value,
+                           (unsigned long)nvic->pending_mask[idx], (unsigned long)nvic->itns_mask[idx]);
+                }
+                return MM_TRUE;
+            }
+        } else if (aligned >= 0x280u && aligned < (0x280u + 4u * NVIC_WORDS)) {
+            idx = (aligned - 0x280u) / 4u;
+            if (idx < NVIC_WORDS) {
+                mm_u32 old_pending = nvic->pending_mask[idx];
+                if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
+                nvic->pending_mask[idx] &= ~v;
+                if (nvic_trace_enabled() && old_pending != nvic->pending_mask[idx]) {
+                    printf("[NVIC_ICPR_WRITE] sec=%d idx=%lu val=0x%08lx pending=0x%08lx\n",
+                           (int)eff_sec, (unsigned long)idx,
+                           (unsigned long)value, (unsigned long)nvic->pending_mask[idx]);
+                }
+                return MM_TRUE;
+            }
+        } else if (aligned >= 0x380u && aligned < (0x380u + 4u * NVIC_WORDS)) {
+            idx = (aligned - 0x380u) / 4u;
+            if (idx < NVIC_WORDS) {
+                mm_u32 old_itns = nvic->itns_mask[idx];
+                if (eff_sec == MM_SECURE) {
+                    nvic->itns_mask[idx] = value;
+                }
+                if (nvic_trace_enabled() && old_itns != nvic->itns_mask[idx]) {
+                    printf("[NVIC_ITNS_WRITE] sec=%d idx=%lu val=0x%08lx itns=0x%08lx\n",
+                           (int)eff_sec, (unsigned long)idx,
+                           (unsigned long)value, (unsigned long)nvic->itns_mask[idx]);
+                }
+                return MM_TRUE;
+            }
+        }
+    }
+    if (nvic != 0 && offset >= 0x400u && offset < 0x500u) {
+        mm_u32 idx = offset - 0x400u;
+        if (size_bytes == 1u) {
+            if (idx < MM_MAX_IRQ) {
+                mm_u8 old_prio = nvic->priority[idx];
+                mm_u8 new_prio = (mm_u8)(value & 0xFFu);
+                nvic->priority[idx] = new_prio;
+                if (nvic_trace_enabled() && old_prio != new_prio) {
+                    printf("[NVIC_IPR_WRITE] off=0x%03lx idx=%lu val=0x%02lx\n",
+                           (unsigned long)offset, (unsigned long)idx, (unsigned long)new_prio);
+                }
+            }
+            return MM_TRUE;
+        }
+        if (size_bytes == 4u && (idx % 4u) == 0u) {
+            mm_u32 i;
+            mm_bool changed = MM_FALSE;
+            for (i = 0; i < 4u; ++i) {
+                mm_u32 pidx = idx + i;
+                mm_u8 p = (mm_u8)((value >> (i * 8u)) & 0xFFu);
+                if (pidx < MM_MAX_IRQ) {
+                    if (nvic->priority[pidx] != p) changed = MM_TRUE;
+                    nvic->priority[pidx] = p;
+                }
+            }
+            if (nvic_trace_enabled() && changed) {
+                printf("[NVIC_IPR_WRITE] off=0x%03lx idx=%lu val=0x%08lx\n",
+                       (unsigned long)offset, (unsigned long)idx, (unsigned long)value);
+            }
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
+static mm_bool scs_write_scb(struct mm_scs_mmio *ctx, struct mm_scs *scs, enum mm_sec_state eff_sec, mm_u32 reg_off, mm_u32 value)
+{
+    switch (reg_off) {
+    case 0x4: {
+        mm_u32 v = value;
+        if (v & (1u << 28)) scs->pend_sv = MM_TRUE;
+        if (v & (1u << 27)) scs->pend_sv = MM_FALSE;
+        if (v & (1u << 26)) scs->pend_st = MM_TRUE;
+        if (v & (1u << 25)) scs->pend_st = MM_FALSE;
+        if (ctx->sec == MM_NONSECURE) scs->icsr_ns = v & ~(0xFu << 25);
+        else scs->icsr_s = v & ~(0xFu << 25);
+        return MM_TRUE;
+    }
+    case 0x8:
+        if (eff_sec == MM_NONSECURE) {
+            scs->vtor_ns = value;
+            printf("[VTOR_NS_WRITE] vtor_ns=0x%08lx\n", (unsigned long)value);
+        } else {
+            scs->vtor_s = value;
+            printf("[VTOR_S_WRITE] vtor_s=0x%08lx\n", (unsigned long)value);
+        }
+        return MM_TRUE;
+    case 0xC:
+        if (((value >> 16) & 0xFFFFu) == 0x05FAu) {
+            if (ctx->sec == MM_NONSECURE) scs->aircr_ns = value;
+            else scs->aircr_s = value;
+            if (value & (1u << 2)) {
+                mm_system_request_reset();
+            }
+            return MM_TRUE;
+        }
+        return MM_FALSE;
+    case 0x10:
+        if (eff_sec == MM_NONSECURE) scs->scr_ns = value;
+        else scs->scr_s = value;
+        return MM_TRUE;
+    case 0x14: scs->ccr = value; return MM_TRUE;
+    case 0x18:
+        if (eff_sec == MM_NONSECURE) scs->shpr1_ns = value;
+        else scs->shpr1_s = value;
+        return MM_TRUE;
+    case 0x1C:
+        if (eff_sec == MM_NONSECURE) scs->shpr2_ns = value;
+        else scs->shpr2_s = value;
+        return MM_TRUE;
+    case 0x20:
+        if (eff_sec == MM_NONSECURE) scs->shpr3_ns = value;
+        else scs->shpr3_s = value;
+        return MM_TRUE;
+    case 0x24:
+        if (eff_sec == MM_NONSECURE) scs->shcsr_ns = value;
+        else scs->shcsr_s = value;
+        return MM_TRUE;
+    case 0x28: scs->cfsr &= ~value; return MM_TRUE;
+    case 0x2C: scs->hfsr = value; return MM_TRUE;
+    case 0x30: scs->dfsr = value; return MM_TRUE;
+    case 0x34: scs->mmfar = value; return MM_TRUE;
+    case 0x38: scs->bfar = value; return MM_TRUE;
+    case 0x3C: scs->afsr = value; return MM_TRUE;
+    default:
+        break;
+    }
+    return MM_FALSE;
 }
 
 static mm_bool nvic_enable_log_suppressed(mm_u32 idx, mm_u32 value)
@@ -127,7 +577,7 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
     scs->vtor_ns = 0;
     scs->scr_s = 0;
     scs->scr_ns = 0;
-    scs->ccr = (1u << 9); /* STKALIGN reset default */
+    scs->ccr = CCR_STKALIGN;
     scs->aircr_s = 0;
     scs->aircr_ns = 0;
     scs->shpr1_s = scs->shpr2_s = scs->shpr3_s = 0;
@@ -149,7 +599,7 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
     scs->mvfr1 = 0;
     scs->mvfr2 = 0;
     scs->fpu_present = MM_FALSE;
-    scs->mpu_type = 0x00000800u; /* 8 regions, ARMv8‑M MPU */
+    scs->mpu_type = MPU_TYPE_8REGIONS; /* 8 regions, ARMv8‑M MPU */
     scs->mpu_ctrl_s = 0;
     scs->mpu_ctrl_ns = 0;
     scs->mpu_rnr_s = 0;
@@ -217,12 +667,9 @@ static mm_bool scs_read_internal(void *opaque, mm_u32 offset, mm_u32 size_bytes,
     struct mm_scs_mmio *ctx = (struct mm_scs_mmio *)opaque;
     struct mm_scs *scs = 0;
     struct mm_nvic *nvic = 0;
-    enum mm_sec_state eff_sec;
     mm_u32 aligned;
     mm_u32 reg_off;
     mm_u32 val = 0;
-    mm_u32 shift = 0;
-    mm_u32 mask = 0;
 
     if (value_out == 0) {
         return MM_FALSE;
@@ -231,11 +678,6 @@ static mm_bool scs_read_internal(void *opaque, mm_u32 offset, mm_u32 size_bytes,
     if (scs == 0) {
         return MM_FALSE;
     }
-    eff_sec = ctx->sec;
-    if (eff_sec == MM_SECURE) {
-        /* For the 0xE000_E000 SCS window, bank by the initiator's security. */
-        eff_sec = scs->last_access_sec;
-    }
 
     if (offset >= SCS_PAGE_SIZE) {
         return MM_FALSE;
@@ -243,234 +685,22 @@ static mm_bool scs_read_internal(void *opaque, mm_u32 offset, mm_u32 size_bytes,
 
     /* RAZ/WI for everything outside the SCB window, but handle SysTick + NVIC. */
     if (offset < SCS_SCB_OFFSET) {
+        enum mm_sec_state eff_sec = scs_effective_sec(ctx, scs);
         aligned = offset & ~0x3u;
-        switch (aligned) {
-        case 0x10: /* SysTick CTRL */
-            val = scs->systick_ctrl & 0x7u;
-            if (scs->systick_countflag) val |= (1u << 16);
-            if (clear_countflag) {
-                scs->systick_countflag = MM_FALSE; /* COUNTFLAG clears on read */
-            }
-            if (noisy && scs->trace_enabled) {
-                printf("[SYSTICK_CTRL_READ] ctrl=0x%08lx\n", (unsigned long)val);
-            }
-            goto done_subword;
-        case 0x14:
-            val = scs->systick_load;
-            if (noisy && scs->trace_enabled) {
-                printf("[SYSTICK_LOAD_READ] load=0x%06lx\n", (unsigned long)val);
-            }
-            goto done_subword;
-        case 0x18:
-            val = scs->systick_val;
-            if (noisy && scs->trace_enabled) {
-                printf("[SYSTICK_VAL_READ] val=0x%06lx\n", (unsigned long)val);
-            }
-            goto done_subword;
-        case 0x1C: val = scs->systick_calib; goto done_subword;
-        default:
-            /* NVIC enable/pending/active + ITNS registers. */
-            if (nvic != 0) {
-                mm_u32 word = 0xffffffffu;
-                mm_u32 idx = (aligned - 0x100u) / 4u;
-                mm_u32 mask_ns = 0;
-                if (aligned >= 0x100u && aligned < 0x108u) {
-                    /* ISER0/1 */
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->enable_mask[idx];
-                } else if (aligned >= 0x180u && aligned < 0x188u) {
-                    /* ICER0/1 reads current enable */
-                    idx = (aligned - 0x180u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->enable_mask[idx];
-                } else if (aligned >= 0x200u && aligned < 0x208u) {
-                    /* ISPR0/1 */
-                    idx = (aligned - 0x200u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->pending_mask[idx];
-                } else if (aligned >= 0x280u && aligned < 0x288u) {
-                    /* ICPR0/1 reads current pending */
-                    idx = (aligned - 0x280u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->pending_mask[idx];
-                } else if (aligned >= 0x300u && aligned < 0x308u) {
-                    /* IABR0/1 */
-                    idx = (aligned - 0x300u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) word = nvic->active_mask[idx];
-                } else if (aligned >= 0x380u && aligned < 0x388u) {
-                    /* ITNS0/1 (Secure only) */
-                    idx = (aligned - 0x380u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        word = (eff_sec == MM_SECURE) ? nvic->itns_mask[idx] : 0u;
-                    }
-                }
-                if (word != 0xffffffffu) {
-                    if (eff_sec == MM_NONSECURE) {
-                        idx = (aligned >= 0x380u && aligned < 0x388u) ? (aligned - 0x380u) / 4u : (aligned - 0x100u) / 4u;
-                        if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                            mask_ns = nvic->itns_mask[idx];
-                            word &= mask_ns;
-                        }
-                    }
-                    val = word;
-                    goto done_subword;
-                }
-            }
-            /* NVIC IPR priorities: 0xE000E400-0xE000E4FF */
-            if (nvic != 0 && offset >= 0x400u && offset < 0x500u) {
-                mm_u32 idx = offset - 0x400u;
-                if (size_bytes == 1u) {
-                    if (noisy) {
-                        printf("[NVIC_IPR_READ] off=0x%03lx idx=%lu -> 0x%02lx\n",
-                               (unsigned long)offset,
-                               (unsigned long)idx,
-                               (unsigned long)((idx < MM_MAX_IRQ) ? nvic->priority[idx] : 0xffu));
-                    }
-                    *value_out = (idx < MM_MAX_IRQ) ? nvic->priority[idx] : 0xffu;
-                    return MM_TRUE;
-                }
-                if (size_bytes == 4u && (idx % 4u) == 0u) {
-                    mm_u32 v = 0;
-                    mm_u32 i;
-                    for (i = 0; i < 4u; ++i) {
-                        mm_u32 pidx = idx + i;
-                        mm_u8 p = (pidx < MM_MAX_IRQ) ? nvic->priority[pidx] : 0xffu;
-                        v |= ((mm_u32)p) << (i * 8u);
-                    }
-                    *value_out = v;
-                    return MM_TRUE;
-                }
-            }
-            *value_out = 0;
+        if (scs_read_systick(scs, aligned, clear_countflag, noisy, &val)) {
+            return scs_finish_read_subword(offset, size_bytes, val, value_out);
+        }
+        if (scs_read_nvic(nvic, eff_sec, offset, aligned, size_bytes, noisy, value_out)) {
             return MM_TRUE;
         }
+        *value_out = 0;
+        return MM_TRUE;
     }
 
     aligned = offset & ~0x3u;
     reg_off = aligned - SCS_SCB_OFFSET;
-
-    switch (reg_off) {
-    case 0x0: val = scs->cpuid; break;          /* CPUID */
-    case 0x4: /* ICSR */
-        val = (ctx->sec == MM_NONSECURE) ? scs->icsr_ns : scs->icsr_s;
-        if (scs->pend_sv) val |= (1u << 28);
-        if (scs->pend_st) val |= (1u << 26);
-        break;
-    case 0x8: val = (eff_sec == MM_NONSECURE) ? scs->vtor_ns : scs->vtor_s; break; /* VTOR */
-    case 0xC: val = (eff_sec == MM_NONSECURE) ? scs->aircr_ns : scs->aircr_s; break; /* AIRCR */
-    case 0x10: val = (eff_sec == MM_NONSECURE) ? scs->scr_ns : scs->scr_s; break;  /* SCR */
-    case 0x14: val = scs->ccr; break;           /* CCR */
-    case 0x18: val = (eff_sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s; break; /* SHPR1 */
-    case 0x1C: val = (eff_sec == MM_NONSECURE) ? scs->shpr2_ns : scs->shpr2_s; break; /* SHPR2 */
-    case 0x20: val = (eff_sec == MM_NONSECURE) ? scs->shpr3_ns : scs->shpr3_s; break; /* SHPR3 */
-    case 0x24: val = (eff_sec == MM_NONSECURE) ? scs->shcsr_ns : scs->shcsr_s; break; /* SHCSR */
-    case 0x28: val = scs->cfsr; break; /* CFSR (shared) */
-    case 0x2C: val = scs->hfsr; break; /* HFSR */
-    case 0x30: val = scs->dfsr; break; /* DFSR */
-    case 0x34: val = scs->mmfar; break; /* MMFAR */
-    case 0x38: val = scs->bfar; break; /* BFAR */
-    case 0x3C: val = scs->afsr; break; /* AFSR */
-    case 0x88: { /* CPACR / CPACR_NS */
-        mm_u32 cpacr = (eff_sec == MM_NONSECURE) ? scs->cpacr_ns : scs->cpacr_s;
-        if (!scs->fpu_present) {
-            cpacr &= ~0x00F00000u;
-        }
-        val = cpacr;
-        break;
-    }
-    case 0x8C: /* NSACR (secure-only) */
-        val = (eff_sec == MM_SECURE) ? scs->nsacr : 0u;
-        break;
-    case 0x234: val = scs->fpu_present ? scs->fpccr : 0u; break; /* FPCCR */
-    case 0x238: val = scs->fpu_present ? scs->fpcar : 0u; break; /* FPCAR */
-    case 0x23C: val = scs->fpu_present ? scs->fpdscr : 0u; break; /* FPDSCR */
-    case 0x240: val = scs->fpu_present ? scs->mvfr0 : 0u; break; /* MVFR0 */
-    case 0x244: val = scs->fpu_present ? scs->mvfr1 : 0u; break; /* MVFR1 */
-    case 0x248: val = scs->fpu_present ? scs->mvfr2 : 0u; break; /* MVFR2 */
-    /* MPU (ARMv8‑M Mainline) */
-    case 0x90: val = scs->mpu_type; break; /* MPU_TYPE */
-    case 0x94: val = (eff_sec == MM_NONSECURE) ? scs->mpu_ctrl_ns : scs->mpu_ctrl_s; break; /* MPU_CTRL */
-    case 0x98: val = (eff_sec == MM_NONSECURE) ? scs->mpu_rnr_ns : scs->mpu_rnr_s; break; /* MPU_RNR */
-    case 0x9C: { /* MPU_RBAR */
-        mm_u32 r = (eff_sec == MM_NONSECURE) ? (scs->mpu_rnr_ns & 0x7u) : (scs->mpu_rnr_s & 0x7u);
-        val = (eff_sec == MM_NONSECURE) ? scs->mpu_rbar_ns[r] : scs->mpu_rbar_s[r];
-        break;
-    }
-    case 0xA0: { /* MPU_RLAR */
-        mm_u32 r = (eff_sec == MM_NONSECURE) ? (scs->mpu_rnr_ns & 0x7u) : (scs->mpu_rnr_s & 0x7u);
-        val = (eff_sec == MM_NONSECURE) ? scs->mpu_rlar_ns[r] : scs->mpu_rlar_s[r];
-        break;
-    }
-    case 0xC0: val = (eff_sec == MM_NONSECURE) ? scs->mpu_mair0_ns : scs->mpu_mair0_s; break; /* MPU_MAIR0 */
-    case 0xC4: val = (eff_sec == MM_NONSECURE) ? scs->mpu_mair1_ns : scs->mpu_mair1_s; break; /* MPU_MAIR1 */
-    /* SAU (Secure only) */
-    case 0xCC: val = (eff_sec == MM_SECURE) ? scs->sau_type : 0u; break; /* SAU_TYPE */
-    case 0xD0: val = (eff_sec == MM_SECURE) ? scs->sau_ctrl : 0u; break; /* SAU_CTRL (new layout) */
-    case 0xD4:
-        /* SAU_RNR (new layout) */
-        if (eff_sec == MM_SECURE) val = scs->sau_rnr;
-        else val = 0;
-        break;
-    case 0xD8:
-        /* SAU_RNR (legacy) or SAU_RBAR (new); choose by layout if known. */
-        if (eff_sec != MM_SECURE) { val = 0; break; }
-        if (g_sau_layout == 2) {
-            val = scs->sau_rnr;
-        } else {
-            val = scs->sau_rbar[scs->sau_rnr & 0x7u];
-        }
-        break;
-    case 0xDC:
-        /* SAU_RBAR (legacy) or SAU_RLAR (new) */
-        if (eff_sec != MM_SECURE) { val = 0; break; }
-        if (g_sau_layout == 2) {
-            val = scs->sau_rbar[scs->sau_rnr & 0x7u];
-        } else {
-            val = scs->sau_rlar[scs->sau_rnr & 0x7u];
-        }
-        break;
-    case 0xE0:
-        /* SAU_RLAR (legacy) or SAU_SFSR (new) */
-        if (eff_sec != MM_SECURE) { val = 0; break; }
-        if (g_sau_layout == 2) {
-            val = scs->sau_rlar[scs->sau_rnr & 0x7u];
-        } else {
-            val = scs->sau_sfsr;
-        }
-        break;
-    case 0xE4:
-        /* SAU_SFSR (legacy) or SAU_SFAR (new) */
-        if (eff_sec != MM_SECURE) { val = 0; break; }
-        if (g_sau_layout == 2) {
-            val = scs->sau_sfsr;
-        } else {
-            val = scs->sau_sfar;
-        }
-        break;
-    case 0xE8:
-        /* SAU_SFAR (legacy) */
-        if (eff_sec == MM_SECURE) val = scs->sau_sfar;
-        else val = 0;
-        break;
-    default:
-        /* RAZ/WI for unimplemented SCS slots. */
-        val = 0;
-        break;
-    }
-
-done_subword:
-    shift = (offset & 0x3u) * 8u;
-    if (size_bytes == 1u) {
-        mask = 0xFFu;
-        *value_out = (val >> shift) & mask;
-        return MM_TRUE;
-    }
-    if (size_bytes == 2u) {
-        mask = 0xFFFFu;
-        *value_out = (val >> shift) & mask;
-        return MM_TRUE;
-    }
-    if (size_bytes == 4u) {
-        *value_out = val;
-        return MM_TRUE;
-    }
-    return MM_FALSE;
+    val = scs_read_scb_reg(ctx, scs, scs_effective_sec(ctx, scs), reg_off);
+    return scs_finish_read_subword(offset, size_bytes, val, value_out);
 }
 
 static mm_bool scs_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
@@ -576,179 +806,23 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     if (offset >= SCS_PAGE_SIZE) {
         return MM_FALSE;
     }
-    eff_sec = ctx->sec;
-    if (eff_sec == MM_SECURE) {
-        eff_sec = scs->last_access_sec;
-    }
 
     /* Outside SCB window: handle SysTick/NVIC, otherwise WI. */
     if (offset < SCS_SCB_OFFSET) {
+        enum mm_sec_state eff_sec = scs_effective_sec(ctx, scs);
         aligned = offset & ~0x3u;
-        shift = (offset & 0x3u) * 8u;
-        mask = (size_bytes == 1u) ? 0xFFu : 0xFFFFu;
-        switch (aligned) {
-        case 0x10: { /* SysTick CTRL */
-            mm_u32 cur = scs->systick_ctrl;
-            mm_u32 v = value;
-            if (size_bytes == 1u || size_bytes == 2u) {
-                v = (cur & ~(mask << shift)) | ((value & mask) << shift);
-            }
-            scs->systick_ctrl = v & 0x7u; /* keep ENABLE/TICKINT/CLKSOURCE */
-            if (scs->trace_enabled) {
-                printf("[SYSTICK_CTRL_WRITE] ctrl=0x%08lx\n", (unsigned long)scs->systick_ctrl);
-            }
+        if (scs_write_systick(scs, offset, aligned, size_bytes, value)) {
             return MM_TRUE;
         }
-        case 0x14: /* LOAD */
-            scs->systick_load = ((size_bytes == 4u) ? value : ((value & mask) << shift)) & 0x00FFFFFFu;
-            if (scs->trace_enabled) {
-                printf("[SYSTICK_LOAD_WRITE] load=0x%06lx\n", (unsigned long)scs->systick_load);
-            }
-            return MM_TRUE;
-        case 0x18: /* VAL write clears current count */
-            scs->systick_val = 0;
-            scs->systick_countflag = MM_FALSE;
-            if (scs->trace_enabled) {
-                printf("[SYSTICK_VAL_WRITE] val cleared\n");
-            }
-            return MM_TRUE;
-        default:
-            if (nvic != 0 && size_bytes == 4u) {
-                mm_u32 idx;
-                mm_u32 v = value;
-                if (aligned >= 0x100u && aligned < (0x100u + 4u * ((MM_MAX_IRQ + 31u) / 32u))) {
-                    /* ISER0/1: set-enable */
-                    idx = (aligned - 0x100u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_enable = nvic->enable_mask[idx];
-                        if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
-                        nvic->enable_mask[idx] |= v;
-                        mm_nvic_notify_enable_mask(idx, old_enable, nvic->enable_mask[idx]);
-                        if (nvic_trace_enabled() &&
-                            old_enable != nvic->enable_mask[idx] &&
-                            !nvic_enable_log_suppressed(idx, nvic->enable_mask[idx])) {
-                            printf("[NVIC_ISER_WRITE] sec=%d idx=%lu val=0x%08lx enable=0x%08lx\n",
-                                   (int)eff_sec,
-                                   (unsigned long)idx,
-                                   (unsigned long)value,
-                                   (unsigned long)nvic->enable_mask[idx]);
-                        }
-                        return MM_TRUE;
-                    }
-                } else if (aligned >= 0x180u && aligned < (0x180u + 4u * ((MM_MAX_IRQ + 31u) / 32u))) {
-                    /* ICER0/1: clear-enable */
-                    idx = (aligned - 0x180u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_enable = nvic->enable_mask[idx];
-                        if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
-                        nvic->enable_mask[idx] &= ~v;
-                        mm_nvic_notify_enable_mask(idx, old_enable, nvic->enable_mask[idx]);
-                        if (nvic_trace_enabled() &&
-                            old_enable != nvic->enable_mask[idx] &&
-                            !nvic_enable_log_suppressed(idx, nvic->enable_mask[idx])) {
-                            printf("[NVIC_ICER_WRITE] sec=%d idx=%lu val=0x%08lx enable=0x%08lx\n",
-                                   (int)eff_sec,
-                                   (unsigned long)idx,
-                                   (unsigned long)value,
-                                   (unsigned long)nvic->enable_mask[idx]);
-                        }
-                        return MM_TRUE;
-                    }
-                } else if (aligned >= 0x200u && aligned < (0x200u + 4u * ((MM_MAX_IRQ + 31u) / 32u))) {
-                    /* ISPR0/1: set-pending */
-                    idx = (aligned - 0x200u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_pending = nvic->pending_mask[idx];
-                        if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
-                        nvic->pending_mask[idx] |= v;
-                        if (nvic_trace_enabled() && old_pending != nvic->pending_mask[idx]) {
-                            printf("[NVIC_ISPR_WRITE] sec=%d idx=%lu val=0x%08lx pending=0x%08lx itns=0x%08lx\n",
-                                   (int)eff_sec,
-                                   (unsigned long)idx,
-                                   (unsigned long)value,
-                                   (unsigned long)nvic->pending_mask[idx],
-                                   (unsigned long)nvic->itns_mask[idx]);
-                        }
-                        return MM_TRUE;
-                    }
-                } else if (aligned >= 0x280u && aligned < (0x280u + 4u * ((MM_MAX_IRQ + 31u) / 32u))) {
-                    /* ICPR0/1: clear-pending */
-                    idx = (aligned - 0x280u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_pending = nvic->pending_mask[idx];
-                        if (eff_sec == MM_NONSECURE) v &= nvic->itns_mask[idx];
-                        nvic->pending_mask[idx] &= ~v;
-                        if (nvic_trace_enabled() && old_pending != nvic->pending_mask[idx]) {
-                            printf("[NVIC_ICPR_WRITE] sec=%d idx=%lu val=0x%08lx pending=0x%08lx\n",
-                                   (int)eff_sec,
-                                   (unsigned long)idx,
-                                   (unsigned long)value,
-                                   (unsigned long)nvic->pending_mask[idx]);
-                        }
-                        return MM_TRUE;
-                    }
-                } else if (aligned >= 0x380u && aligned < (0x380u + 4u * ((MM_MAX_IRQ + 31u) / 32u))) {
-                    /* ITNS0/1: Secure-only */
-                    idx = (aligned - 0x380u) / 4u;
-                    if (idx < (MM_MAX_IRQ + 31u) / 32u) {
-                        mm_u32 old_itns = nvic->itns_mask[idx];
-                        if (eff_sec == MM_SECURE) {
-                            nvic->itns_mask[idx] = value;
-                        }
-                        if (nvic_trace_enabled() && old_itns != nvic->itns_mask[idx]) {
-                            printf("[NVIC_ITNS_WRITE] sec=%d idx=%lu val=0x%08lx itns=0x%08lx\n",
-                                   (int)eff_sec,
-                                   (unsigned long)idx,
-                                   (unsigned long)value,
-                                   (unsigned long)nvic->itns_mask[idx]);
-                        }
-                        return MM_TRUE;
-                    }
-                }
-            }
-            /* NVIC IPR priority bytes */
-            if (nvic != 0 && offset >= 0x400u && offset < 0x500u) {
-                mm_u32 idx = offset - 0x400u;
-                if (size_bytes == 1u) {
-                    if (idx < MM_MAX_IRQ) {
-                        mm_u8 old_prio = nvic->priority[idx];
-                        mm_u8 new_prio = (mm_u8)(value & 0xFFu);
-                        nvic->priority[idx] = new_prio;
-                        if (nvic_trace_enabled() && old_prio != new_prio) {
-                            printf("[NVIC_IPR_WRITE] off=0x%03lx idx=%lu val=0x%02lx\n",
-                                   (unsigned long)offset,
-                                   (unsigned long)idx,
-                                   (unsigned long)new_prio);
-                        }
-                    }
-                    return MM_TRUE;
-                }
-                if (size_bytes == 4u && (idx % 4u) == 0u) {
-                    mm_u32 i;
-                    mm_bool changed = MM_FALSE;
-                    for (i = 0; i < 4u; ++i) {
-                        mm_u32 pidx = idx + i;
-                        mm_u8 p = (mm_u8)((value >> (i * 8u)) & 0xFFu);
-                        if (pidx < MM_MAX_IRQ) {
-                            if (nvic->priority[pidx] != p) changed = MM_TRUE;
-                            nvic->priority[pidx] = p;
-                        }
-                    }
-                    if (nvic_trace_enabled() && changed) {
-                        printf("[NVIC_IPR_WRITE] off=0x%03lx idx=%lu val=0x%08lx\n",
-                               (unsigned long)offset,
-                               (unsigned long)idx,
-                               (unsigned long)value);
-                    }
-                    return MM_TRUE;
-                }
-            }
+        if (scs_write_nvic(nvic, eff_sec, offset, aligned, size_bytes, value)) {
             return MM_TRUE;
         }
+        return MM_TRUE;
     }
 
     aligned = offset & ~0x3u;
     reg_off = aligned - SCS_SCB_OFFSET;
+    eff_sec = scs_effective_sec(ctx, scs);
 
     if (size_bytes == 1u || size_bytes == 2u) {
         /* RMW for subword writes; fall back to WI on unknown offsets. */
@@ -766,71 +840,11 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
         return MM_FALSE;
     }
 
+    if (scs_write_scb(ctx, scs, scs_effective_sec(ctx, scs), reg_off, value)) {
+        return MM_TRUE;
+    }
+
     switch (reg_off) {
-    case 0x4: {
-        mm_u32 v = value;
-        if (v & (1u << 28)) scs->pend_sv = MM_TRUE;
-        if (v & (1u << 27)) scs->pend_sv = MM_FALSE;
-        if (v & (1u << 26)) scs->pend_st = MM_TRUE;
-        if (v & (1u << 25)) scs->pend_st = MM_FALSE;
-        /* ICSR pend control bits [28:25] are write-only control bits. */
-        if (ctx->sec == MM_NONSECURE) scs->icsr_ns = v & ~(0xFu << 25);
-        else scs->icsr_s = v & ~(0xFu << 25);
-        return MM_TRUE;
-    }
-    case 0x8:
-        if (eff_sec == MM_NONSECURE) {
-            scs->vtor_ns = value;
-            printf("[VTOR_NS_WRITE] vtor_ns=0x%08lx\n", (unsigned long)value);
-        } else {
-            scs->vtor_s = value;
-            printf("[VTOR_S_WRITE] vtor_s=0x%08lx\n", (unsigned long)value);
-        }
-        return MM_TRUE;
-    case 0xC: {
-        mm_bool key_ok = ((value >> 16) & 0xFFFFu) == 0x05FAu;
-        if (key_ok) {
-            if (ctx->sec == MM_NONSECURE) scs->aircr_ns = value;
-            else scs->aircr_s = value;
-            if (value & (1u << 2)) {
-                mm_system_request_reset();
-            }
-            return MM_TRUE;
-        }
-        return MM_FALSE;
-    }
-    case 0x10:
-        if (eff_sec == MM_NONSECURE) scs->scr_ns = value;
-        else scs->scr_s = value;
-        return MM_TRUE;
-    case 0x14:
-        scs->ccr = value;
-        return MM_TRUE;
-    case 0x18:
-        if (eff_sec == MM_NONSECURE) scs->shpr1_ns = value;
-        else scs->shpr1_s = value;
-        return MM_TRUE;
-    case 0x1C:
-        if (eff_sec == MM_NONSECURE) scs->shpr2_ns = value;
-        else scs->shpr2_s = value;
-        return MM_TRUE;
-    case 0x20:
-        if (eff_sec == MM_NONSECURE) scs->shpr3_ns = value;
-        else scs->shpr3_s = value;
-        return MM_TRUE;
-    case 0x24:
-        if (eff_sec == MM_NONSECURE) scs->shcsr_ns = value;
-        else scs->shcsr_s = value;
-        return MM_TRUE;
-    case 0x28:
-        /* CFSR bits are W1C (write-1-to-clear). */
-        scs->cfsr &= ~value;
-        return MM_TRUE;
-    case 0x2C: scs->hfsr = value; return MM_TRUE;
-    case 0x30: scs->dfsr = value; return MM_TRUE;
-    case 0x34: scs->mmfar = value; return MM_TRUE;
-    case 0x38: scs->bfar = value; return MM_TRUE;
-    case 0x3C: scs->afsr = value; return MM_TRUE;
     case 0x88: {
         mm_u32 mask = 0x00F0FFFFu;
         mm_u32 v = value & mask;
@@ -1113,15 +1127,15 @@ mm_u32 mm_scs_systick_advance(struct mm_scs *scs, mm_u64 cycles)
     if (!enable) {
         return 0u;
     }
-    load = scs->systick_load & 0x00FFFFFFu;
+    load = scs->systick_load & SYST_LOAD_MASK;
     if (load == 0u) {
         return 0u;
     }
 
-    cur = scs->systick_val & 0x00FFFFFFu;
+    cur = scs->systick_val & SYST_LOAD_MASK;
     {
         /* For trace/debug: remember starting value when skipping many cycles. */
-        mm_u32 start_cur = (cur == 0u) ? 0x00FFFFFFu : cur;
+        mm_u32 start_cur = (cur == 0u) ? SYST_LOAD_MASK : cur;
         (void)start_cur; /* used in tracing below */
     }
     if (cur == 0u) {
@@ -1145,9 +1159,9 @@ mm_u32 mm_scs_systick_advance(struct mm_scs *scs, mm_u64 cycles)
         }
     }
 
-    scs->systick_val = cur & 0x00FFFFFFu;
+    scs->systick_val = cur & SYST_LOAD_MASK;
     if (scs->trace_enabled && cycles > 1u) {
-        mm_u32 end_cur = scs->systick_val & 0x00FFFFFFu;
+        mm_u32 end_cur = scs->systick_val & SYST_LOAD_MASK;
         printf("[SYSTICK_FAST] delta=%llu wraps=%lu end=0x%06lx\n",
                (unsigned long long)cycles,
                (unsigned long)wraps,
@@ -1185,11 +1199,11 @@ mm_u64 mm_scs_systick_cycles_until_fire(const struct mm_scs *scs)
     if (!enable) {
         return (mm_u64)-1;
     }
-    load = scs->systick_load & 0x00FFFFFFu;
+    load = scs->systick_load & SYST_LOAD_MASK;
     if (load == 0u) {
         return (mm_u64)-1;
     }
-    cur = scs->systick_val & 0x00FFFFFFu;
+    cur = scs->systick_val & SYST_LOAD_MASK;
     if (cur == 0u) {
         cur = load;
     }

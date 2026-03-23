@@ -1363,31 +1363,6 @@ static mm_u64 rcc_msi_hz(const struct rcc_state *r)
     return rcc_msi_range_hz((csr >> 12) & 0xfu);
 }
 
-#if 0
-static mm_u64 rcc_pll1_p_clk(const struct rcc_state *r)
-{
-    mm_u32 pllcfgr = r->regs[RCC_PLL1CFGR / 4];
-    mm_u32 plldivr = r->regs[RCC_PLL1DIVR / 4];
-    mm_u32 src = pllcfgr & 0x3u;
-    mm_u64 fin = 0;
-    /* STM32U5 PLL1M is 4 bits at [11:8]; MBOOST uses [13:12]. */
-    mm_u32 divm = ((pllcfgr >> 8) & 0x0fu) + 1u;
-    mm_u32 n = (plldivr & 0x1ffu) + 1u;
-    mm_u32 p = ((plldivr >> 9) & 0x7fu) + 1u;
-
-    if (src == 0u) fin = rcc_msi_hz(r); /* MSI */
-    else if (src == 1u) fin = 64000000ull; /* HSI */
-    else if (src == 2u) fin = 4000000ull; /* CSI */
-    else if (src == 3u) fin = 8000000ull; /* HSE */
-    else fin = 0;
-
-    if (fin == 0 || divm == 0u || p == 0u) {
-        return 0;
-    }
-    return (fin / (mm_u64)divm) * (mm_u64)n / (mm_u64)p;
-}
-#endif
-
 static mm_u64 rcc_pll1_r_clk(const struct rcc_state *r)
 {
     mm_u32 pllcfgr = r->regs[RCC_PLL1CFGR / 4];
