@@ -61,7 +61,7 @@ static int test_blxns_sets_lr_and_branches(void)
     mm_tz_exec_blxns(&cpu, 0x08000200u, 0x0c000123u);
     if (cpu.sec_state != MM_NONSECURE) return 1;
     if (cpu.r[15] != (0x08000200u | 1u)) return 1;
-    if (cpu.r[14] != 0xDEAD0001u) return 1;
+    if (cpu.r[14] != MM_TZ_FNC_RETURN) return 1;
     if (cpu.tz_depth != 1) return 1;
     if (cpu.tz_ret_pc[0] != (0x0c000123u | 1u)) return 1;
     if (cpu.tz_ret_sec[0] != MM_SECURE) return 1;
