@@ -20,13 +20,9 @@
  */
 
 #include "m33mu/tz.h"
+#include "m33mu/memmap.h"
 #include <stdio.h>
 #include <stdlib.h>
-
-/* LR value used for a Secure->Non-secure BLXNS call so that a subsequent
- * BX LR in Non-secure state returns to Secure via the emulator.
- * Must not look like EXC_RETURN (0xFFxxxxxx). */
-#define MM_TZ_RET_LR_SENTINEL 0xDEAD0001u
 
 static int g_tz_trace = -1;
 
@@ -59,6 +55,67 @@ static void tz_note_ns_msp_top(struct mm_cpu *cpu)
     }
 }
 
+static void tz_dump_words(const char *tag, struct mm_cpu *cpu, enum mm_sec_state sec,
+    mm_u32 addr, unsigned count)
+{
+    struct mm_memmap *map;
+    unsigned i;
+
+    if (!tz_trace_enabled() || cpu == 0) {
+        return;
+    }
+
+    map = mm_memmap_current();
+    if (map == 0) {
+        return;
+    }
+
+    printf("[%s] sec=%d addr=0x%08lx", tag, (int)sec, (unsigned long)addr);
+    for (i = 0; i < count; i++) {
+        mm_u32 word;
+        mm_bool ok;
+
+        ok = mm_memmap_read(map, sec, addr + (i * 4u), 4u, &word);
+        if (!ok) {
+            printf(" +%u=<fault>", i * 4u);
+            break;
+        }
+        printf(" +%u=0x%08lx", i * 4u, (unsigned long)word);
+    }
+    printf("\n");
+}
+
+static void tz_push_secure_call_frame(struct mm_cpu *cpu, mm_u32 return_addr)
+{
+    struct mm_memmap *map;
+    mm_u32 sp;
+    mm_u32 retpsr;
+    mm_u32 stacked_ra;
+
+    if (cpu == 0 || cpu->sec_state != MM_SECURE) {
+        return;
+    }
+
+    map = mm_memmap_current();
+    if (map == 0) {
+        return;
+    }
+
+    sp = mm_cpu_get_active_sp(cpu);
+    sp -= 8u;
+    stacked_ra = return_addr | 1u;
+    retpsr = 0u;
+
+    if (!mm_memmap_write(map, MM_SECURE, sp, 4u, stacked_ra)) {
+        return;
+    }
+    if (!mm_memmap_write(map, MM_SECURE, sp + 4u, 4u, retpsr)) {
+        return;
+    }
+
+    mm_cpu_set_active_sp(cpu, sp);
+}
+
 void mm_tz_exec_sg(struct mm_cpu *cpu)
 {
     if (cpu == 0) {
@@ -67,10 +124,11 @@ void mm_tz_exec_sg(struct mm_cpu *cpu)
     /* Minimal model: SG is used for NS->S transition via an NSC veneer. */
     if (cpu->sec_state == MM_NONSECURE) {
         if (tz_trace_enabled()) {
-            printf("[TZ_SG] pc=0x%08lx lr=0x%08lx r13=0x%08lx sec %d->%d mode=%d msp_s=0x%08lx msp_ns=0x%08lx psp_s=0x%08lx psp_ns=0x%08lx\n",
+            printf("[TZ_SG] pc=0x%08lx lr=0x%08lx r13=0x%08lx r0=0x%08lx sec %d->%d mode=%d msp_s=0x%08lx msp_ns=0x%08lx psp_s=0x%08lx psp_ns=0x%08lx\n",
                    (unsigned long)cpu->r[15],
                    (unsigned long)cpu->r[14],
                    (unsigned long)cpu->r[13],
+                   (unsigned long)cpu->r[0],
                    (int)MM_NONSECURE,
                    (int)MM_SECURE,
                    (int)cpu->mode,
@@ -78,9 +136,21 @@ void mm_tz_exec_sg(struct mm_cpu *cpu)
                    (unsigned long)cpu->msp_ns,
                    (unsigned long)cpu->psp_s,
                    (unsigned long)cpu->psp_ns);
+            tz_dump_words("TZ_SG_NS_SP", cpu, MM_NONSECURE, cpu->r[13], 8u);
+            tz_dump_words("TZ_SG_NS_R0", cpu, MM_NONSECURE, cpu->r[0], 8u);
+            tz_dump_words("TZ_SG_S_MSP_PRE", cpu, MM_SECURE, cpu->msp_s, 8u);
+            tz_dump_words("TZ_SG_S_PSP_PRE", cpu, MM_SECURE, cpu->psp_s, 8u);
         }
+        cpu->r[14] &= ~1u;
         cpu->sec_state = MM_SECURE;
         tz_sync_r13_from_active_sp(cpu);
+        if (tz_trace_enabled()) {
+            printf("[TZ_SG_POST] lr=0x%08lx r13=0x%08lx active_sp=0x%08lx\n",
+                   (unsigned long)cpu->r[14],
+                   (unsigned long)cpu->r[13],
+                   (unsigned long)mm_cpu_get_active_sp(cpu));
+            tz_dump_words("TZ_SG_S_SP_POST", cpu, MM_SECURE, cpu->r[13], 8u);
+        }
     }
 }
 
@@ -118,6 +188,7 @@ void mm_tz_exec_blxns(struct mm_cpu *cpu, mm_u32 target, mm_u32 return_addr)
     }
     /* BLXNS is defined for Secure->Non-secure call. */
     ra = return_addr | 1u;
+    tz_push_secure_call_frame(cpu, ra);
     if (tz_trace_enabled()) {
         printf("[TZ_BLXNS] pc=0x%08lx lr=0x%08lx target=0x%08lx ra=0x%08lx r13=0x%08lx sec %d->%d mode=%d msp_s=0x%08lx msp_ns=0x%08lx psp_s=0x%08lx psp_ns=0x%08lx\n",
                (unsigned long)cpu->r[15],
@@ -145,7 +216,7 @@ void mm_tz_exec_blxns(struct mm_cpu *cpu, mm_u32 target, mm_u32 return_addr)
     cpu->tz_ret_sec[cpu->tz_depth] = cpu->sec_state;
     cpu->tz_ret_mode[cpu->tz_depth] = cpu->mode;
     cpu->tz_depth++;
-    cpu->r[14] = MM_TZ_RET_LR_SENTINEL;
+    cpu->r[14] = MM_TZ_FNC_RETURN;
     cpu->sec_state = MM_NONSECURE;
     tz_note_ns_msp_top(cpu);
     tz_sync_r13_from_active_sp(cpu);

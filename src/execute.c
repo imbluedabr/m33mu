@@ -1270,11 +1270,14 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                return MM_EXEC_CONTINUE;
                                            }
                                            if (d.rm == 14u && cpu.sec_state == MM_NONSECURE &&
-                                                   cpu.tz_depth > 0 && target == 0xDEAD0001u) {
+                                                   cpu.tz_depth > 0 && target == MM_TZ_FNC_RETURN) {
+                                               mm_u32 secure_sp;
                                                /* Return from Secure->Non-secure BLXNS callback. */
                                                cpu.tz_depth--;
                                                cpu.sec_state = cpu.tz_ret_sec[cpu.tz_depth];
                                                cpu.mode = cpu.tz_ret_mode[cpu.tz_depth];
+                                               secure_sp = mm_cpu_get_active_sp(&cpu);
+                                               mm_cpu_set_active_sp(&cpu, secure_sp + 8u);
                                                cpu.r[15] = cpu.tz_ret_pc[cpu.tz_depth] | 1u;
                                                cpu.r[14] = cpu.tz_ret_pc[cpu.tz_depth] | 1u;
                                                EXEC_SET_SP(mm_cpu_get_active_sp(&cpu));

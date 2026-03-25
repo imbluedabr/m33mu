@@ -702,6 +702,24 @@ static void set_tui_image0(struct mm_tui *tui, struct mm_image_spec *images, int
     }
 }
 
+static void apply_target_boot_seed_regs(struct mm_cpu *cpu, const char *cpu_name)
+{
+    int reg;
+
+    if (cpu == 0 || cpu_name == 0) {
+        return;
+    }
+
+    /* Architecturally these are undefined at boot. Match the observed
+     * STM32H563 secure reset state so early callee-saved register spills
+     * line up with hardware. */
+    if (strcmp(cpu_name, "stm32h563") == 0) {
+        for (reg = 8; reg <= 12; ++reg) {
+            cpu->r[reg] = 0xffffffffu;
+        }
+    }
+}
+
 static void launch_gdb_tui(const struct mm_tui *tui)
 {
     char elf_path[512];
@@ -1055,7 +1073,7 @@ static void calltrace_handle_decoded(const struct mm_cpu *cpu,
             }
             if (cpu->sec_state == MM_NONSECURE &&
                 cpu->tz_depth > 0 &&
-                target == 0xDEAD0001u) {
+                target == MM_TZ_FNC_RETURN) {
                 calltrace_log_ns_resume(fetch->pc_fetch);
                 break;
             }
@@ -4985,6 +5003,7 @@ int main(int argc, char **argv)
                 cpu.sleeping = MM_FALSE;
                 cpu.sleep_wfe = MM_FALSE;
                 cpu.event_reg = MM_FALSE;
+                apply_target_boot_seed_regs(&cpu, cpu_name);
                 if (cfg.core_count > 1u) {
                     for (i = 0; i < 16; ++i) cpu1.r[i] = 0;
                     for (i = 0; i < 32; ++i) cpu1.s[i] = 0;
@@ -5006,13 +5025,14 @@ int main(int argc, char **argv)
                     cpu1.exc_depth = 0;
                     cpu1.tz_depth = 0;
                     cpu1.sleeping = MM_TRUE;
-                cpu1.sleep_wfe = MM_TRUE;
-                cpu1.event_reg = MM_FALSE;
-                it_pattern1 = 0;
-                it_remaining1 = 0;
-                it_cond1 = 0;
+                    cpu1.sleep_wfe = MM_TRUE;
+                    cpu1.event_reg = MM_FALSE;
+                    apply_target_boot_seed_regs(&cpu1, cpu_name);
+                    it_pattern1 = 0;
+                    it_remaining1 = 0;
+                    it_cond1 = 0;
+                }
             }
-        }
 
         {
             mm_u32 cpacr_s = scs.cpacr_s;

@@ -41,9 +41,11 @@ struct mm_gdb_stub {
     mm_u8 fault_clock_count;
     struct {
         mm_u32 addr;
+        mm_u32 addr_alias;
         mm_u8 len;
         mm_u8 orig[4];
         mm_bool valid;
+        mm_bool alias_valid;
     } breakpoints[16];
     mm_bool rearm_valid;
     mm_u32 rearm_addr;

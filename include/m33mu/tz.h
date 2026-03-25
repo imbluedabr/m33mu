@@ -26,10 +26,11 @@
 #include "m33mu/cpu.h"
 
 /* Minimal TrustZone state-changing instruction semantics used by CMSE toolchains. */
+/* Armv8-M inter-state function return token used as LR after BLXNS. */
+#define MM_TZ_FNC_RETURN 0xFEFFFFFFu
 
 void mm_tz_exec_sg(struct mm_cpu *cpu);
 void mm_tz_exec_bxns(struct mm_cpu *cpu, mm_u32 target);
 void mm_tz_exec_blxns(struct mm_cpu *cpu, mm_u32 target, mm_u32 return_addr);
 
 #endif /* M33MU_TZ_H */
-

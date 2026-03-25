@@ -23,6 +23,7 @@
 #include "m33mu/gdbstub.h"
 #include "m33mu/fetch.h"
 #include "m33mu/capstone.h"
+#include "m33mu/code_cache.h"
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -44,6 +45,48 @@ static int hex_to_nibble(int c)
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
+}
+
+static mm_bool gdb_flash_alias_for_addr(const struct mm_memmap *map, mm_u32 addr, mm_u32 *alias_out)
+{
+    mm_u32 base_s;
+    mm_u32 base_ns;
+    mm_u32 size_s;
+    mm_u32 size_ns;
+    mm_u32 offset;
+
+    if (map == 0 || alias_out == 0 || map->flash.buffer == 0) {
+        return MM_FALSE;
+    }
+
+    base_s = map->flash_base_s;
+    size_s = map->flash_size_s;
+    if (size_s == 0u && map->flash.length > 0u) {
+        base_s = map->flash.base;
+        size_s = (mm_u32)map->flash.length;
+    }
+
+    base_ns = map->flash_base_ns;
+    size_ns = map->flash_size_ns;
+    if (size_ns == 0u && map->flash.length > 0u) {
+        base_ns = map->flash.base;
+        size_ns = (mm_u32)map->flash.length;
+    }
+
+    if (size_s != 0u && size_ns != 0u) {
+        if (addr >= base_s && (addr - base_s) < size_s && (addr - base_s) < size_ns) {
+            offset = addr - base_s;
+            *alias_out = base_ns + offset;
+            return MM_TRUE;
+        }
+        if (addr >= base_ns && (addr - base_ns) < size_ns && (addr - base_ns) < size_s) {
+            offset = addr - base_ns;
+            *alias_out = base_s + offset;
+            return MM_TRUE;
+        }
+    }
+
+    return MM_FALSE;
 }
 
 static char nibble_to_hex(mm_u8 v)
@@ -178,6 +221,8 @@ void mm_gdb_stub_init(struct mm_gdb_stub *stub)
             stub->breakpoints[i].valid = MM_FALSE;
             stub->breakpoints[i].len = 0;
             stub->breakpoints[i].addr = 0;
+            stub->breakpoints[i].addr_alias = 0;
+            stub->breakpoints[i].alias_valid = MM_FALSE;
         }
     }
     stub->rearm_valid = MM_FALSE;
@@ -394,10 +439,16 @@ static size_t gdb_encode_registers(struct mm_cpu *cpu, char *out, size_t out_cap
      * on every flag-setting instruction.  Execution correctness is unaffected
      * because m33mu uses the full internal cpu->xpsr for branching logic. */
     regs[16] = cpu->xpsr & ~0xF9000000u;
-    regs[17] = cpu->msp_s;
-    regs[18] = cpu->psp_s;
+    if (cpu->sec_state == MM_NONSECURE) {
+        regs[17] = cpu->msp_ns;
+        regs[18] = cpu->psp_ns;
+        regs[20] = cpu->control_ns;
+    } else {
+        regs[17] = cpu->msp_s;
+        regs[18] = cpu->psp_s;
+        regs[20] = cpu->control_s;
+    }
     regs[19] = 0; /* PRIMASK placeholder */
-    regs[20] = cpu->control_s;
     regs[21] = cpu->msplim_s;
     regs[22] = cpu->psplim_s;
     regs[23] = cpu->msplim_ns;
@@ -523,23 +574,32 @@ static mm_bool gdb_write_bytes(struct mm_memmap *map, enum mm_sec_state sec, mm_
 
     /* Flash patching for breakpoints */
     if (map->flash.buffer != 0) {
-        if (sec == MM_NONSECURE) {
-            base = map->flash_base_ns;
-            size = map->flash_size_ns;
-        } else {
-            base = map->flash_base_s;
-            size = map->flash_size_s;
-        }
-        if (size == 0u && map->flash.length > 0u) {
-            base = map->flash.base;
-            size = (mm_u32)map->flash.length;
-        }
-        if (addr >= base && (addr - base) + len <= size) {
-            buf = (mm_u8 *)map->flash.buffer;
-            for (i = 0; i < len; ++i) {
-                buf[addr - base + i] = src[i];
+        enum mm_sec_state try_sec = sec;
+        int pass;
+
+        for (pass = 0; pass < 2; ++pass) {
+            if (try_sec == MM_NONSECURE) {
+                base = map->flash_base_ns;
+                size = map->flash_size_ns;
+            } else {
+                base = map->flash_base_s;
+                size = map->flash_size_s;
             }
-            return MM_TRUE;
+            if (size == 0u && map->flash.length > 0u) {
+                base = map->flash.base;
+                size = (mm_u32)map->flash.length;
+            }
+            if (addr >= base && (addr - base) + len <= size) {
+                buf = (mm_u8 *)map->flash.buffer;
+                for (i = 0; i < len; ++i) {
+                    buf[addr - base + i] = src[i];
+                }
+                if (map->code_cache != 0) {
+                    mm_code_cache_note_write(map->code_cache, addr, (mm_u32)len);
+                }
+                return MM_TRUE;
+            }
+            try_sec = (try_sec == MM_SECURE) ? MM_NONSECURE : MM_SECURE;
         }
     }
 
@@ -687,12 +747,22 @@ static int gdb_find_breakpoint_slot(const struct mm_gdb_stub *stub, mm_u32 addr)
     for (i = 0; i < sizeof(stub->breakpoints) / sizeof(stub->breakpoints[0]); ++i) {
         mm_u32 bp_addr;
         mm_u32 bp_end;
+        mm_u32 bp_alias;
+        mm_u32 bp_alias_end;
         if (!stub->breakpoints[i].valid) {
             continue;
         }
         bp_addr = stub->breakpoints[i].addr & ~1u;
         bp_end = bp_addr + (mm_u32)stub->breakpoints[i].len;
         if (even_addr >= bp_addr && even_addr < bp_end) {
+            return (int)i;
+        }
+        if (!stub->breakpoints[i].alias_valid) {
+            continue;
+        }
+        bp_alias = stub->breakpoints[i].addr_alias & ~1u;
+        bp_alias_end = bp_alias + (mm_u32)stub->breakpoints[i].len;
+        if (even_addr >= bp_alias && even_addr < bp_alias_end) {
             return (int)i;
         }
     }
@@ -738,6 +808,13 @@ static mm_bool gdb_install_breakpoint(struct mm_gdb_stub *stub, struct mm_memmap
         if (!stub->breakpoints[i].valid) {
             stub->breakpoints[i].valid = MM_TRUE;
             stub->breakpoints[i].addr = canon_addr;
+            stub->breakpoints[i].alias_valid = gdb_flash_alias_for_addr(map, canon_addr & ~1u,
+                &stub->breakpoints[i].addr_alias);
+            if (stub->breakpoints[i].alias_valid) {
+                stub->breakpoints[i].addr_alias |= 1u;
+            } else {
+                stub->breakpoints[i].addr_alias = 0u;
+            }
             stub->breakpoints[i].len = len;
             memcpy(stub->breakpoints[i].orig, orig, len);
             return MM_TRUE;
@@ -766,6 +843,8 @@ static mm_bool gdb_remove_breakpoint(struct mm_gdb_stub *stub, struct mm_memmap 
     }
     stub->breakpoints[slot].valid = MM_FALSE;
     stub->breakpoints[slot].len = 0;
+    stub->breakpoints[slot].addr_alias = 0u;
+    stub->breakpoints[slot].alias_valid = MM_FALSE;
     printf("[GDB] Breakpoint cleared at 0x%08lx\n", (unsigned long)stub->breakpoints[slot].addr);
     return MM_TRUE;
 }
@@ -774,7 +853,14 @@ mm_bool mm_gdb_stub_breakpoint_hit(const struct mm_gdb_stub *stub, mm_u32 pc)
 {
     size_t i;
     for (i = 0; i < sizeof(stub->breakpoints) / sizeof(stub->breakpoints[0]); ++i) {
-        if (stub->breakpoints[i].valid && stub->breakpoints[i].addr == (pc | 1u)) {
+        if (!stub->breakpoints[i].valid) {
+            continue;
+        }
+        if (stub->breakpoints[i].addr == (pc | 1u)) {
+            return MM_TRUE;
+        }
+        if (stub->breakpoints[i].alias_valid &&
+            stub->breakpoints[i].addr_alias == (pc | 1u)) {
             return MM_TRUE;
         }
     }
