@@ -97,6 +97,48 @@ static int test_prigroup_masks_subpriority(void)
     return 0;
 }
 
+static int test_lower_priority_pending_irq_cannot_preempt_active_irq(void)
+{
+    struct mm_nvic nvic;
+    struct mm_cpu cpu;
+    struct mm_scs scs;
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_HANDLER;
+    cpu.xpsr = 17u; /* IRQ1 active */
+    mm_nvic_init(&nvic);
+    mm_nvic_set_enable(&nvic, 1u, MM_TRUE);
+    mm_nvic_set_enable(&nvic, 2u, MM_TRUE);
+    mm_nvic_set_active(&nvic, 1u, MM_TRUE);
+    mm_nvic_set_pending(&nvic, 2u, MM_TRUE);
+    nvic.priority[1] = 0x40u;
+    nvic.priority[2] = 0xC0u;
+    if (mm_nvic_select_ex(&nvic, &cpu, &scs) != -1) return 1;
+    return 0;
+}
+
+static int test_higher_priority_pending_irq_can_preempt_active_irq(void)
+{
+    struct mm_nvic nvic;
+    struct mm_cpu cpu;
+    struct mm_scs scs;
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_HANDLER;
+    cpu.xpsr = 17u; /* IRQ1 active */
+    mm_nvic_init(&nvic);
+    mm_nvic_set_enable(&nvic, 1u, MM_TRUE);
+    mm_nvic_set_enable(&nvic, 2u, MM_TRUE);
+    mm_nvic_set_active(&nvic, 1u, MM_TRUE);
+    mm_nvic_set_pending(&nvic, 2u, MM_TRUE);
+    nvic.priority[1] = 0xC0u;
+    nvic.priority[2] = 0x40u;
+    if (mm_nvic_select_ex(&nvic, &cpu, &scs) != 2) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
@@ -104,6 +146,8 @@ int main(void)
         { "disable_blocks", test_disable_blocks },
         { "faultmask_blocks", test_faultmask_blocks },
         { "prigroup_masks_subpriority", test_prigroup_masks_subpriority },
+        { "lower_priority_pending_irq_cannot_preempt_active_irq", test_lower_priority_pending_irq_cannot_preempt_active_irq },
+        { "higher_priority_pending_irq_can_preempt_active_irq", test_higher_priority_pending_irq_can_preempt_active_irq },
     };
     int failures = 0;
     int i;

@@ -28,6 +28,7 @@
 #include "m33mu/fetch.h"
 #include "m33mu/memmap.h"
 #include "m33mu/scs.h"
+#include "m33mu/nvic.h"
 #include "m33mu/gdbstub.h"
 
 enum mm_exec_status {
@@ -39,6 +40,7 @@ struct mm_execute_ctx {
     struct mm_cpu *cpu;
     struct mm_memmap *map;
     struct mm_scs *scs;
+    struct mm_nvic *nvic;
     struct mm_gdb_stub *gdb;
     const struct mm_fetch_result *fetch;
     const struct mm_decoded *dec;

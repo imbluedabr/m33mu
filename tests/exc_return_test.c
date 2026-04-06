@@ -55,11 +55,24 @@ static int test_invalid(void)
     return 0;
 }
 
+static int test_es_distinct_from_stack_security(void)
+{
+    struct mm_exc_return_info info;
+    /* Secure stack (S=1) but return to Non-secure state (ES=0). */
+    info = mm_exc_return_decode(0xFFFFFFF8u);
+    if (!info.valid) return 1;
+    if (!info.to_thread) return 1;
+    if (info.target_sec != MM_SECURE) return 1;
+    if (info.return_sec != MM_NONSECURE) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "basic_decode", test_basic_decode },
         { "nonsecure_target", test_nonsecure_target },
+        { "es_distinct_from_stack_security", test_es_distinct_from_stack_security },
         { "invalid", test_invalid },
     };
     int failures = 0;

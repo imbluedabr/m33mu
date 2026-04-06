@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "m33mu/execute.h"
+#include "m33mu/nvic.h"
 #include "m33mu/vector.h"
 
 static mm_u32 g_last_exc_num;
@@ -113,6 +114,7 @@ static void setup_ram_map(struct mm_memmap *map, mm_u8 *ram, size_t ram_len)
 static int exec_one(struct mm_cpu *cpu,
                     struct mm_memmap *map,
                     struct mm_scs *scs,
+                    struct mm_nvic *nvic,
                     struct mm_decoded *dec)
 {
     struct mm_fetch_result fetch;
@@ -133,6 +135,7 @@ static int exec_one(struct mm_cpu *cpu,
     ctx.gdb = &gdb;
     ctx.fetch = &fetch;
     ctx.dec = dec;
+    ctx.nvic = nvic;
     ctx.it_pattern = &it_pattern;
     ctx.it_remaining = &it_remaining;
     ctx.it_cond = &it_cond;
@@ -174,42 +177,42 @@ static int test_unprivileged_t_forms_execute(void)
     dec.kind = MM_OP_STRT;
     dec.imm = 4u;
     cpu.r[1] = 0x11223344u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
     if (!mm_memmap_read(&map, cpu.sec_state, cpu.r[0] + 4u, 4u, &value) || value != 0x11223344u) return 1;
 
     dec.kind = MM_OP_LDRT;
     cpu.r[1] = 0u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0 || cpu.r[1] != 0x11223344u) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0 || cpu.r[1] != 0x11223344u) return 1;
 
     dec.kind = MM_OP_STRBT;
     dec.imm = 8u;
     cpu.r[1] = 0xA5u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
 
     dec.kind = MM_OP_LDRBT;
     cpu.r[1] = 0u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0 || cpu.r[1] != 0xA5u) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0 || cpu.r[1] != 0xA5u) return 1;
 
     dec.kind = MM_OP_STRHT;
     dec.imm = 12u;
     cpu.r[1] = 0xBEEFu;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
 
     dec.kind = MM_OP_LDRHT;
     cpu.r[1] = 0u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0 || cpu.r[1] != 0xBEEFu) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0 || cpu.r[1] != 0xBEEFu) return 1;
 
     if (!mm_memmap_write(&map, cpu.sec_state, cpu.r[0] + 16u, 1u, 0x80u)) return 1;
     dec.kind = MM_OP_LDRSBT;
     dec.imm = 16u;
     cpu.r[1] = 0u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0 || cpu.r[1] != 0xFFFFFF80u) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0 || cpu.r[1] != 0xFFFFFF80u) return 1;
 
     if (!mm_memmap_write(&map, cpu.sec_state, cpu.r[0] + 20u, 2u, 0x8001u)) return 1;
     dec.kind = MM_OP_LDRSHT;
     dec.imm = 20u;
     cpu.r[1] = 0u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0 || cpu.r[1] != 0xFFFF8001u) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0 || cpu.r[1] != 0xFFFF8001u) return 1;
 
     return 0;
 }
@@ -233,23 +236,23 @@ static int test_wide_hints_execute(void)
     memset(&dec, 0, sizeof(dec));
 
     dec.kind = MM_OP_YIELD_W;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
 
     dec.kind = MM_OP_SEV_W;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0 || cpu.event_reg != MM_TRUE) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0 || cpu.event_reg != MM_TRUE) return 1;
 
     cpu.event_reg = MM_FALSE;
     dec.kind = MM_OP_SEVL_W;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0 || cpu.event_reg != MM_TRUE) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0 || cpu.event_reg != MM_TRUE) return 1;
 
     cpu.event_reg = MM_FALSE;
     dec.kind = MM_OP_WFE_W;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0 || cpu.sleeping != MM_TRUE || cpu.sleep_wfe != MM_TRUE) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0 || cpu.sleeping != MM_TRUE || cpu.sleep_wfe != MM_TRUE) return 1;
 
     cpu.sleeping = MM_FALSE;
     cpu.sleep_wfe = MM_FALSE;
     dec.kind = MM_OP_WFI_W;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0 || cpu.sleeping != MM_TRUE || cpu.sleep_wfe != MM_FALSE) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0 || cpu.sleeping != MM_TRUE || cpu.sleep_wfe != MM_FALSE) return 1;
 
     return 0;
 }
@@ -275,7 +278,7 @@ static int test_bkpt_enters_debugmon(void)
     g_last_return_pc = 0;
     g_enter_exception_calls = 0;
 
-    if (exec_one(&cpu, &map, &scs, &dec) == 0) {
+    if (exec_one(&cpu, &map, &scs, 0, &dec) == 0) {
         return 1;
     }
     if (g_enter_exception_calls != 1) return 1;
@@ -308,7 +311,7 @@ static int test_ldrexh_strexh_execute(void)
     dec.kind = MM_OP_LDREXH;
     dec.rn = 0u;
     dec.rd = 1u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
     if (cpu.r[1] != 0xABCDu) return 1;
 
     dec.kind = MM_OP_STREXH;
@@ -316,7 +319,7 @@ static int test_ldrexh_strexh_execute(void)
     dec.rm = 2u;
     dec.rd = 3u;
     cpu.r[2] = 0x1234u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
     if (cpu.r[3] != 0u) return 1;
     if (!mm_memmap_read(&map, cpu.sec_state, cpu.r[0], 2u, &value)) return 1;
     if ((value & 0xffffu) != 0x1234u) return 1;
@@ -348,7 +351,7 @@ static int test_ldrex_strex_word_offset_execute(void)
     dec.rn = 0u;
     dec.rd = 1u;
     dec.imm = 8u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
     if (cpu.r[1] != 0xA5A5A5A5u) return 1;
 
     dec.kind = MM_OP_STREX;
@@ -357,7 +360,7 @@ static int test_ldrex_strex_word_offset_execute(void)
     dec.rd = 3u;
     dec.imm = 8u;
     cpu.r[2] = 0x12345678u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
     if (cpu.r[3] != 0u) return 1;
     if (!mm_memmap_read(&map, cpu.sec_state, cpu.r[0], 4u, &value)) return 1;
     if (value != 0x11111111u) return 1;
@@ -388,14 +391,49 @@ static int test_sub_imm_pc_align_execute(void)
     dec.rd = 0u;
     dec.imm = 4u;
     dec.len = 2u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
     if (cpu.r[0] != 0x1000u) return 1;
 
     cpu.r[1] = 0u;
     dec.kind = MM_OP_SUB_IMM_NF;
     dec.rd = 1u;
-    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
     if (cpu.r[1] != 0x1000u) return 1;
+    return 0;
+}
+
+static int test_svc_handler_mode_escalates_to_hardfault_when_not_highest_priority(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_nvic nvic;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(&nvic, 0, sizeof(nvic));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    mm_nvic_init(&nvic);
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_HANDLER;
+    cpu.r[15] = 0x101u;
+    cpu.xpsr = MM_VECT_PENDSV; /* placeholder overwritten by mode-specific state below */
+    cpu.xpsr = 16u; /* IRQ0 active */
+    nvic.priority[0] = 0x00u;
+    scs.shpr2_s = 0x80000000u; /* SVC priority 0x80 */
+    g_last_exc_num = 0;
+    g_enter_exception_calls = 0;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_SVC;
+    if (exec_one(&cpu, &map, &scs, &nvic, &dec) == 0) {
+        return 1;
+    }
+    if (g_enter_exception_calls != 1) return 1;
+    if (g_last_exc_num != MM_VECT_HARDFAULT) return 1;
     return 0;
 }
 
@@ -423,6 +461,10 @@ int main(void)
     }
     if (test_sub_imm_pc_align_execute() != 0) {
         printf("FAIL: sub_imm_pc_align_execute\n");
+        return 1;
+    }
+    if (test_svc_handler_mode_escalates_to_hardfault_when_not_highest_priority() != 0) {
+        printf("FAIL: svc_handler_mode_escalates_to_hardfault_when_not_highest_priority\n");
         return 1;
     }
     return 0;

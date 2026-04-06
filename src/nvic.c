@@ -22,6 +22,7 @@
 #include "m33mu/nvic.h"
 #include "m33mu/mmio.h"
 #include "m33mu/scs.h"
+#include "m33mu/vector.h"
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -253,6 +254,72 @@ static mm_u8 preempt_priority_value(mm_u8 prio, mm_u8 prigroup)
     return (mm_u8)(prio & (mm_u8)(0xFFu << sub_bits));
 }
 
+static mm_u8 system_exc_priority_for_current(const struct mm_cpu *cpu,
+                                             const struct mm_scs *scs,
+                                             mm_u32 exc_num)
+{
+    enum mm_sec_state sec;
+    if (cpu == 0 || scs == 0) {
+        return 0xFFu;
+    }
+    sec = cpu->sec_state;
+    switch (exc_num) {
+    case MM_VECT_MEMMANAGE:
+        return (mm_u8)(((sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s) & 0xFFu);
+    case MM_VECT_BUSFAULT:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s) >> 8) & 0xFFu);
+    case MM_VECT_USAGEFAULT:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s) >> 16) & 0xFFu);
+    case MM_VECT_SECUREFAULT:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s) >> 24) & 0xFFu);
+    case MM_VECT_SVCALL:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr2_ns : scs->shpr2_s) >> 24) & 0xFFu);
+    case MM_VECT_PENDSV:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr3_ns : scs->shpr3_s) >> 16) & 0xFFu);
+    case MM_VECT_SYSTICK:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr3_ns : scs->shpr3_s) >> 24) & 0xFFu);
+    case MM_VECT_NMI:
+    case MM_VECT_HARDFAULT:
+        return 0u;
+    default:
+        return 0xFFu;
+    }
+}
+
+static mm_bool irq_can_preempt_current(const struct mm_nvic *nvic,
+                                       const struct mm_cpu *cpu,
+                                       const struct mm_scs *scs,
+                                       mm_u32 irq)
+{
+    mm_u32 active_exc;
+    mm_u8 current_prio;
+    mm_u8 current_preempt;
+    mm_u8 irq_prio;
+    mm_u8 irq_preempt;
+    mm_u8 prigroup;
+    if (nvic == 0 || cpu == 0 || scs == 0) {
+        return MM_TRUE;
+    }
+    if (cpu->mode != MM_HANDLER) {
+        return MM_TRUE;
+    }
+    active_exc = cpu->xpsr & 0x1FFu;
+    if (active_exc == 0u) {
+        return MM_TRUE;
+    }
+    if (active_exc >= 16u) {
+        current_prio = nvic->priority[active_exc - 16u];
+    } else {
+        current_prio = system_exc_priority_for_current(cpu, scs, active_exc);
+    }
+    irq_prio = nvic->priority[irq];
+    prigroup = prigroup_for_target(scs, cpu->sec_state);
+    current_preempt = preempt_priority_value(current_prio, prigroup);
+    irq_preempt = preempt_priority_value(irq_prio, prigroup);
+    return (irq_preempt < current_preempt) ||
+           (irq_preempt == current_preempt && irq_prio < current_prio) ? MM_TRUE : MM_FALSE;
+}
+
 static mm_bool basepri_blocks_target(const struct mm_cpu *cpu,
                                      enum mm_sec_state target_sec,
                                      const struct mm_scs *scs,
@@ -345,6 +412,9 @@ int mm_nvic_select_routed_ex(const struct mm_nvic *nvic,
             continue;
         }
         if (basepri_blocks_target(cpu, tsec, scs, nvic->priority[irq])) {
+            continue;
+        }
+        if (!irq_can_preempt_current(nvic, cpu, scs, irq)) {
             continue;
         }
         if (irq == 14u) {

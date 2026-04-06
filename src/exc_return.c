@@ -42,6 +42,7 @@ struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
     info.basic_frame = MM_TRUE;
     info.to_thread = MM_TRUE;
     info.target_sec = MM_SECURE;
+    info.return_sec = MM_SECURE;
 
     if ((value & 0xffffff00u) != 0xffffff00u) {
         return info;
@@ -55,6 +56,8 @@ struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
     info.to_thread = (value & (1u << 3)) != 0u;
     /* Bit6 distinguishes Secure(1) from Non-secure(0) stack. */
     info.target_sec = ((value & (1u << 6)) != 0u) ? MM_SECURE : MM_NONSECURE;
+    /* Bit0 distinguishes Secure(1) from Non-secure(0) return state. */
+    info.return_sec = (value & 1u) != 0u ? MM_SECURE : MM_NONSECURE;
     info.valid = MM_TRUE;
     return info;
 }

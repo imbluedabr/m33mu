@@ -20,7 +20,9 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 #include "m33mu/cpu.h"
+#include "m33mu/scs.h"
 #include "m33mu/tz.h"
 
 static void cpu_init(struct mm_cpu *cpu)
@@ -36,10 +38,37 @@ static void cpu_init(struct mm_cpu *cpu)
 static int test_sg_ns_to_s(void)
 {
     struct mm_cpu cpu;
+    struct mm_scs scs;
     cpu_init(&cpu);
+    memset(&scs, 0, sizeof(scs));
     cpu.sec_state = MM_NONSECURE;
-    mm_tz_exec_sg(&cpu);
+    cpu.r[15] = 0x0C000401u;
+    scs.sau_ctrl = 0x1u;
+    scs.sau_rbar[0] = 0x0C000400u;
+    scs.sau_rlar[0] = 0x0C0007E0u | 0x3u; /* ENABLE|NSC */
+    mm_tz_exec_sg(&cpu, &scs, 0x0C000400u);
     if (cpu.sec_state != MM_SECURE) return 1;
+    if (scs.securefault_pending) return 1;
+    return 0;
+}
+
+static int test_sg_outside_nsc_raises_securefault(void)
+{
+    struct mm_cpu cpu;
+    struct mm_scs scs;
+    cpu_init(&cpu);
+    memset(&scs, 0, sizeof(scs));
+    cpu.sec_state = MM_NONSECURE;
+    cpu.r[15] = 0x08000001u;
+    scs.sau_ctrl = 0x1u;
+    scs.sau_rbar[0] = 0x08000000u;
+    scs.sau_rlar[0] = 0x08000FE0u | 0x1u; /* ENABLE, Non-secure */
+    mm_tz_exec_sg(&cpu, &scs, 0x08000000u);
+    if (cpu.sec_state != MM_NONSECURE) return 1;
+    if (!scs.securefault_pending) return 1;
+    if (scs.sau_sfar != 0x08000000u) return 1;
+    if ((scs.sau_sfsr & (1u << 0)) == 0u) return 1; /* INVEP */
+    if ((scs.sau_sfsr & (1u << 6)) == 0u) return 1; /* SFARVALID */
     return 0;
 }
 
@@ -105,6 +134,7 @@ int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "sg_ns_to_s", test_sg_ns_to_s },
+        { "sg_outside_nsc_raises_securefault", test_sg_outside_nsc_raises_securefault },
         { "bxns_s_to_ns", test_bxns_s_to_ns },
         { "blxns_sets_lr_and_branches", test_blxns_sets_lr_and_branches },
         { "blxns_stack_full_aborts_transition", test_blxns_stack_full_aborts_transition },

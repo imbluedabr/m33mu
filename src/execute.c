@@ -115,6 +115,93 @@ static mm_bool svc_stack_trace_enabled(void)
 #define CPACR_CP11_SHIFT 22u
 #define FPCCR_LSPACT (1u << 0)
 
+static mm_u8 exec_preempt_priority_value(mm_u8 prio, mm_u8 prigroup)
+{
+    mm_u8 sub_bits;
+    if (prigroup > 7u) {
+        prigroup = 7u;
+    }
+    sub_bits = (mm_u8)(prigroup + 1u);
+    if (sub_bits >= 8u) {
+        return 0u;
+    }
+    return (mm_u8)(prio & (mm_u8)(0xFFu << sub_bits));
+}
+
+static mm_u8 exec_prigroup_for_sec(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    mm_u32 aircr;
+    if (scs == 0) {
+        return 0u;
+    }
+    aircr = (sec == MM_NONSECURE) ? scs->aircr_ns : scs->aircr_s;
+    return (mm_u8)((aircr >> 8) & 0x7u);
+}
+
+static mm_u8 exec_system_exception_priority(const struct mm_cpu *cpu,
+                                            const struct mm_scs *scs,
+                                            mm_u32 exc_num)
+{
+    enum mm_sec_state sec;
+    if (cpu == 0 || scs == 0) {
+        return 0xFFu;
+    }
+    sec = cpu->sec_state;
+    switch (exc_num) {
+    case MM_VECT_MEMMANAGE:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s) >> 0) & 0xFFu);
+    case MM_VECT_BUSFAULT:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s) >> 8) & 0xFFu);
+    case MM_VECT_USAGEFAULT:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s) >> 16) & 0xFFu);
+    case MM_VECT_SECUREFAULT:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s) >> 24) & 0xFFu);
+    case MM_VECT_SVCALL:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr2_ns : scs->shpr2_s) >> 24) & 0xFFu);
+    case MM_VECT_PENDSV:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr3_ns : scs->shpr3_s) >> 16) & 0xFFu);
+    case MM_VECT_SYSTICK:
+        return (mm_u8)((((sec == MM_NONSECURE) ? scs->shpr3_ns : scs->shpr3_s) >> 24) & 0xFFu);
+    case MM_VECT_NMI:
+    case MM_VECT_HARDFAULT:
+        return 0u;
+    default:
+        return 0xFFu;
+    }
+}
+
+static mm_bool svc_can_preempt_current(const struct mm_cpu *cpu,
+                                       const struct mm_scs *scs,
+                                       const struct mm_nvic *nvic)
+{
+    mm_u32 active_exc;
+    mm_u8 current_prio;
+    mm_u8 svc_prio;
+    mm_u8 prigroup;
+    if (cpu == 0 || scs == 0) {
+        return MM_TRUE;
+    }
+    if (cpu->mode != MM_HANDLER) {
+        return MM_TRUE;
+    }
+    active_exc = cpu->xpsr & 0x1FFu;
+    if (active_exc == 0u) {
+        return MM_TRUE;
+    }
+    if (active_exc >= 16u) {
+        if (nvic == 0) {
+            return MM_TRUE;
+        }
+        current_prio = nvic->priority[active_exc - 16u];
+    } else {
+        current_prio = exec_system_exception_priority(cpu, scs, active_exc);
+    }
+    svc_prio = exec_system_exception_priority(cpu, scs, MM_VECT_SVCALL);
+    prigroup = exec_prigroup_for_sec(scs, cpu->sec_state);
+    return exec_preempt_priority_value(svc_prio, prigroup) <
+           exec_preempt_priority_value(current_prio, prigroup) ? MM_TRUE : MM_FALSE;
+}
+
 static mm_u32 cpacr_for_sec(const struct mm_scs *scs, enum mm_sec_state sec)
 {
     if (scs == 0) {
@@ -1387,7 +1474,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                            itstate_clear(&cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                                        } break;
                         case MM_OP_SG:
-                                       mm_tz_exec_sg(&cpu);
+                                       mm_tz_exec_sg(&cpu, &scs, f.pc_fetch);
                                        break;
                         case MM_OP_BXNS:
                                        mm_tz_exec_bxns(&cpu, cpu.r[d.rm]);
@@ -3699,8 +3786,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                         case MM_OP_SVC: {
                                             /* SVC is a 16-bit instruction; return to the following halfword. */
                                             mm_u32 ret_pc = f.pc_fetch + 2u;
+                                            mm_u32 exc_num = MM_VECT_SVCALL;
+                                            if (!svc_can_preempt_current(&cpu, &scs, ctx->nvic)) {
+                                                exc_num = MM_VECT_HARDFAULT;
+                                            }
                                             if (enter_exception == 0 ||
-                                                !enter_exception(&cpu, &map, &scs, MM_VECT_SVCALL, ret_pc, cpu.xpsr)) {
+                                                !enter_exception(&cpu, &map, &scs, exc_num, ret_pc, cpu.xpsr)) {
                                                 done = MM_TRUE;
                                             } else {
                                                 /* Sync IT state to the handler xPSR after exception entry. */

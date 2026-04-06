@@ -21,8 +21,12 @@
 
 #include "m33mu/tz.h"
 #include "m33mu/memmap.h"
+#include "m33mu/sau.h"
 #include <stdio.h>
 #include <stdlib.h>
+
+#define SFSR_INVEP     (1u << 0)
+#define SFSR_SFARVALID (1u << 6)
 
 static int g_tz_trace = -1;
 
@@ -116,16 +120,22 @@ static void tz_push_secure_call_frame(struct mm_cpu *cpu, mm_u32 return_addr)
     mm_cpu_set_active_sp(cpu, sp);
 }
 
-void mm_tz_exec_sg(struct mm_cpu *cpu)
+void mm_tz_exec_sg(struct mm_cpu *cpu, struct mm_scs *scs, mm_u32 insn_addr)
 {
     if (cpu == 0) {
         return;
     }
     /* Minimal model: SG is used for NS->S transition via an NSC veneer. */
     if (cpu->sec_state == MM_NONSECURE) {
+        if (scs != 0 && mm_sau_attr_for_addr(scs, insn_addr) != MM_SAU_NSC) {
+            scs->sau_sfsr |= SFSR_INVEP | SFSR_SFARVALID;
+            scs->sau_sfar = insn_addr;
+            scs->securefault_pending = MM_TRUE;
+            return;
+        }
         if (tz_trace_enabled()) {
             printf("[TZ_SG] pc=0x%08lx lr=0x%08lx r13=0x%08lx r0=0x%08lx sec %d->%d mode=%d msp_s=0x%08lx msp_ns=0x%08lx psp_s=0x%08lx psp_ns=0x%08lx\n",
-                   (unsigned long)cpu->r[15],
+                   (unsigned long)insn_addr,
                    (unsigned long)cpu->r[14],
                    (unsigned long)cpu->r[13],
                    (unsigned long)cpu->r[0],
