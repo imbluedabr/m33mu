@@ -14,6 +14,8 @@
 static mm_u32 g_last_exc_num;
 static mm_u32 g_last_return_pc;
 static int g_enter_exception_calls;
+static mm_u32 g_last_pc_write_value;
+static int g_handle_pc_write_calls;
 
 static mm_bool stub_handle_pc_write(struct mm_cpu *cpu,
                                     struct mm_memmap *map,
@@ -26,10 +28,11 @@ static mm_bool stub_handle_pc_write(struct mm_cpu *cpu,
     (void)cpu;
     (void)map;
     (void)scs;
-    (void)value;
     (void)it_pattern;
     (void)it_remaining;
     (void)it_cond;
+    g_last_pc_write_value = value;
+    g_handle_pc_write_calls++;
     return MM_TRUE;
 }
 
@@ -111,23 +114,47 @@ static void setup_ram_map(struct mm_memmap *map, mm_u8 *ram, size_t ram_len)
     (void)mm_memmap_configure_ram(map, &cfg, ram, MM_FALSE);
 }
 
+static int exec_one_it(struct mm_cpu *cpu,
+                       struct mm_memmap *map,
+                       struct mm_scs *scs,
+                       struct mm_nvic *nvic,
+                       struct mm_decoded *dec,
+                       mm_u8 it_pattern_init,
+                       mm_u8 it_remaining_init,
+                       mm_u8 it_cond_init);
+
 static int exec_one(struct mm_cpu *cpu,
                     struct mm_memmap *map,
                     struct mm_scs *scs,
                     struct mm_nvic *nvic,
                     struct mm_decoded *dec)
 {
+    return exec_one_it(cpu, map, scs, nvic, dec, 0u, 0u, 0u);
+}
+
+static int exec_one_it(struct mm_cpu *cpu,
+                       struct mm_memmap *map,
+                       struct mm_scs *scs,
+                       struct mm_nvic *nvic,
+                       struct mm_decoded *dec,
+                       mm_u8 it_pattern_init,
+                       mm_u8 it_remaining_init,
+                       mm_u8 it_cond_init)
+{
     struct mm_fetch_result fetch;
     struct mm_gdb_stub gdb;
     struct mm_execute_ctx ctx;
-    mm_u8 it_pattern = 0;
-    mm_u8 it_remaining = 0;
-    mm_u8 it_cond = 0;
+    mm_u8 it_pattern = it_pattern_init;
+    mm_u8 it_remaining = it_remaining_init;
+    mm_u8 it_cond = it_cond_init;
     mm_bool done = MM_FALSE;
 
     memset(&fetch, 0, sizeof(fetch));
     memset(&gdb, 0, sizeof(gdb));
     memset(&ctx, 0, sizeof(ctx));
+    if (it_remaining_init > 0u) {
+        cpu->xpsr = itstate_set(cpu->xpsr, 0x18u);
+    }
     fetch.pc_fetch = cpu->r[15] & ~1u;
     ctx.cpu = cpu;
     ctx.map = map;
@@ -150,6 +177,334 @@ static int exec_one(struct mm_cpu *cpu,
         return 1;
     }
     return done ? 1 : 0;
+}
+
+static int test_ldrsb_reg_wide_shift_execute(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[128];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.r[0] = 0x20000000u;
+    cpu.r[1] = 4u;
+    if (!mm_memmap_write(&map, cpu.sec_state, cpu.r[0] + 4u, 1u, 0x11u)) return 1;
+    if (!mm_memmap_write(&map, cpu.sec_state, cpu.r[0] + 16u, 1u, 0x80u)) return 1;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_LDRSB_REG;
+    dec.rn = 0u;
+    dec.rm = 1u;
+    dec.rd = 2u;
+    dec.imm = 2u;
+
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.r[2] != 0xFFFFFF80u) return 1;
+    return 0;
+}
+
+static int test_mrs_msp_reads_banked_msp(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.control_s = 0x2u;
+    cpu.msp_s = 0x20001000u;
+    cpu.psp_s = 0x20002000u;
+    cpu.r[13] = cpu.psp_s;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_MRS;
+    dec.rd = 0u;
+    dec.imm = 0x08u;
+
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.r[0] != cpu.msp_s) return 1;
+    return 0;
+}
+
+static int test_adc_sbc_16bit_preserve_flags_inside_it(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+    mm_u32 xpsr_before;
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.r[0] = 1u;
+    cpu.r[1] = 2u;
+    cpu.xpsr = 0xF0000000u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_ADCS_REG;
+    dec.len = 2u;
+    dec.rd = 0u;
+    dec.rn = 0u;
+    dec.rm = 1u;
+    xpsr_before = cpu.xpsr;
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 1u, 0u) != 0) {
+        printf("adcs_it: exec_one_it failed xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    if (cpu.r[0] != 4u) {
+        printf("adcs_it: result=0x%08lx\n", (unsigned long)cpu.r[0]);
+        return 1;
+    }
+    if ((cpu.xpsr & 0xF0000000u) != (xpsr_before & 0xF0000000u)) {
+        printf("adcs_it: nzcv_before=0x%08lx nzcv_after=0x%08lx full_after=0x%08lx\n",
+               (unsigned long)(xpsr_before & 0xF0000000u),
+               (unsigned long)(cpu.xpsr & 0xF0000000u),
+               (unsigned long)cpu.xpsr);
+        return 1;
+    }
+
+    cpu.r[0] = 5u;
+    cpu.r[1] = 1u;
+    cpu.xpsr = 0xA0000000u;
+    dec.kind = MM_OP_SBCS_REG;
+    xpsr_before = cpu.xpsr;
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 1u, 0u) != 0) {
+        printf("sbcs_it: exec_one_it failed xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    if (cpu.r[0] != 4u) {
+        printf("sbcs_it: result=0x%08lx\n", (unsigned long)cpu.r[0]);
+        return 1;
+    }
+    if ((cpu.xpsr & 0xF0000000u) != (xpsr_before & 0xF0000000u)) {
+        printf("sbcs_it: nzcv_before=0x%08lx nzcv_after=0x%08lx full_after=0x%08lx\n",
+               (unsigned long)(xpsr_before & 0xF0000000u),
+               (unsigned long)(cpu.xpsr & 0xF0000000u),
+               (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_blx_uses_pc_write_for_invstate_checked_target(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 0x101u;
+    cpu.r[3] = 0x08001000u;
+    g_last_pc_write_value = 0u;
+    g_handle_pc_write_calls = 0;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_BLX;
+    dec.len = 2u;
+    dec.rm = 3u;
+
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (g_handle_pc_write_calls != 1) return 1;
+    if (g_last_pc_write_value != 0x08001000u) return 1;
+    if (cpu.r[14] != 0x103u) return 1;
+    return 0;
+}
+
+static int test_mrs_psr_uses_shadow_q_ge_fields(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.xpsr = 0x980F0000u;
+    cpu.q_flag = MM_FALSE;
+    cpu.ge_flags = 0u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_MRS;
+    dec.rd = 0u;
+    dec.imm = 0x00u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.r[0] != 0x90000000u) return 1;
+
+    cpu.q_flag = MM_TRUE;
+    cpu.ge_flags = 0x5u;
+    dec.rd = 1u;
+    dec.imm = 0x03u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.r[1] != 0x98050000u) return 1;
+    return 0;
+}
+
+static int test_vabs_clears_sign_bit_for_neg_zero_and_nan(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    scs.fpu_present = MM_TRUE;
+    scs.cpacr_s = 0x00F00000u;
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_VABS;
+    dec.rd = 0u;
+    dec.rm = 1u;
+
+    cpu.s[1] = 0x80000000u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.s[0] != 0x00000000u) return 1;
+
+    cpu.s[1] = 0xFFC00001u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.s[0] != 0x7FC00001u) return 1;
+    return 0;
+}
+
+static int test_mvn_reg_wide_and_mul_w_suppress_flags_mid_it(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+    mm_u32 xpsr_before;
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.r[1] = 0u;
+    cpu.r[2] = 2u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_MVN_REG;
+    dec.len = 4u;
+    dec.raw = (1u << 20);
+    dec.rd = 0u;
+    dec.rm = 1u;
+    xpsr_before = 0x60000000u;
+    cpu.xpsr = xpsr_before;
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 2u, 0u) != 0) {
+        printf("mvn_w_it: exec_one_it failed xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    if (cpu.r[0] != 0xFFFFFFFFu) {
+        printf("mvn_w_it: result=0x%08lx\n", (unsigned long)cpu.r[0]);
+        return 1;
+    }
+    if ((cpu.xpsr & 0xF0000000u) != (xpsr_before & 0xF0000000u)) {
+        printf("mvn_w_it: nzcv_before=0x%08lx nzcv_after=0x%08lx full_after=0x%08lx\n",
+               (unsigned long)(xpsr_before & 0xF0000000u),
+               (unsigned long)(cpu.xpsr & 0xF0000000u),
+               (unsigned long)cpu.xpsr);
+        return 1;
+    }
+
+    dec.kind = MM_OP_MUL_W;
+    dec.rd = 0u;
+    dec.rn = 1u;
+    dec.rm = 2u;
+    dec.imm = 1u;
+    cpu.r[1] = 0x80000000u;
+    cpu.r[2] = 2u;
+    xpsr_before = 0x20000000u;
+    cpu.xpsr = xpsr_before;
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 2u, 0u) != 0) {
+        printf("mul_w_it: exec_one_it failed xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    if (cpu.r[0] != 0u) {
+        printf("mul_w_it: result=0x%08lx\n", (unsigned long)cpu.r[0]);
+        return 1;
+    }
+    if ((cpu.xpsr & 0xF0000000u) != (xpsr_before & 0xF0000000u)) {
+        printf("mul_w_it: nzcv_before=0x%08lx nzcv_after=0x%08lx full_after=0x%08lx\n",
+               (unsigned long)(xpsr_before & 0xF0000000u),
+               (unsigned long)(cpu.xpsr & 0xF0000000u),
+               (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_msr_splim_masks_low_bits(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.r[0] = 0x20000003u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_MSR;
+    dec.rm = 0u;
+    dec.imm = 0x0Au;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.msplim_s != 0x20000000u) return 1;
+
+    cpu.r[0] = 0x20000007u;
+    dec.imm = 0x0Bu;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.psplim_s != 0x20000000u) return 1;
+    return 0;
 }
 
 static int test_unprivileged_t_forms_execute(void)
@@ -437,8 +792,143 @@ static int test_svc_handler_mode_escalates_to_hardfault_when_not_highest_priorit
     return 0;
 }
 
+static int test_shift_and_mov_wide_preserve_v_flag(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+    size_t i;
+    static const enum mm_op_kind kinds[] = {
+        MM_OP_MOV_IMM,
+        MM_OP_LSL_REG,
+        MM_OP_LSL_IMM,
+        MM_OP_LSR_REG,
+        MM_OP_LSR_IMM,
+        MM_OP_ROR_IMM,
+        MM_OP_ASR_REG,
+        MM_OP_ASR_IMM,
+    };
+
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+
+    for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); ++i) {
+        memset(&cpu, 0, sizeof(cpu));
+        memset(&dec, 0, sizeof(dec));
+        cpu.sec_state = MM_SECURE;
+        cpu.mode = MM_THREAD;
+        cpu.r[15] = 1u;
+        cpu.xpsr = (1u << 28) | (1u << 29); /* V=1, C=1 */
+        cpu.r[1] = 0x40000000u;
+        cpu.r[2] = 1u;
+
+        dec.kind = kinds[i];
+        dec.len = 4u;
+        dec.raw = (1u << 20); /* setflags */
+        dec.rd = 0u;
+        dec.rn = 1u;
+        dec.rm = 2u;
+        dec.imm = 1u;
+        if (kinds[i] == MM_OP_MOV_IMM) {
+            dec.rm = 0u;
+            dec.rn = 0u;
+            dec.imm = 0u;
+        }
+
+        if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+        if ((cpu.xpsr & (1u << 28)) == 0u) return 1;
+    }
+    return 0;
+}
+
+static int test_asr_reg_wide_updates_flags(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.xpsr = (1u << 28); /* V=1 should be preserved */
+    cpu.r[1] = 0x80000001u;
+    cpu.r[2] = 1u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_ASR_REG;
+    dec.len = 4u;
+    dec.raw = (1u << 20); /* setflags */
+    dec.rd = 0u;
+    dec.rn = 1u;
+    dec.rm = 2u;
+
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.r[0] != 0xC0000000u) {
+        printf("asr_reg_wide: result=0x%08lx\n", (unsigned long)cpu.r[0]);
+        return 1;
+    }
+    if ((cpu.xpsr & (1u << 31)) == 0u) {
+        printf("asr_reg_wide: missing N xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    if ((cpu.xpsr & (1u << 30)) != 0u) {
+        printf("asr_reg_wide: unexpected Z xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    if ((cpu.xpsr & (1u << 29)) == 0u) {
+        printf("asr_reg_wide: missing C xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    if ((cpu.xpsr & (1u << 28)) == 0u) {
+        printf("asr_reg_wide: missing preserved V xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
+    if (test_ldrsb_reg_wide_shift_execute() != 0) {
+        printf("FAIL: ldrsb_reg_wide_shift_execute\n");
+        return 1;
+    }
+    if (test_mrs_msp_reads_banked_msp() != 0) {
+        printf("FAIL: mrs_msp_reads_banked_msp\n");
+        return 1;
+    }
+    if (test_adc_sbc_16bit_preserve_flags_inside_it() != 0) {
+        printf("FAIL: adc_sbc_16bit_preserve_flags_inside_it\n");
+        return 1;
+    }
+    if (test_blx_uses_pc_write_for_invstate_checked_target() != 0) {
+        printf("FAIL: blx_uses_pc_write_for_invstate_checked_target\n");
+        return 1;
+    }
+    if (test_mrs_psr_uses_shadow_q_ge_fields() != 0) {
+        printf("FAIL: mrs_psr_uses_shadow_q_ge_fields\n");
+        return 1;
+    }
+    if (test_vabs_clears_sign_bit_for_neg_zero_and_nan() != 0) {
+        printf("FAIL: vabs_clears_sign_bit_for_neg_zero_and_nan\n");
+        return 1;
+    }
+    if (test_mvn_reg_wide_and_mul_w_suppress_flags_mid_it() != 0) {
+        printf("FAIL: mvn_reg_wide_and_mul_w_suppress_flags_mid_it\n");
+        return 1;
+    }
+    if (test_msr_splim_masks_low_bits() != 0) {
+        printf("FAIL: msr_splim_masks_low_bits\n");
+        return 1;
+    }
     if (test_unprivileged_t_forms_execute() != 0) {
         printf("FAIL: unprivileged_t_forms_execute\n");
         return 1;
@@ -465,6 +955,14 @@ int main(void)
     }
     if (test_svc_handler_mode_escalates_to_hardfault_when_not_highest_priority() != 0) {
         printf("FAIL: svc_handler_mode_escalates_to_hardfault_when_not_highest_priority\n");
+        return 1;
+    }
+    if (test_shift_and_mov_wide_preserve_v_flag() != 0) {
+        printf("FAIL: shift_and_mov_wide_preserve_v_flag\n");
+        return 1;
+    }
+    if (test_asr_reg_wide_updates_flags() != 0) {
+        printf("FAIL: asr_reg_wide_updates_flags\n");
         return 1;
     }
     return 0;

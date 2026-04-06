@@ -196,8 +196,7 @@ void mm_cpu_set_control(struct mm_cpu *cpu, enum mm_sec_state sec, mm_u32 value)
     if (sec == cpu->sec_state && cpu->mode == MM_THREAD) {
         mm_u32 cur = (sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s;
         if ((cur & 0x1u) != 0u) {
-            value |= 0x1u;
-            value |= 0x2u;
+            value = cur;
         }
     }
     if (sec == MM_NONSECURE) cpu->control_ns = value;

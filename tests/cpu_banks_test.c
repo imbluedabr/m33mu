@@ -95,6 +95,20 @@ static int test_privileged_flag(void)
     return 0;
 }
 
+static int test_unprivileged_control_write_is_ignored(void)
+{
+    struct mm_cpu cpu;
+    init_cpu(&cpu);
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.control_s = 0x1u;
+    cpu.r[13] = cpu.msp_s;
+    mm_cpu_set_control(&cpu, MM_SECURE, 0x2u);
+    if (cpu.control_s != 0x1u) return 1;
+    if (cpu.r[13] != cpu.msp_s) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
@@ -102,6 +116,7 @@ int main(void)
         { "handler_msp", test_handler_uses_msp },
         { "ns_banks", test_ns_banks },
         { "privileged_flag", test_privileged_flag },
+        { "unprivileged_control_write_ignored", test_unprivileged_control_write_is_ignored },
     };
     int failures = 0;
     int i;
