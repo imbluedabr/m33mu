@@ -47,4 +47,14 @@ mm_bool mm_mpu_allows_access(const struct mm_scs *scs,
                              mm_bool privileged,
                              enum mm_mpu_access access);
 
+/* Extended variant that can model handler-context overrides such as
+ * MPU_CTRL.HFNMIENA for HardFault/NMI accesses.
+ */
+mm_bool mm_mpu_allows_access_ex(const struct mm_scs *scs,
+                                enum mm_sec_state sec,
+                                mm_u32 addr,
+                                mm_bool privileged,
+                                enum mm_mpu_access access,
+                                mm_u32 active_exc_num);
+
 #endif /* M33MU_MPU_H */

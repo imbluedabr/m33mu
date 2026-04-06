@@ -40,5 +40,12 @@ enum mm_sau_attr {
  */
 enum mm_sau_attr mm_sau_attr_for_addr(const struct mm_scs *scs, mm_u32 addr);
 
-#endif /* M33MU_SAU_H */
+/* Like mm_sau_attr_for_addr, but also reports the highest-priority matching
+ * SAU region number when one exists. Returns MM_TRUE when a region matched.
+ */
+mm_bool mm_sau_attr_region_for_addr(const struct mm_scs *scs,
+                                    mm_u32 addr,
+                                    enum mm_sau_attr *attr_out,
+                                    mm_u32 *region_out);
 
+#endif /* M33MU_SAU_H */

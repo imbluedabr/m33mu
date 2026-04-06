@@ -4192,8 +4192,8 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
             cpu->exc_depth++;
         }
     }
-    /* Exception handlers always use MSP; mirror it into r13 for handler prologue. */
-    cpu->r[13] = (sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
+    /* Exception handlers always use the handler security state's MSP. */
+    cpu->r[13] = (handler_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
     if (svc_stack_trace_enabled() &&
         exc_num == MM_VECT_SVCALL &&
         pre_mode == MM_THREAD) {
@@ -4204,7 +4204,6 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
         dump_cpu_regs(cpu, "EXC_ENTER_POST_STACK");
         dump_exc_stack_state(cpu, "EXC_ENTER_POST_STACK");
     }
-    cpu->r[13] = (handler_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
     cpu->xpsr = (xpsr_in & 0xF8000000u) | 0x01000000u | (exc_num & 0x1FFu);
     cpu->r[14] = exc_ret_val;
     cpu->mode = MM_HANDLER;

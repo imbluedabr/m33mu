@@ -44,20 +44,36 @@ static mm_bool sau_region_matches(mm_u32 rbar, mm_u32 rlar, mm_u32 addr)
     return addr <= limit;
 }
 
-enum mm_sau_attr mm_sau_attr_for_addr(const struct mm_scs *scs, mm_u32 addr)
+mm_bool mm_sau_attr_region_for_addr(const struct mm_scs *scs,
+                                    mm_u32 addr,
+                                    enum mm_sau_attr *attr_out,
+                                    mm_u32 *region_out)
 {
     int i;
     mm_bool enable;
     mm_bool allns;
+    enum mm_sau_attr attr = MM_SAU_SECURE;
 
     if (scs == 0) {
-        return MM_SAU_SECURE;
+        if (attr_out != 0) {
+            *attr_out = MM_SAU_SECURE;
+        }
+        if (region_out != 0) {
+            *region_out = 0u;
+        }
+        return MM_FALSE;
     }
 
     enable = (scs->sau_ctrl & SAU_CTRL_ENABLE) != 0u;
     allns = (scs->sau_ctrl & SAU_CTRL_ALLNS) != 0u;
     if (!enable) {
-        return MM_SAU_SECURE;
+        if (attr_out != 0) {
+            *attr_out = MM_SAU_SECURE;
+        }
+        if (region_out != 0) {
+            *region_out = 0u;
+        }
+        return MM_FALSE;
     }
 
     /* Highest-numbered region has priority. */
@@ -66,12 +82,33 @@ enum mm_sau_attr mm_sau_attr_for_addr(const struct mm_scs *scs, mm_u32 addr)
         mm_u32 rlar = scs->sau_rlar[i];
         if (sau_region_matches(rbar, rlar, addr)) {
             if ((rlar & SAU_RLAR_NSC) != 0u) {
-                return MM_SAU_NSC;
+                attr = MM_SAU_NSC;
+            } else {
+                attr = MM_SAU_NONSECURE;
             }
-            return MM_SAU_NONSECURE;
+            if (attr_out != 0) {
+                *attr_out = attr;
+            }
+            if (region_out != 0) {
+                *region_out = (mm_u32)i;
+            }
+            return MM_TRUE;
         }
     }
 
-    return allns ? MM_SAU_NONSECURE : MM_SAU_SECURE;
+    if (attr_out != 0) {
+        *attr_out = allns ? MM_SAU_NONSECURE : MM_SAU_SECURE;
+    }
+    if (region_out != 0) {
+        *region_out = 0u;
+    }
+    return MM_FALSE;
 }
 
+enum mm_sau_attr mm_sau_attr_for_addr(const struct mm_scs *scs, mm_u32 addr)
+{
+    enum mm_sau_attr attr = MM_SAU_SECURE;
+
+    (void)mm_sau_attr_region_for_addr(scs, addr, &attr, 0);
+    return attr;
+}

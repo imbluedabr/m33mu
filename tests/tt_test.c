@@ -64,11 +64,60 @@ static int test_tt_handler_mode_stays_privileged_with_even_ipsr(void)
     return 0;
 }
 
+static int test_tt_reports_sau_region_number_when_secure(void)
+{
+    struct mm_cpu cpu;
+    struct mm_scs scs;
+    mm_u32 resp;
+
+    memset(&cpu, 0, sizeof(cpu));
+    mm_scs_init(&scs, 0);
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    scs.sau_ctrl = 0x1u; /* ENABLE */
+    scs.sau_rbar[3] = 0x00002000u;
+    scs.sau_rlar[3] = 0x000020E0u | 0x1u; /* region 3, enabled */
+
+    resp = mm_tt_resp(&cpu, &scs, 0x00002010u, MM_FALSE, MM_FALSE);
+    if ((resp & (1u << 7)) == 0u) {
+        printf("tt_test: secure TT missing SRVALID resp=0x%08lx\n", (unsigned long)resp);
+        return 1;
+    }
+    if (((resp >> 8) & 0xFFu) != 3u) {
+        printf("tt_test: secure TT wrong SREGION resp=0x%08lx\n", (unsigned long)resp);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_tt_leaves_srvalid_clear_without_matching_sau_region(void)
+{
+    struct mm_cpu cpu;
+    struct mm_scs scs;
+    mm_u32 resp;
+
+    memset(&cpu, 0, sizeof(cpu));
+    mm_scs_init(&scs, 0);
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    scs.sau_ctrl = 0x1u; /* ENABLE */
+
+    resp = mm_tt_resp(&cpu, &scs, 0x00003010u, MM_FALSE, MM_FALSE);
+    if ((resp & (1u << 7)) != 0u || ((resp >> 8) & 0xFFu) != 0u) {
+        printf("tt_test: unmatched SAU region should clear SRVALID/SREGION resp=0x%08lx\n",
+               (unsigned long)resp);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "privileged_thread_state", test_tt_uses_privileged_thread_state_not_xpsr_bit0 },
         { "handler_mode_even_ipsr", test_tt_handler_mode_stays_privileged_with_even_ipsr },
+        { "secure_sau_region", test_tt_reports_sau_region_number_when_secure },
+        { "no_sau_region", test_tt_leaves_srvalid_clear_without_matching_sau_region },
     };
     int failures = 0;
     int i;

@@ -502,6 +502,7 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
     }
     if (ctx->scs != 0) {
         enum mm_mpu_access mpu_access = MM_MPU_ACCESS_READ;
+        mm_u32 active_exc_num = 0u;
         switch (type) {
         case MM_ACCESS_WRITE:
             mpu_access = MM_MPU_ACCESS_WRITE;
@@ -514,7 +515,10 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
             mpu_access = MM_MPU_ACCESS_READ;
             break;
         }
-        if (!mm_mpu_allows_access(ctx->scs, sec, addr, privileged, mpu_access)) {
+        if (ctx->cpu != 0 && ctx->cpu->mode == MM_HANDLER) {
+            active_exc_num = ctx->cpu->xpsr & 0x1FFu;
+        }
+        if (!mm_mpu_allows_access_ex(ctx->scs, sec, addr, privileged, mpu_access, active_exc_num)) {
             memfault_reason(ctx, type, sec, addr, "mpu-ap", attr, addr_sec, mpcbb_hit);
             record_memfault(ctx, sec, type, addr);
             return MM_FALSE;

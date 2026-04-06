@@ -54,17 +54,19 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
     
     /* Query SAU attribution (only valid when executed from Secure state) */
     if (cpu->sec_state != MM_NONSECURE) {  /* Secure state */
-        enum mm_sau_attr sau_attr = mm_sau_attr_for_addr(scs, addr);
+        enum mm_sau_attr sau_attr = MM_SAU_SECURE;
+        mm_u32 sau_region = 0u;
+        mm_bool sau_valid = mm_sau_attr_region_for_addr(scs, addr, &sau_attr, &sau_region);
         
         /* Set S bit based on SAU attribution */
         if (sau_attr == MM_SAU_SECURE || sau_attr == MM_SAU_NSC) {
             result |= TT_RESP_S;  /* S bit = 1 (Secure) */
         }
         
-        /* SRVALID and SREGION - simplified: always mark as invalid for now */
-        /* TODO: track actual SAU region number when mm_sau_attr_for_addr is enhanced */
-        result |= 0u;  /* SRVALID = 0 */
-        result |= (0u << 8);  /* SREGION[7:0] = 0 */
+        if (sau_valid) {
+            result |= TT_RESP_SRVALID;
+            result |= ((sau_region & 0xFFu) << 8);
+        }
     } else {
         /* When executed from Non-secure state, S bit is always 0 */
         result |= 0u;

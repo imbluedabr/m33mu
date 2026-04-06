@@ -37,3 +37,5 @@ jobs:
         run: build/m33mu  tests/firmware/test-nrf54lm20/app.bin --expect-bkpt 0x7f --timeout 60 --uart-stdout --cpu nrf54lm20 --quit-on-faults
       - name: Run STM32H5 firmware test (Floating point instructions)
         run: build/m33mu tests/firmware/test-fpu-instructions/app.bin --uart-stdout --expect-bkpt 0x7f --timeout 60 --quit-on-faults
+      - name: Run RTOS exception firmware test
+        run: build/m33mu tests/firmware/test-rtos-exceptions/app.bin --expect-bkpt 0x0 --timeout 60 --quit-on-faults

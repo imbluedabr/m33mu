@@ -119,6 +119,58 @@ static int test_background_region_privileged_only(void)
     return 0;
 }
 
+static int test_hardfault_bypasses_mpu_when_hfnmiena_clear(void)
+{
+    struct mm_scs scs;
+    mm_scs_init(&scs, 0);
+
+    scs.mpu_ctrl_s = 0x1u; /* ENABLE, HFNMIENA clear */
+    scs.mpu_rbar_s[0] = 0x00001000u | (2u << 1); /* AP=10 privileged RO */
+    scs.mpu_rlar_s[0] = 0x00001FE0u | 0x1u;
+
+    if (mm_mpu_allows_access_ex(&scs, MM_SECURE, 0x00001010u, MM_TRUE,
+                                MM_MPU_ACCESS_WRITE, 3u) != MM_TRUE) {
+        return 1;
+    }
+    if (mm_mpu_allows_access_ex(&scs, MM_SECURE, 0x00001010u, MM_TRUE,
+                                MM_MPU_ACCESS_EXEC, 2u) != MM_TRUE) {
+        return 1;
+    }
+    return 0;
+}
+
+static int test_hardfault_respects_mpu_when_hfnmiena_set(void)
+{
+    struct mm_scs scs;
+    mm_scs_init(&scs, 0);
+
+    scs.mpu_ctrl_s = 0x3u; /* ENABLE|HFNMIENA */
+    scs.mpu_rbar_s[0] = 0x00001000u | (2u << 1); /* AP=10 privileged RO */
+    scs.mpu_rlar_s[0] = 0x00001FE0u | 0x1u;
+
+    if (mm_mpu_allows_access_ex(&scs, MM_SECURE, 0x00001010u, MM_TRUE,
+                                MM_MPU_ACCESS_WRITE, 3u) != MM_FALSE) {
+        return 1;
+    }
+    return 0;
+}
+
+static int test_regular_handler_does_not_bypass_mpu(void)
+{
+    struct mm_scs scs;
+    mm_scs_init(&scs, 0);
+
+    scs.mpu_ctrl_s = 0x1u; /* ENABLE, HFNMIENA clear */
+    scs.mpu_rbar_s[0] = 0x00001000u | (2u << 1); /* AP=10 privileged RO */
+    scs.mpu_rlar_s[0] = 0x00001FE0u | 0x1u;
+
+    if (mm_mpu_allows_access_ex(&scs, MM_SECURE, 0x00001010u, MM_TRUE,
+                                MM_MPU_ACCESS_WRITE, 15u) != MM_FALSE) {
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
@@ -128,6 +180,9 @@ int main(void)
         { "banked_secure_vs_nonsecure", test_banked_secure_vs_nonsecure },
         { "ap_permissions_enforced", test_ap_permissions_enforced },
         { "background_region_privileged_only", test_background_region_privileged_only },
+        { "hardfault_bypass_hfnmiena_clear", test_hardfault_bypasses_mpu_when_hfnmiena_clear },
+        { "hardfault_respects_hfnmiena_set", test_hardfault_respects_mpu_when_hfnmiena_set },
+        { "regular_handler_no_bypass", test_regular_handler_does_not_bypass_mpu },
     };
     int failures = 0;
     int i;

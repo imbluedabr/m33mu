@@ -20,6 +20,7 @@
  */
 
 #include "m33mu/mpu.h"
+#include "m33mu/vector.h"
 
 #define MPU_CTRL_ENABLE (1u << 0)
 #define MPU_CTRL_PRIVDEFENA (1u << 2)
@@ -131,6 +132,16 @@ mm_bool mm_mpu_allows_access(const struct mm_scs *scs,
                              mm_bool privileged,
                              enum mm_mpu_access access)
 {
+    return mm_mpu_allows_access_ex(scs, sec, addr, privileged, access, 0u);
+}
+
+mm_bool mm_mpu_allows_access_ex(const struct mm_scs *scs,
+                                enum mm_sec_state sec,
+                                mm_u32 addr,
+                                mm_bool privileged,
+                                enum mm_mpu_access access,
+                                mm_u32 active_exc_num)
+{
     mm_u32 ctrl;
     mm_u32 rbar;
     mm_u32 ap;
@@ -143,6 +154,10 @@ mm_bool mm_mpu_allows_access(const struct mm_scs *scs,
     }
 
     ctrl = (sec == MM_NONSECURE) ? scs->mpu_ctrl_ns : scs->mpu_ctrl_s;
+    if ((ctrl & (1u << 1)) == 0u &&
+        (active_exc_num == MM_VECT_HARDFAULT || active_exc_num == MM_VECT_NMI)) {
+        return MM_TRUE;
+    }
     if ((ctrl & MPU_CTRL_ENABLE) == 0u) {
         return MM_TRUE;
     }
