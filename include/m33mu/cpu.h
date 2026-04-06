@@ -104,6 +104,8 @@ struct mm_cpu {
     mm_u16 exc_num[MM_EXC_STACK_MAX];
     mm_bool exc_fp_reserved[MM_EXC_STACK_MAX];
     mm_bool exc_fp_saved[MM_EXC_STACK_MAX];
+    mm_bool exc_cross_domain[MM_EXC_STACK_MAX];
+    mm_u32 exc_callee_saved[MM_EXC_STACK_MAX][8];
     int exc_depth;
 
     /* TrustZone call stack for Secure->Non-secure BLXNS callbacks.

@@ -16,6 +16,8 @@ static mm_u32 g_last_return_pc;
 static int g_enter_exception_calls;
 static mm_u32 g_last_pc_write_value;
 static int g_handle_pc_write_calls;
+static mm_u32 g_last_ufsr_bits;
+static int g_raise_usage_fault_calls;
 
 static mm_bool stub_handle_pc_write(struct mm_cpu *cpu,
                                     struct mm_memmap *map,
@@ -66,7 +68,8 @@ static mm_bool stub_raise_usage_fault(struct mm_cpu *cpu,
     (void)scs;
     (void)fault_pc;
     (void)fault_xpsr;
-    (void)ufsr_bits;
+    g_last_ufsr_bits = ufsr_bits;
+    g_raise_usage_fault_calls++;
     return MM_FALSE;
 }
 
@@ -949,7 +952,9 @@ static int test_psplim_unprivileged_nonsecure_write_ignored(void)
     setup_ram_map(&map, ram, sizeof(ram));
     cpu.sec_state = MM_NONSECURE;
     cpu.mode = MM_THREAD;
-    cpu.control_ns = 0x1u; /* unprivileged */
+    cpu.priv_ns = MM_TRUE;
+    cpu.control_ns = 0x1u;
+    if (mm_cpu_get_privileged(&cpu) != MM_FALSE) return 1;
     cpu.r[15] = 1u;
     cpu.r[0] = 0x20001023u;
     cpu.psplim_ns = 0x20000000u;
@@ -1102,6 +1107,87 @@ static int test_wide_s_ops_suppress_flags_mid_it_consistently(void)
     return 0;
 }
 
+static int test_cps_unprivileged_thread_is_nop(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_NONSECURE;
+    cpu.mode = MM_THREAD;
+    cpu.priv_ns = MM_TRUE;
+    cpu.control_ns = 0x1u;
+    if (mm_cpu_get_privileged(&cpu) != MM_FALSE) return 1;
+    cpu.r[15] = 1u;
+    cpu.primask_ns = 0u;
+    cpu.faultmask_ns = 0u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_CPS;
+    dec.imm = 0x13u; /* CPSID if */
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.primask_ns != 0u || cpu.faultmask_ns != 0u) {
+        printf("cps_unpriv_nop: primask=%lu faultmask=%lu\n",
+               (unsigned long)cpu.primask_ns, (unsigned long)cpu.faultmask_ns);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_ldrd_ldm_unaligned_raise_usagefault(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[64];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.r[0] = 0x20000002u;
+
+    g_last_ufsr_bits = 0u;
+    g_raise_usage_fault_calls = 0;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_LDRD;
+    dec.rn = 0u;
+    dec.rd = 2u;
+    dec.rm = 3u;
+    dec.imm = 0u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 1) return 1;
+    if (g_raise_usage_fault_calls != 1 || g_last_ufsr_bits != (1u << 24)) {
+        printf("ldrd_unaligned: calls=%d bits=0x%08lx\n",
+               g_raise_usage_fault_calls, (unsigned long)g_last_ufsr_bits);
+        return 1;
+    }
+
+    g_last_ufsr_bits = 0u;
+    g_raise_usage_fault_calls = 0;
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_STM;
+    dec.rn = 0u;
+    dec.imm = (1u << 24) | 0x0003u; /* IA, regs r0/r1 */
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 1) return 1;
+    if (g_raise_usage_fault_calls != 1 || g_last_ufsr_bits != (1u << 24)) {
+        printf("stm_unaligned: calls=%d bits=0x%08lx\n",
+               g_raise_usage_fault_calls, (unsigned long)g_last_ufsr_bits);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (test_ldrsb_reg_wide_shift_execute() != 0) {
@@ -1186,6 +1272,14 @@ int main(void)
     }
     if (test_wide_s_ops_suppress_flags_mid_it_consistently() != 0) {
         printf("FAIL: wide_s_ops_suppress_flags_mid_it_consistently\n");
+        return 1;
+    }
+    if (test_cps_unprivileged_thread_is_nop() != 0) {
+        printf("FAIL: cps_unprivileged_thread_is_nop\n");
+        return 1;
+    }
+    if (test_ldrd_ldm_unaligned_raise_usagefault() != 0) {
+        printf("FAIL: ldrd_ldm_unaligned_raise_usagefault\n");
         return 1;
     }
     return 0;

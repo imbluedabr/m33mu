@@ -107,6 +107,21 @@ static mm_bool stub_enter_exception(struct mm_cpu *cpu,
     return MM_FALSE;
 }
 
+static void setup_ram_map(struct mm_memmap *map, mm_u8 *ram, size_t ram_len)
+{
+    struct mm_target_cfg cfg;
+    struct mmio_region regions[1];
+
+    memset(regions, 0, sizeof(regions));
+    memset(&cfg, 0, sizeof(cfg));
+    mm_memmap_init(map, regions, 1u);
+    cfg.ram_base_s = 0x20000000u;
+    cfg.ram_size_s = (mm_u32)ram_len;
+    cfg.ram_base_ns = 0x20000000u;
+    cfg.ram_size_ns = (mm_u32)ram_len;
+    (void)mm_memmap_configure_ram(map, &cfg, ram, MM_FALSE);
+}
+
 static int run_vcvt_case_with_fpscr(enum mm_op_kind kind,
                                     float input,
                                     mm_u32 expected,
@@ -335,6 +350,118 @@ static int run_vmov_rs_case(mm_u32 src_s, mm_u32 value, mm_u32 dest_reg, const c
     return 0;
 }
 
+static int test_lazy_fp_save_on_first_handler_fp_use(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_gdb_stub gdb;
+    struct mm_fetch_result fetch;
+    struct mm_decoded dec;
+    struct mm_execute_ctx ctx;
+    mm_u8 ram[256];
+    mm_u8 it_pattern = 0;
+    mm_u8 it_remaining = 0;
+    mm_u8 it_cond = 0;
+    mm_bool done = MM_FALSE;
+    mm_u32 val = 0;
+    int i;
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&map, 0, sizeof(map));
+    memset(&scs, 0, sizeof(scs));
+    memset(&gdb, 0, sizeof(gdb));
+    memset(&fetch, 0, sizeof(fetch));
+    memset(&dec, 0, sizeof(dec));
+    memset(&ctx, 0, sizeof(ctx));
+    memset(ram, 0, sizeof(ram));
+
+    setup_ram_map(&map, ram, sizeof(ram));
+
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_HANDLER;
+    cpu.fp_active = MM_TRUE;
+    cpu.control_s = (1u << 2);
+    cpu.exc_depth = 1u;
+    cpu.exc_sp[0] = 0x20000040u;
+    cpu.exc_sec[0] = MM_SECURE;
+    cpu.exc_fp_reserved[0] = MM_TRUE;
+    cpu.exc_fp_saved[0] = MM_FALSE;
+    for (i = 0; i < 16; ++i) {
+        cpu.s[i] = 0x10000000u + (mm_u32)i;
+    }
+    cpu.fpscr = 0x89abcdefu;
+
+    scs.fpu_present = MM_TRUE;
+    scs.cpacr_s = 0x00f00000u;
+    scs.fpccr = 1u;
+
+    dec.kind = MM_OP_VMOV_RS;
+    dec.rn = 5u;
+    dec.rd = 0u;
+    dec.len = 4u;
+
+    ctx.cpu = &cpu;
+    ctx.map = &map;
+    ctx.scs = &scs;
+    ctx.gdb = &gdb;
+    ctx.fetch = &fetch;
+    ctx.dec = &dec;
+    ctx.it_pattern = &it_pattern;
+    ctx.it_remaining = &it_remaining;
+    ctx.it_cond = &it_cond;
+    ctx.done = &done;
+    ctx.handle_pc_write = stub_handle_pc_write;
+    ctx.raise_mem_fault = stub_raise_mem_fault;
+    ctx.raise_usage_fault = stub_raise_usage_fault;
+    ctx.exc_return_unstack = stub_exc_return_unstack;
+    ctx.enter_exception = stub_enter_exception;
+
+    if (mm_execute_decoded(&ctx) != MM_EXEC_OK) {
+        printf("lazy_fp_save: execution failed\n");
+        return 1;
+    }
+    if (done) {
+        printf("lazy_fp_save: unexpected done flag\n");
+        return 1;
+    }
+    if (cpu.r[0] != cpu.s[5]) {
+        printf("lazy_fp_save: vmov result mismatch got=0x%08lx expected=0x%08lx\n",
+               (unsigned long)cpu.r[0],
+               (unsigned long)cpu.s[5]);
+        return 1;
+    }
+    if (!cpu.exc_fp_saved[0] || (scs.fpccr & 1u) != 0u) {
+        printf("lazy_fp_save: lazy-save state not updated saved=%d fpccr=0x%08lx\n",
+               (int)cpu.exc_fp_saved[0],
+               (unsigned long)scs.fpccr);
+        return 1;
+    }
+    for (i = 0; i < 16; ++i) {
+        if (!mm_memmap_read(&map, MM_SECURE, 0x20000040u + (mm_u32)(i * 4u), 4u, &val) ||
+            val != cpu.s[i]) {
+            printf("lazy_fp_save: s%d got=0x%08lx expected=0x%08lx\n",
+                   i,
+                   (unsigned long)val,
+                   (unsigned long)cpu.s[i]);
+            return 1;
+        }
+    }
+    if (!mm_memmap_read(&map, MM_SECURE, 0x20000080u, 4u, &val) || val != cpu.fpscr) {
+        printf("lazy_fp_save: fpscr got=0x%08lx expected=0x%08lx\n",
+               (unsigned long)val,
+               (unsigned long)cpu.fpscr);
+        return 1;
+    }
+    if (!mm_memmap_read(&map, MM_SECURE, 0x20000084u, 4u, &val) || val != 0u) {
+        printf("lazy_fp_save: reserved word got=0x%08lx expected=0\n",
+               (unsigned long)val);
+        return 1;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
     if (run_vcvt_case(MM_OP_VCVT_S32_F32, NAN, 0u, "vcvt_s32_f32_nan_zero") != 0) return 1;
@@ -348,5 +475,6 @@ int main(void)
     if (run_vcvt_case_with_fpscr(MM_OP_VCVTR_U32_F32, 1.75f, 1u, 3u << 22, "vcvtr_u32_f32_round_zero") != 0) return 1;
     if (run_vmov_sr_case(14u, 0x12345678u, 3u, "vmov_sr_lr_allowed") != 0) return 1;
     if (run_vmov_rs_case(5u, 0x89abcdefu, 14u, "vmov_rs_lr_allowed") != 0) return 1;
+    if (test_lazy_fp_save_on_first_handler_fp_use() != 0) return 1;
     return 0;
 }

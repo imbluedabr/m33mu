@@ -46,11 +46,14 @@ struct mm_scs {
     mm_u32 shpr3_ns;
     mm_u32 shcsr_s;
     mm_u32 shcsr_ns;
-    mm_u32 cfsr;
+    mm_u32 cfsr_s;
+    mm_u32 cfsr_ns;
     mm_u32 hfsr;
     mm_u32 dfsr;
-    mm_u32 mmfar;
-    mm_u32 bfar;
+    mm_u32 mmfar_s;
+    mm_u32 mmfar_ns;
+    mm_u32 bfar_s;
+    mm_u32 bfar_ns;
     mm_u32 afsr;
     mm_u32 cpacr_s;
     mm_u32 cpacr_ns;
@@ -130,5 +133,35 @@ mm_u64 mm_scs_systick_cycles_until_fire(const struct mm_scs *scs);
 
 /* Debug: total SysTick expirations observed (wraps). */
 mm_u64 mm_scs_systick_wrap_count(const struct mm_scs *scs);
+
+static inline mm_u32 *mm_scs_cfsr_ptr(struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->cfsr_ns : &scs->cfsr_s;
+}
+
+static inline const mm_u32 *mm_scs_cfsr_ptr_const(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->cfsr_ns : &scs->cfsr_s;
+}
+
+static inline mm_u32 *mm_scs_mmfar_ptr(struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->mmfar_ns : &scs->mmfar_s;
+}
+
+static inline const mm_u32 *mm_scs_mmfar_ptr_const(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->mmfar_ns : &scs->mmfar_s;
+}
+
+static inline mm_u32 *mm_scs_bfar_ptr(struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->bfar_ns : &scs->bfar_s;
+}
+
+static inline const mm_u32 *mm_scs_bfar_ptr_const(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->bfar_ns : &scs->bfar_s;
+}
 
 #endif /* M33MU_SCS_H */

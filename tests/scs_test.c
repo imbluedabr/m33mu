@@ -183,6 +183,44 @@ static int test_sau_region_bank(void)
     return 0;
 }
 
+static int test_fault_regs_banked(void)
+{
+    struct mm_scs scs;
+    struct mmio_bus bus;
+    struct mmio_region regions[2];
+    mm_u32 val = 0;
+
+    mm_scs_init(&scs, 0x0u);
+    mmio_bus_init(&bus, regions, 2);
+    if (!mm_scs_register_regions(&scs, &bus, 0xE000ED00u, 0xE002ED00u, 0)) {
+        return 1;
+    }
+
+    if (!mmio_bus_write(&bus, 0xE000ED34u, 4u, 0x11111111u)) return 1;
+    if (!mmio_bus_write(&bus, 0xE000ED38u, 4u, 0x22222222u)) return 1;
+    if (!mmio_bus_write(&bus, 0xE000ED28u, 4u, 0u)) return 1;
+    scs.cfsr_s = 0x00000003u;
+
+    if (!mmio_bus_write(&bus, 0xE002ED34u, 4u, 0x33333333u)) return 1;
+    if (!mmio_bus_write(&bus, 0xE002ED38u, 4u, 0x44444444u)) return 1;
+    if (!mmio_bus_write(&bus, 0xE002ED28u, 4u, 0u)) return 1;
+    scs.cfsr_ns = 0x00010080u;
+
+    if (!mmio_bus_read(&bus, 0xE000ED28u, 4u, &val) || val != 0x00000003u) return 1;
+    if (!mmio_bus_read(&bus, 0xE000ED34u, 4u, &val) || val != 0x11111111u) return 1;
+    if (!mmio_bus_read(&bus, 0xE000ED38u, 4u, &val) || val != 0x22222222u) return 1;
+
+    if (!mmio_bus_read(&bus, 0xE002ED28u, 4u, &val) || val != 0x00010080u) return 1;
+    if (!mmio_bus_read(&bus, 0xE002ED34u, 4u, &val) || val != 0x33333333u) return 1;
+    if (!mmio_bus_read(&bus, 0xE002ED38u, 4u, &val) || val != 0x44444444u) return 1;
+
+    if (!mmio_bus_write(&bus, 0xE002ED28u, 4u, 0x00000080u)) return 1;
+    if (!mmio_bus_read(&bus, 0xE002ED28u, 4u, &val) || val != 0x00010000u) return 1;
+    if (!mmio_bus_read(&bus, 0xE000ED28u, 4u, &val) || val != 0x00000003u) return 1;
+
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
@@ -192,6 +230,7 @@ int main(void)
         { "mpu_bank", test_mpu_bank },
         { "sau_secure_only", test_sau_secure_only },
         { "sau_region_bank", test_sau_region_bank },
+        { "fault_regs_banked", test_fault_regs_banked },
     };
     int failures = 0;
     int i;

@@ -139,6 +139,28 @@ static int test_higher_priority_pending_irq_can_preempt_active_irq(void)
     return 0;
 }
 
+static int test_equal_group_priority_subpriority_cannot_preempt(void)
+{
+    struct mm_nvic nvic;
+    struct mm_cpu cpu;
+    struct mm_scs scs;
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_HANDLER;
+    cpu.xpsr = 17u; /* IRQ1 active */
+    scs.aircr_s = (1u << 8); /* PRIGROUP=1 so subpriority bits exist */
+    mm_nvic_init(&nvic);
+    mm_nvic_set_enable(&nvic, 1u, MM_TRUE);
+    mm_nvic_set_enable(&nvic, 2u, MM_TRUE);
+    mm_nvic_set_active(&nvic, 1u, MM_TRUE);
+    mm_nvic_set_pending(&nvic, 2u, MM_TRUE);
+    nvic.priority[1] = 0x22u;
+    nvic.priority[2] = 0x20u;
+    if (mm_nvic_select_ex(&nvic, &cpu, &scs) != -1) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
@@ -148,6 +170,7 @@ int main(void)
         { "prigroup_masks_subpriority", test_prigroup_masks_subpriority },
         { "lower_priority_pending_irq_cannot_preempt_active_irq", test_lower_priority_pending_irq_cannot_preempt_active_irq },
         { "higher_priority_pending_irq_can_preempt_active_irq", test_higher_priority_pending_irq_can_preempt_active_irq },
+        { "equal_group_priority_subpriority_cannot_preempt", test_equal_group_priority_subpriority_cannot_preempt },
     };
     int failures = 0;
     int i;

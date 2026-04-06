@@ -236,6 +236,9 @@ static mm_bool scs_read_nvic(struct mm_nvic *nvic, enum mm_sec_state eff_sec,
 static mm_u32 scs_read_scb_reg(const struct mm_scs_mmio *ctx, struct mm_scs *scs, enum mm_sec_state eff_sec, mm_u32 reg_off)
 {
     mm_u32 val = 0;
+    const mm_u32 *cfsr = mm_scs_cfsr_ptr_const(scs, eff_sec);
+    const mm_u32 *mmfar = mm_scs_mmfar_ptr_const(scs, eff_sec);
+    const mm_u32 *bfar = mm_scs_bfar_ptr_const(scs, eff_sec);
 
     switch (reg_off) {
     case 0x0: val = scs->cpuid; break;
@@ -252,11 +255,11 @@ static mm_u32 scs_read_scb_reg(const struct mm_scs_mmio *ctx, struct mm_scs *scs
     case 0x1C: val = (eff_sec == MM_NONSECURE) ? scs->shpr2_ns : scs->shpr2_s; break;
     case 0x20: val = (eff_sec == MM_NONSECURE) ? scs->shpr3_ns : scs->shpr3_s; break;
     case 0x24: val = (eff_sec == MM_NONSECURE) ? scs->shcsr_ns : scs->shcsr_s; break;
-    case 0x28: val = scs->cfsr; break;
+    case 0x28: val = *cfsr; break;
     case 0x2C: val = scs->hfsr; break;
     case 0x30: val = scs->dfsr; break;
-    case 0x34: val = scs->mmfar; break;
-    case 0x38: val = scs->bfar; break;
+    case 0x34: val = *mmfar; break;
+    case 0x38: val = *bfar; break;
     case 0x3C: val = scs->afsr; break;
     case 0x88:
         val = (eff_sec == MM_NONSECURE) ? scs->cpacr_ns : scs->cpacr_s;
@@ -465,6 +468,10 @@ static mm_bool scs_write_nvic(struct mm_nvic *nvic, enum mm_sec_state eff_sec,
 
 static mm_bool scs_write_scb(struct mm_scs_mmio *ctx, struct mm_scs *scs, enum mm_sec_state eff_sec, mm_u32 reg_off, mm_u32 value)
 {
+    mm_u32 *cfsr = mm_scs_cfsr_ptr(scs, eff_sec);
+    mm_u32 *mmfar = mm_scs_mmfar_ptr(scs, eff_sec);
+    mm_u32 *bfar = mm_scs_bfar_ptr(scs, eff_sec);
+
     switch (reg_off) {
     case 0x4: {
         mm_u32 v = value;
@@ -516,11 +523,11 @@ static mm_bool scs_write_scb(struct mm_scs_mmio *ctx, struct mm_scs *scs, enum m
         if (eff_sec == MM_NONSECURE) scs->shcsr_ns = value;
         else scs->shcsr_s = value;
         return MM_TRUE;
-    case 0x28: scs->cfsr &= ~value; return MM_TRUE;
+    case 0x28: *cfsr &= ~value; return MM_TRUE;
     case 0x2C: scs->hfsr = value; return MM_TRUE;
     case 0x30: scs->dfsr = value; return MM_TRUE;
-    case 0x34: scs->mmfar = value; return MM_TRUE;
-    case 0x38: scs->bfar = value; return MM_TRUE;
+    case 0x34: *mmfar = value; return MM_TRUE;
+    case 0x38: *bfar = value; return MM_TRUE;
     case 0x3C: scs->afsr = value; return MM_TRUE;
     default:
         break;
@@ -583,11 +590,14 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
     scs->shpr1_s = scs->shpr2_s = scs->shpr3_s = 0;
     scs->shpr1_ns = scs->shpr2_ns = scs->shpr3_ns = 0;
     scs->shcsr_s = scs->shcsr_ns = 0;
-    scs->cfsr = 0;
+    scs->cfsr_s = 0;
+    scs->cfsr_ns = 0;
     scs->hfsr = 0;
     scs->dfsr = 0;
-    scs->mmfar = 0;
-    scs->bfar = 0;
+    scs->mmfar_s = 0;
+    scs->mmfar_ns = 0;
+    scs->bfar_s = 0;
+    scs->bfar_ns = 0;
     scs->afsr = 0;
     scs->cpacr_s = 0;
     scs->cpacr_ns = 0;

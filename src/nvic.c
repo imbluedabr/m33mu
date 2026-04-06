@@ -316,8 +316,9 @@ static mm_bool irq_can_preempt_current(const struct mm_nvic *nvic,
     prigroup = prigroup_for_target(scs, cpu->sec_state);
     current_preempt = preempt_priority_value(current_prio, prigroup);
     irq_preempt = preempt_priority_value(irq_prio, prigroup);
-    return (irq_preempt < current_preempt) ||
-           (irq_preempt == current_preempt && irq_prio < current_prio) ? MM_TRUE : MM_FALSE;
+    (void)irq_prio;
+    (void)current_prio;
+    return (irq_preempt < current_preempt) ? MM_TRUE : MM_FALSE;
 }
 
 static mm_bool basepri_blocks_target(const struct mm_cpu *cpu,

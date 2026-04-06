@@ -110,6 +110,7 @@ static mm_bool svc_stack_trace_enabled(void)
 #define UFSR_DIVBYZERO (1u << 25)
 #define UFSR_NOCP (1u << 19)
 #define UFSR_STKOF (1u << 20)
+#define UFSR_UNALIGNED (1u << 24)
 
 #define CPACR_CP10_SHIFT 20u
 #define CPACR_CP11_SHIFT 22u
@@ -1772,9 +1773,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_bool carry_out = carry_in;
                                                 mm_u32 res = mm_shift_c_imm(val, 3u, (mm_u8)sh, carry_in, &carry_out);
                                                 mm_bool setflags = MM_FALSE;
-                                                if (d.len == 2u) {
-                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
-                                                } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
+                                                if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
                                                     setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                 }
                                                 cpu.r[d.rd] = res;
@@ -2892,6 +2891,9 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_bool disable = (d.imm & 0x10u) != 0u;
                                             mm_bool affect_f = (d.imm & 0x01u) != 0u;
                                             mm_bool affect_i = (d.imm & 0x02u) != 0u;
+                                            if (cpu.mode == MM_THREAD && !mm_cpu_get_privileged(&cpu)) {
+                                                break;
+                                            }
                                             if (affect_i) {
                                                 if (cpu.sec_state == MM_NONSECURE) {
                                                     cpu.primask_ns = disable ? 1u : 0u;
@@ -3653,6 +3655,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                              mm_u32 imm = d.imm & 0x3ffu; /* lower bits hold imm<<2 */
                                              mm_u32 base = cpu.r[d.rn];
                                              mm_u32 addr = p ? (u ? (base + imm) : (base - imm)) : base;
+                                             if ((addr & 0x3u) != 0u) {
+                                                 if (!raise_usage_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, UFSR_UNALIGNED)) done = MM_TRUE;
+                                                 return MM_EXEC_CONTINUE;
+                                             }
                                              if (load) {
                                                  mm_u32 v1 = 0;
                                                  mm_u32 v2 = 0;
@@ -3723,6 +3729,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 start = base - 4u * count;
                                             } else { /* IA/EA default */
                                                 start = base;
+                                            }
+                                            if ((start & 0x3u) != 0u) {
+                                                if (!raise_usage_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, UFSR_UNALIGNED)) done = MM_TRUE;
+                                                return MM_EXEC_CONTINUE;
                                             }
 
                                             if (stack_trace_enabled() && d.rn == 13u) {

@@ -338,6 +338,8 @@ static void record_securefault(struct mm_prot_ctx *ctx, enum mm_access_type type
 static void record_memfault(struct mm_prot_ctx *ctx, enum mm_sec_state sec, enum mm_access_type type, mm_u32 addr)
 {
     mm_u32 bits;
+    mm_u32 *cfsr;
+    mm_u32 *mmfar;
     enum mm_sau_attr attr;
 
     if (ctx == 0 || ctx->scs == 0) {
@@ -347,9 +349,11 @@ static void record_memfault(struct mm_prot_ctx *ctx, enum mm_sec_state sec, enum
     attr = mm_sau_attr_for_addr(ctx->scs, addr);
     bits = (type == MM_ACCESS_EXEC) ? 0x1u : 0x2u; /* IACCVIOL or DACCVIOL */
     bits |= (1u << 7); /* MMARVALID */
-    ctx->scs->cfsr &= ~0x00010000u; /* clear UNDEFINSTR if set */
-    ctx->scs->cfsr |= bits;
-    ctx->scs->mmfar = addr;
+    cfsr = mm_scs_cfsr_ptr(ctx->scs, sec);
+    mmfar = mm_scs_mmfar_ptr(ctx->scs, sec);
+    *cfsr &= ~0x00010000u; /* clear UNDEFINSTR if set */
+    *cfsr |= bits;
+    *mmfar = addr;
     if (sec == MM_NONSECURE) {
         ctx->scs->shcsr_ns |= 0x1u; /* MEMFAULTACT */
     } else {
@@ -362,8 +366,8 @@ static void record_memfault(struct mm_prot_ctx *ctx, enum mm_sec_state sec, enum
                (unsigned long)addr,
                (int)attr,
                (unsigned long)ctx->scs->sau_ctrl,
-               (unsigned long)ctx->scs->cfsr,
-               (unsigned long)ctx->scs->mmfar);
+               (unsigned long)*cfsr,
+               (unsigned long)*mmfar);
     }
 }
 

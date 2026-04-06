@@ -168,7 +168,7 @@ static mm_u64 deadline_ns(mm_u64 vcycles, mm_u64 host0_ns, mm_u64 cpu_hz)
 
 static int load_file_at(const char *path, mm_u8 *dst, size_t max_len, mm_u32 offset, size_t *loaded);
 void mm_system_request_reset(void);
-static void record_bus_fault(struct mm_scs *scs, mm_u32 addr, mm_u32 bfsr_bits);
+static void record_bus_fault(struct mm_scs *scs, enum mm_sec_state sec, mm_u32 addr, mm_u32 bfsr_bits);
 static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struct mm_scs *scs, mm_u32 fault_pc, mm_u32 fault_xpsr);
 static mm_bool fpu_access_allowed(const struct mm_cpu *cpu, const struct mm_scs *scs);
 static mm_u32 shcsr_active_mask_for_exc(mm_u32 exc_num);
@@ -2576,12 +2576,42 @@ static mm_bool fpu_lazy_preserve_enabled(const struct mm_cpu *cpu, const struct 
     return (scs->fpccr & FPCCR_LSPEN) != 0u ? MM_TRUE : MM_FALSE;
 }
 
+static void save_and_clear_secure_callee_regs(struct mm_cpu *cpu, int depth)
+{
+    int i;
+
+    if (cpu == 0 || depth < 0 || depth >= MM_EXC_STACK_MAX) {
+        return;
+    }
+    for (i = 0; i < 8; ++i) {
+        cpu->exc_callee_saved[depth][i] = cpu->r[4 + i];
+        cpu->r[4 + i] = 0u;
+    }
+    cpu->exc_cross_domain[depth] = MM_TRUE;
+}
+
+static void restore_secure_callee_regs(struct mm_cpu *cpu, int depth)
+{
+    int i;
+
+    if (cpu == 0 || depth < 0 || depth >= MM_EXC_STACK_MAX ||
+        !cpu->exc_cross_domain[depth]) {
+        return;
+    }
+    for (i = 0; i < 8; ++i) {
+        cpu->r[4 + i] = cpu->exc_callee_saved[depth][i];
+        cpu->exc_callee_saved[depth][i] = 0u;
+    }
+    cpu->exc_cross_domain[depth] = MM_FALSE;
+}
+
 static mm_u32 shcsr_active_mask_for_exc(mm_u32 exc_num)
 {
     switch (exc_num) {
         case MM_VECT_MEMMANAGE: return (1u << 0);
         case MM_VECT_BUSFAULT: return (1u << 1);
         case MM_VECT_USAGEFAULT: return (1u << 3);
+        case MM_VECT_SECUREFAULT: return (1u << 4);
         case MM_VECT_SVCALL: return (1u << 7);
         case MM_VECT_PENDSV: return (1u << 10);
         case MM_VECT_SYSTICK: return (1u << 11);
@@ -2876,21 +2906,9 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
         dump_exc_stack_state(cpu, "EXC_STACK_POP_POST");
     }
     if (info.use_psp) {
-        mm_u32 live_psp = (info.target_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s;
-        if (live_psp != 0u) {
-            sp = live_psp;
-        } else {
-            sp = (cpu->exc_depth < MM_EXC_STACK_MAX) ? cpu->exc_sp[cpu->exc_depth]
-                                                     : ((info.target_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s);
-        }
+        sp = (info.target_sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s;
     } else {
-        mm_u32 live_msp = (info.target_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
-        if (live_msp != 0u) {
-            sp = live_msp;
-        } else {
-            sp = (cpu->exc_depth < MM_EXC_STACK_MAX) ? cpu->exc_sp[cpu->exc_depth]
-                                                     : ((info.target_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s);
-        }
+        sp = (info.target_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
     }
     if (stack_trace_enabled() || svc_stack_trace_enabled()) {
         printf("[EXC_UNSTACK_PRE] exc_ret=0x%08lx use_psp=%d sp_start=0x%08lx msp_ns=0x%08lx psp_ns=0x%08lx\n",
@@ -2937,16 +2955,16 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
         if (fp_saved) {
             for (i = 0; i < 16; ++i) {
                 if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4u), 4u, &cpu->s[i])) {
-                    record_bus_fault(scs, sp + (mm_u32)(i * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    record_bus_fault(scs, info.target_sec, sp + (mm_u32)(i * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                     return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
                 }
             }
             if (!mm_memmap_read(map, info.target_sec, sp + (16u * 4u), 4u, &cpu->fpscr)) {
-                record_bus_fault(scs, sp + (16u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                record_bus_fault(scs, info.target_sec, sp + (16u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
             }
             if (!mm_memmap_read(map, info.target_sec, sp + (17u * 4u), 4u, &fp_reserved)) {
-                record_bus_fault(scs, sp + (17u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                record_bus_fault(scs, info.target_sec, sp + (17u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
             }
             (void)fp_reserved;
@@ -2963,7 +2981,7 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     }
     for (i = 0; i < 8; ++i) {
         if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4), 4u, &frame[i])) {
-            record_bus_fault(scs, sp + (mm_u32)(i * 4), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+            record_bus_fault(scs, info.target_sec, sp + (mm_u32)(i * 4), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
             return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
         }
     }
@@ -3071,13 +3089,13 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
         if (info.return_sec == MM_NONSECURE) {
             if (info.use_psp) {
                 cpu->control_ns |= 0x2u;
-            } else if ((cpu->control_ns & 0x2u) == 0u) {
+            } else {
                 cpu->control_ns &= ~0x2u;
             }
         } else {
             if (info.use_psp) {
                 cpu->control_s |= 0x2u;
-            } else if ((cpu->control_s & 0x2u) == 0u) {
+            } else {
                 cpu->control_s &= ~0x2u;
             }
         }
@@ -3109,6 +3127,7 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
         else cpu->faultmask_s = 0u;
     }
     if (cpu->exc_depth < MM_EXC_STACK_MAX) {
+        restore_secure_callee_regs(cpu, cpu->exc_depth);
         cpu->exc_fp_reserved[cpu->exc_depth] = MM_FALSE;
         cpu->exc_fp_saved[cpu->exc_depth] = MM_FALSE;
     }
@@ -3277,8 +3296,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             mm_u8 pend_prio = system_exc_priority(cpu, scs, MM_VECT_PENDSV);
             mm_u8 pend_preempt = preempt_priority_value(pend_prio, aircr_prigroup_for_sec(scs, cpu->sec_state));
             if (current_execution_priority(cpu, scs, nvic, &current_preempt, &current_raw) &&
-                (pend_preempt > current_preempt ||
-                 (pend_preempt == current_preempt && pend_prio >= current_raw))) {
+                pend_preempt >= current_preempt) {
                 result = MM_TRUE;
                 goto out;
             }
@@ -3304,8 +3322,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             mm_u8 pend_prio = system_exc_priority(cpu, scs, MM_VECT_SYSTICK);
             mm_u8 pend_preempt = preempt_priority_value(pend_prio, aircr_prigroup_for_sec(scs, cpu->sec_state));
             if (current_execution_priority(cpu, scs, nvic, &current_preempt, &current_raw) &&
-                (pend_preempt > current_preempt ||
-                 (pend_preempt == current_preempt && pend_prio >= current_raw))) {
+                pend_preempt >= current_preempt) {
                 result = MM_TRUE;
                 goto out;
             }
@@ -3564,7 +3581,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     if (sec == MM_SECURE && (scs->aircr_s & AIRCR_BFHFNMINS) != 0u) {
         handler_sec = MM_NONSECURE;
     }
-    stack_sec = handler_sec;
+    stack_sec = sec;
     scs->hfsr |= (1u << 30); /* FORCED */
     (void)mm_exception_read_handler(map, scs, handler_sec, MM_VECT_HARDFAULT, &handler);
 
@@ -3638,7 +3655,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         for (i = 0; i < 8; ++i) {
             if (!mm_memmap_write(map, stack_sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
                 printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
-                record_bus_fault(scs, sp_frame + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                record_bus_fault(scs, sec, sp_frame + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return MM_FALSE;
             }
         }
@@ -3648,16 +3665,16 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
                 if (!mm_memmap_write(map, stack_sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
                     printf("HardFault: FP stacking failed at 0x%08lx\n",
                            (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
-                    record_bus_fault(scs, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    record_bus_fault(scs, sec, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                     return MM_FALSE;
                 }
             }
             if (!mm_memmap_write(map, stack_sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
-                record_bus_fault(scs, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                record_bus_fault(scs, sec, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return MM_FALSE;
             }
             if (!mm_memmap_write(map, stack_sec, sp_fp + (17u * 4u), 4u, 0u)) {
-                record_bus_fault(scs, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                record_bus_fault(scs, sec, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return MM_FALSE;
             }
             scs->fpcar = sp_fp;
@@ -3676,6 +3693,12 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
         cpu->exc_sec[cpu->exc_depth] = stack_sec;
         cpu->exc_num[cpu->exc_depth] = (mm_u16)MM_VECT_HARDFAULT;
+        cpu->exc_fp_reserved[cpu->exc_depth] = fp_stack;
+        cpu->exc_fp_saved[cpu->exc_depth] = fp_stack;
+        cpu->exc_cross_domain[cpu->exc_depth] = MM_FALSE;
+        if (sec == MM_SECURE && handler_sec == MM_NONSECURE) {
+            save_and_clear_secure_callee_regs(cpu, cpu->exc_depth);
+        }
         cpu->exc_depth++;
     }
     if (stack_trace_enabled()) {
@@ -3698,14 +3721,19 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     return MM_TRUE;
 }
 
-static void record_bus_fault(struct mm_scs *scs, mm_u32 addr, mm_u32 bfsr_bits)
+static void record_bus_fault(struct mm_scs *scs, enum mm_sec_state sec, mm_u32 addr, mm_u32 bfsr_bits)
 {
+    mm_u32 *cfsr;
+    mm_u32 *bfar;
+
     if (scs == 0) {
         return;
     }
-    scs->cfsr |= bfsr_bits;
+    cfsr = mm_scs_cfsr_ptr(scs, sec);
+    bfar = mm_scs_bfar_ptr(scs, sec);
+    *cfsr |= bfsr_bits;
     if ((bfsr_bits & BFSR_BFARVALID) != 0u) {
-        scs->bfar = addr;
+        *bfar = addr;
     }
 }
 
@@ -3723,6 +3751,8 @@ static mm_bool raise_mem_fault(struct mm_cpu *cpu, struct mm_memmap *map, struct
 {
     enum mm_sec_state sec;
     mm_u32 bits = is_exec ? 0x1u : 0x2u; /* IACCVIOL / DACCVIOL */
+    mm_u32 *cfsr;
+    mm_u32 *mmfar;
     sec = cpu->sec_state;
     printf("[MEMFAULT] pc=0x%08lx addr=0x%08lx r0=%08lx r1=%08lx r2=%08lx r3=%08lx "
            "r4=%08lx r5=%08lx r6=%08lx r7=%08lx r12=%08lx sp=%08lx lr=%08lx xpsr=%08lx\n",
@@ -3752,9 +3782,11 @@ static mm_bool raise_mem_fault(struct mm_cpu *cpu, struct mm_memmap *map, struct
     }
 
     bits |= (1u << 7); /* MMARVALID */
-    scs->cfsr |= bits;
-    scs->mmfar = addr;
-    if ((scs->cfsr & 0x3u) == 0x3u) {
+    cfsr = mm_scs_cfsr_ptr(scs, sec);
+    mmfar = mm_scs_mmfar_ptr(scs, sec);
+    *cfsr |= bits;
+    *mmfar = addr;
+    if ((*cfsr & 0x3u) == 0x3u) {
         /* Dump SAU state when both IACCVIOL and DACCVIOL are set. */
 #define SAU_CTRL_ENABLE 0x1u
 #define SAU_CTRL_ALLNS  0x2u
@@ -3788,18 +3820,15 @@ static mm_bool raise_mem_fault(struct mm_cpu *cpu, struct mm_memmap *map, struct
 #undef SAU_RLAR_ENABLE
 #undef SAU_RLAR_NSC
     }
-    if (sec == MM_NONSECURE) {
-        shcsr_set_exception_active(scs, MM_NONSECURE, MM_VECT_MEMMANAGE);
-    } else {
-        shcsr_set_exception_active(scs, MM_SECURE, MM_VECT_MEMMANAGE);
-    }
     /* Deliver MemManage if enabled, otherwise escalate to HardFault. */
     if (sec == MM_NONSECURE) {
         if ((scs->shcsr_ns & (1u << 16)) != 0u) {
+            shcsr_set_exception_active(scs, MM_NONSECURE, MM_VECT_MEMMANAGE);
             return enter_exception(cpu, map, scs, MM_VECT_MEMMANAGE, fault_pc, fault_xpsr);
         }
     } else {
         if ((scs->shcsr_s & (1u << 16)) != 0u) {
+            shcsr_set_exception_active(scs, MM_SECURE, MM_VECT_MEMMANAGE);
             return enter_exception(cpu, map, scs, MM_VECT_MEMMANAGE, fault_pc, fault_xpsr);
         }
     }
@@ -3822,6 +3851,7 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     mm_bool fp_stack;
     int i;
     enum mm_sec_state sec;
+    mm_u32 *cfsr;
 
     if (cpu == 0 || map == 0 || scs == 0) {
         return MM_FALSE;
@@ -3836,7 +3866,17 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
                (unsigned long)fault_xpsr);
     }
     sec = cpu->sec_state;
-    scs->cfsr |= ufsr_bits;
+    cfsr = mm_scs_cfsr_ptr(scs, sec);
+    *cfsr |= ufsr_bits;
+    if (sec == MM_NONSECURE) {
+        if ((scs->shcsr_ns & (1u << 18)) == 0u) {
+            return raise_hard_fault(cpu, map, scs, fault_pc, fault_xpsr);
+        }
+    } else {
+        if ((scs->shcsr_s & (1u << 18)) == 0u) {
+            return raise_hard_fault(cpu, map, scs, fault_pc, fault_xpsr);
+        }
+    }
     if (sec == MM_NONSECURE) {
         shcsr_set_exception_active(scs, MM_NONSECURE, MM_VECT_USAGEFAULT);
     } else {
@@ -4046,6 +4086,9 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     case MM_VECT_SVCALL:
         shcsr_set_exception_active(scs, sec, MM_VECT_SVCALL);
         break;
+    case MM_VECT_SECUREFAULT:
+        shcsr_set_exception_active(scs, sec, MM_VECT_SECUREFAULT);
+        break;
     case MM_VECT_PENDSV:
         scs->pend_sv = MM_FALSE;
         shcsr_set_exception_active(scs, sec, MM_VECT_PENDSV);
@@ -4141,11 +4184,16 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
         {
             mm_u32 sp_frame = sp - 32u;
             mm_u32 sp_fp = sp_frame;
+            mm_u32 splim = use_psp_entry ? ((sec == MM_NONSECURE) ? cpu->psplim_ns : cpu->psplim_s)
+                                         : ((sec == MM_NONSECURE) ? cpu->msplim_ns : cpu->msplim_s);
+            if (splim != 0u && sp_frame < splim) {
+                return raise_usage_fault(cpu, map, scs, return_pc, xpsr_in, UFSR_STKOF);
+            }
             for (i = 0; i < 8; ++i) {
                 if (!mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
                     printf("HardFault: stacking failed at 0x%08lx\n",
                            (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
-                    record_bus_fault(scs, sp_frame + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    record_bus_fault(scs, sec, sp_frame + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                     return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
                 }
             }
@@ -4156,16 +4204,16 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
                         if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
                             printf("HardFault: FP stacking failed at 0x%08lx\n",
                                    (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
-                            record_bus_fault(scs, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                            record_bus_fault(scs, sec, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                             return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
                         }
                     }
                     if (!mm_memmap_write(map, sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
-                        record_bus_fault(scs, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                        record_bus_fault(scs, sec, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                         return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
                     }
                     if (!mm_memmap_write(map, sec, sp_fp + (17u * 4u), 4u, 0u)) {
-                        record_bus_fault(scs, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                        record_bus_fault(scs, sec, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                         return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
                     }
                 } else {
@@ -4182,15 +4230,19 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
         } else {
             if (sec == MM_NONSECURE) cpu->msp_ns = sp; else cpu->msp_s = sp;
         }
-        if (cpu->exc_depth < MM_EXC_STACK_MAX) {
-            cpu->exc_sp[cpu->exc_depth] = sp;
-            cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
-            cpu->exc_sec[cpu->exc_depth] = sec;
-            cpu->exc_num[cpu->exc_depth] = (mm_u16)exc_num;
-            cpu->exc_fp_reserved[cpu->exc_depth] = fp_stack;
-            cpu->exc_fp_saved[cpu->exc_depth] = fp_stack && !fp_lazy;
-            cpu->exc_depth++;
+    if (cpu->exc_depth < MM_EXC_STACK_MAX) {
+        cpu->exc_sp[cpu->exc_depth] = sp;
+        cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
+        cpu->exc_sec[cpu->exc_depth] = sec;
+        cpu->exc_num[cpu->exc_depth] = (mm_u16)exc_num;
+        cpu->exc_fp_reserved[cpu->exc_depth] = fp_stack;
+        cpu->exc_fp_saved[cpu->exc_depth] = fp_stack && !fp_lazy;
+        cpu->exc_cross_domain[cpu->exc_depth] = MM_FALSE;
+        if (sec == MM_SECURE && handler_sec == MM_NONSECURE) {
+            save_and_clear_secure_callee_regs(cpu, cpu->exc_depth);
         }
+        cpu->exc_depth++;
+    }
     }
     /* Exception handlers always use the handler security state's MSP. */
     cpu->r[13] = (handler_sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
@@ -5800,6 +5852,7 @@ int main(int argc, char **argv)
                 /* Handle pending system exceptions (SysTick, PendSV). */
 handle_pending:
                 if (scs.pend_sv &&
+                    !primask_blocks_current(&cpu) &&
                     !faultmask_blocks_current(&cpu) &&
                     !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_PENDSV)) {
                     mm_u8 current_preempt = 0u;
@@ -5807,8 +5860,7 @@ handle_pending:
                     mm_u8 pend_prio = system_exc_priority(&cpu, &scs, MM_VECT_PENDSV);
                     mm_u8 pend_preempt = preempt_priority_value(pend_prio, aircr_prigroup_for_sec(&scs, cpu.sec_state));
                     if (current_execution_priority(&cpu, &scs, &nvic, &current_preempt, &current_raw) &&
-                        (pend_preempt > current_preempt ||
-                         (pend_preempt == current_preempt && pend_prio >= current_raw))) {
+                        pend_preempt >= current_preempt) {
                         goto check_systick_pending;
                     }
                     if (!enter_exception(&cpu, &map, &scs, MM_VECT_PENDSV, cpu.r[15] & ~1u, cpu.xpsr)) {
@@ -5820,6 +5872,7 @@ handle_pending:
                 }
 check_systick_pending:
                 if (scs.pend_st &&
+                    !primask_blocks_current(&cpu) &&
                     !faultmask_blocks_current(&cpu) &&
                     !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_SYSTICK)) {
                     mm_u8 current_preempt = 0u;
@@ -5827,8 +5880,7 @@ check_systick_pending:
                     mm_u8 pend_prio = system_exc_priority(&cpu, &scs, MM_VECT_SYSTICK);
                     mm_u8 pend_preempt = preempt_priority_value(pend_prio, aircr_prigroup_for_sec(&scs, cpu.sec_state));
                     if (current_execution_priority(&cpu, &scs, &nvic, &current_preempt, &current_raw) &&
-                        (pend_preempt > current_preempt ||
-                         (pend_preempt == current_preempt && pend_prio >= current_raw))) {
+                        pend_preempt >= current_preempt) {
                         goto check_irq_pending;
                     }
                     if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {

@@ -1545,12 +1545,16 @@ static struct mm_decoded decode_32(mm_u32 insn)
     if ((insn & 0xffef8000u) == 0xea6f0000u) {
         mm_u8 rd = (mm_u8)((insn >> 8) & 0x0fu);
         mm_u8 rm = (mm_u8)(insn & 0x0fu);
+        mm_u8 imm3 = (mm_u8)((insn >> 12) & 0x7u);
+        mm_u8 imm2 = (mm_u8)((insn >> 6) & 0x3u);
+        mm_u8 type = (mm_u8)((insn >> 4) & 0x3u);
         if (rd == 15u || rm == 15u) {
             return d;
         }
         d.kind = MM_OP_MVN_REG;
         d.rd = rd;
         d.rm = rm;
+        d.imm = (mm_u32)((type << 5) | ((imm3 << 2) | imm2));
         d.undefined = MM_FALSE;
         return d;
     }
