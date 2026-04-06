@@ -47,6 +47,9 @@ struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
     if ((value & 0xffffff00u) != 0xffffff00u) {
         return info;
     }
+    if ((value & (1u << 1)) != 0u) {
+        return info;
+    }
 
     /* Armv8-M EXC_RETURN: bit6 selects stack security, bit2 selects PSP vs MSP,
        bit4=1 means basic frame (no FP context). */

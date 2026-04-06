@@ -55,6 +55,14 @@ static int test_invalid(void)
     return 0;
 }
 
+static int test_invalid_reserved_bit1(void)
+{
+    struct mm_exc_return_info info;
+    info = mm_exc_return_decode(0xFFFFFFFEu);
+    if (info.valid) return 1;
+    return 0;
+}
+
 static int test_es_distinct_from_stack_security(void)
 {
     struct mm_exc_return_info info;
@@ -73,6 +81,7 @@ int main(void)
         { "basic_decode", test_basic_decode },
         { "nonsecure_target", test_nonsecure_target },
         { "es_distinct_from_stack_security", test_es_distinct_from_stack_security },
+        { "invalid_reserved_bit1", test_invalid_reserved_bit1 },
         { "invalid", test_invalid },
     };
     int failures = 0;
