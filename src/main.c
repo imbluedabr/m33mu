@@ -2349,6 +2349,17 @@ static mm_bool primask_blocks_current(const struct mm_cpu *cpu)
     return cpu->primask_s != 0u;
 }
 
+static mm_bool faultmask_blocks_current(const struct mm_cpu *cpu)
+{
+    if (cpu == 0) {
+        return MM_FALSE;
+    }
+    if (cpu->sec_state == MM_NONSECURE) {
+        return cpu->faultmask_ns != 0u;
+    }
+    return cpu->faultmask_s != 0u;
+}
+
 static mm_u8 basepri_for_sec(const struct mm_cpu *cpu, enum mm_sec_state sec)
 {
     if (cpu == 0) {
@@ -2356,6 +2367,29 @@ static mm_u8 basepri_for_sec(const struct mm_cpu *cpu, enum mm_sec_state sec)
     }
     return (sec == MM_NONSECURE) ? (mm_u8)(cpu->basepri_ns & 0xFFu)
                                  : (mm_u8)(cpu->basepri_s & 0xFFu);
+}
+
+static mm_u8 aircr_prigroup_for_sec(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    mm_u32 aircr;
+    if (scs == 0) {
+        return 0u;
+    }
+    aircr = (sec == MM_NONSECURE) ? scs->aircr_ns : scs->aircr_s;
+    return (mm_u8)((aircr >> 8) & 0x7u);
+}
+
+static mm_u8 preempt_priority_value(mm_u8 prio, mm_u8 prigroup)
+{
+    mm_u8 sub_bits;
+    if (prigroup > 7u) {
+        prigroup = 7u;
+    }
+    sub_bits = (mm_u8)(prigroup + 1u);
+    if (sub_bits >= 8u) {
+        return 0u;
+    }
+    return (mm_u8)(prio & (mm_u8)(0xFFu << sub_bits));
 }
 
 static mm_u8 system_exc_priority(const struct mm_cpu *cpu,
@@ -2385,6 +2419,7 @@ static mm_bool basepri_blocks_system_exc(const struct mm_cpu *cpu,
 {
     mm_u8 basepri;
     mm_u8 prio;
+    mm_u8 prigroup;
     if (cpu == 0 || scs == 0) {
         return MM_FALSE;
     }
@@ -2396,7 +2431,9 @@ static mm_bool basepri_blocks_system_exc(const struct mm_cpu *cpu,
     if (prio == 0u) {
         return MM_FALSE;
     }
-    return (prio >= basepri) ? MM_TRUE : MM_FALSE;
+    prigroup = aircr_prigroup_for_sec(scs, cpu->sec_state);
+    return preempt_priority_value(prio, prigroup) >=
+           preempt_priority_value(basepri, prigroup) ? MM_TRUE : MM_FALSE;
 }
 
 static mm_bool prot_mux_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_state sec, mm_u32 addr, mm_u32 size_bytes)
@@ -2424,6 +2461,9 @@ static mm_bool allow_system_reset(const struct mm_target_cfg *cfg, const char *c
 #define CPACR_CP10_SHIFT 20u
 #define CPACR_CP11_SHIFT 22u
 #define AIRCR_BFHFNMINS (1u << 13)
+#define FPCCR_LSPACT (1u << 0)
+#define FPCCR_LSPEN  (1u << 30)
+#define FPCCR_ASPEN  (1u << 31)
 
 static mm_u32 cpacr_for_sec(const struct mm_scs *scs, enum mm_sec_state sec)
 {
@@ -2469,6 +2509,22 @@ static mm_bool fpu_stack_active(const struct mm_cpu *cpu, const struct mm_scs *s
     return cpu->fp_active ? MM_TRUE : MM_FALSE;
 }
 
+static mm_bool fpu_auto_preserve_enabled(const struct mm_cpu *cpu, const struct mm_scs *scs)
+{
+    if (!fpu_stack_active(cpu, scs)) {
+        return MM_FALSE;
+    }
+    return (scs->fpccr & FPCCR_ASPEN) != 0u ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool fpu_lazy_preserve_enabled(const struct mm_cpu *cpu, const struct mm_scs *scs)
+{
+    if (!fpu_auto_preserve_enabled(cpu, scs)) {
+        return MM_FALSE;
+    }
+    return (scs->fpccr & FPCCR_LSPEN) != 0u ? MM_TRUE : MM_FALSE;
+}
+
 static mm_u32 exc_return_encode(enum mm_sec_state sec, mm_bool use_psp, mm_bool to_thread, mm_bool basic_frame)
 {
     /* EXC_RETURN encodings (Armv8-M, DDI0553):
@@ -2499,12 +2555,68 @@ static mm_u32 exc_return_encode(enum mm_sec_state sec, mm_bool use_psp, mm_bool 
     return base;
 }
 
+static mm_bool tailchain_select_pending(const struct mm_cpu *cpu,
+                                        const struct mm_scs *scs,
+                                        mm_u32 *exc_num_out,
+                                        enum mm_sec_state *handler_sec_out,
+                                        mm_bool *is_irq_out,
+                                        mm_u32 *irq_num_out)
+{
+    struct mm_nvic *nvic;
+    enum mm_sec_state irq_sec = MM_SECURE;
+    int pend_irq;
+
+    if (cpu == 0 || scs == 0 || exc_num_out == 0 || handler_sec_out == 0 ||
+        is_irq_out == 0 || irq_num_out == 0) {
+        return MM_FALSE;
+    }
+
+    *is_irq_out = MM_FALSE;
+    *irq_num_out = 0u;
+    *handler_sec_out = cpu->sec_state;
+
+    if (scs->pend_sv &&
+        !primask_blocks_current(cpu) &&
+        !faultmask_blocks_current(cpu) &&
+        !basepri_blocks_system_exc(cpu, scs, MM_VECT_PENDSV)) {
+        *exc_num_out = MM_VECT_PENDSV;
+        return MM_TRUE;
+    }
+    if (scs->pend_st &&
+        !primask_blocks_current(cpu) &&
+        !faultmask_blocks_current(cpu) &&
+        !basepri_blocks_system_exc(cpu, scs, MM_VECT_SYSTICK)) {
+        *exc_num_out = MM_VECT_SYSTICK;
+        return MM_TRUE;
+    }
+
+    nvic = nvic_for_cpu(cpu);
+    if (nvic == 0) {
+        return MM_FALSE;
+    }
+    pend_irq = mm_nvic_select_routed_ex(nvic, cpu, scs, &irq_sec);
+    if (pend_irq < 0) {
+        return MM_FALSE;
+    }
+    *exc_num_out = 16u + (mm_u32)pend_irq;
+    *handler_sec_out = irq_sec;
+    *is_irq_out = MM_TRUE;
+    *irq_num_out = (mm_u32)pend_irq;
+    return MM_TRUE;
+}
+
 static mm_bool exc_return_unstack(struct mm_cpu *cpu,
                                   struct mm_memmap *map,
                                   struct mm_scs *scs,
                                   mm_u32 exc_ret)
 {
     struct mm_exc_return_info info;
+    mm_u32 tail_exc_num = 0u;
+    enum mm_sec_state tail_handler_sec = MM_SECURE;
+    mm_bool tail_is_irq = MM_FALSE;
+    mm_u32 tail_irq_num = 0u;
+    mm_u32 tail_handler = 0u;
+    mm_u32 tail_current_exc_num = 0u;
     mm_u32 sp;
     mm_u32 frame[8];
     mm_u32 msp_s_val;
@@ -2548,6 +2660,55 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
                (unsigned long)cpu->psp_ns,
                (unsigned long)cpu->control_s,
                (unsigned long)cpu->control_ns);
+    }
+
+    if (info.to_thread &&
+        cpu->exc_depth > 0 &&
+        tailchain_select_pending(cpu, scs, &tail_exc_num, &tail_handler_sec, &tail_is_irq, &tail_irq_num)) {
+        if (cpu->exc_depth <= MM_EXC_STACK_MAX) {
+            tail_current_exc_num = cpu->exc_num[cpu->exc_depth - 1];
+        }
+        if (tail_current_exc_num >= 16u) {
+            struct mm_nvic *nvic = nvic_for_cpu(cpu);
+            if (nvic != 0) {
+                mm_nvic_set_active(nvic, tail_current_exc_num - 16u, MM_FALSE);
+            }
+        }
+        if (tail_is_irq) {
+            struct mm_nvic *nvic = nvic_for_cpu(cpu);
+            if (nvic != 0) {
+                mm_nvic_set_pending(nvic, tail_irq_num, MM_FALSE);
+                mm_nvic_set_active(nvic, tail_irq_num, MM_TRUE);
+            }
+            {
+                mm_u32 vtor = (tail_handler_sec == MM_NONSECURE) ? scs->vtor_ns : scs->vtor_s;
+                (void)mm_vector_read(map, tail_handler_sec, vtor, tail_exc_num, &tail_handler);
+            }
+        } else {
+            (void)mm_exception_read_handler(map, scs, tail_handler_sec, (enum mm_vector_index)tail_exc_num, &tail_handler);
+            if (tail_exc_num == MM_VECT_PENDSV) {
+                scs->pend_sv = MM_FALSE;
+            } else if (tail_exc_num == MM_VECT_SYSTICK) {
+                scs->pend_st = MM_FALSE;
+            }
+        }
+        if (cpu->exc_depth > 0 && cpu->exc_depth <= MM_EXC_STACK_MAX) {
+            cpu->exc_num[cpu->exc_depth - 1] = (mm_u16)tail_exc_num;
+        }
+        cpu->xpsr = (cpu->xpsr & 0xF8000000u) | 0x01000000u | (tail_exc_num & 0x1FFu);
+        cpu->mode = MM_HANDLER;
+        if (tail_handler_sec == MM_NONSECURE) {
+            cpu->control_ns &= ~0x2u;
+            cpu->r[13] = cpu->msp_ns;
+        } else {
+            cpu->control_s &= ~0x2u;
+            cpu->r[13] = cpu->msp_s;
+        }
+        cpu->sec_state = tail_handler_sec;
+        cpu->r[15] = tail_handler | 1u;
+        cpu->sleeping = MM_FALSE;
+        cpu->event_reg = MM_FALSE;
+        return MM_TRUE;
     }
 
     /* Unstack from live PSP on Thread+PSP returns (OS may switch PSP).
@@ -2631,29 +2792,38 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
 
     fp_base_sp = sp;
     if (!info.basic_frame) {
-        for (i = 0; i < 16; ++i) {
-            if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4u), 4u, &cpu->s[i])) {
-                record_bus_fault(scs, sp + (mm_u32)(i * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+        mm_bool fp_saved = MM_TRUE;
+        if (cpu->exc_depth < MM_EXC_STACK_MAX &&
+            cpu->exc_fp_reserved[cpu->exc_depth] &&
+            !cpu->exc_fp_saved[cpu->exc_depth]) {
+            fp_saved = MM_FALSE;
+        }
+        if (fp_saved) {
+            for (i = 0; i < 16; ++i) {
+                if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4u), 4u, &cpu->s[i])) {
+                    record_bus_fault(scs, sp + (mm_u32)(i * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
+                }
+            }
+            if (!mm_memmap_read(map, info.target_sec, sp + (16u * 4u), 4u, &cpu->fpscr)) {
+                record_bus_fault(scs, sp + (16u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
             }
+            if (!mm_memmap_read(map, info.target_sec, sp + (17u * 4u), 4u, &fp_reserved)) {
+                record_bus_fault(scs, sp + (17u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
+            }
+            (void)fp_reserved;
+            cpu->fp_active = MM_TRUE;
+            if (info.target_sec == MM_NONSECURE) {
+                cpu->control_ns |= (1u << 2);
+            } else {
+                cpu->control_s |= (1u << 2);
+            }
         }
-        if (!mm_memmap_read(map, info.target_sec, sp + (16u * 4u), 4u, &cpu->fpscr)) {
-            record_bus_fault(scs, sp + (16u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
-            return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
-        }
-        if (!mm_memmap_read(map, info.target_sec, sp + (17u * 4u), 4u, &fp_reserved)) {
-            record_bus_fault(scs, sp + (17u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
-            return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
-        }
-        (void)fp_reserved;
         scs->fpcar = fp_base_sp;
+        scs->fpccr &= ~FPCCR_LSPACT;
         sp += FP_STACK_BYTES;
-        cpu->fp_active = MM_TRUE;
-        if (info.target_sec == MM_NONSECURE) {
-            cpu->control_ns |= (1u << 2);
-        } else {
-            cpu->control_s |= (1u << 2);
-        }
     }
     for (i = 0; i < 8; ++i) {
         if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4), 4u, &frame[i])) {
@@ -2797,6 +2967,10 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     }
     cpu->sec_state = info.target_sec;
     cpu->mode = info.to_thread ? MM_THREAD : MM_HANDLER;
+    if (cpu->exc_depth < MM_EXC_STACK_MAX) {
+        cpu->exc_fp_reserved[cpu->exc_depth] = MM_FALSE;
+        cpu->exc_fp_saved[cpu->exc_depth] = MM_FALSE;
+    }
     if (info.to_thread && exc_num >= 16u) {
         calltrace_log_irq_resume(cpu->r[15]);
     }
@@ -2912,7 +3086,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             wake = MM_TRUE;
         } else if (scs->pend_st || scs->pend_sv) {
             wake = MM_TRUE;
-        } else if (mm_nvic_select(nvic, cpu) >= 0) {
+        } else if (mm_nvic_select_ex(nvic, cpu, scs) >= 0) {
             wake = MM_TRUE;
         } else if (cpu->sleep_wfe && mm_nvic_any_pending(nvic)) {
             wake = MM_TRUE;
@@ -2951,6 +3125,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
 
     if (scs->pend_sv) {
         if (primask_blocks_current(cpu) ||
+            faultmask_blocks_current(cpu) ||
             basepri_blocks_system_exc(cpu, scs, MM_VECT_PENDSV)) {
             result = MM_TRUE;
             goto out;
@@ -2965,6 +3140,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
     }
     if (scs->pend_st) {
         if (primask_blocks_current(cpu) ||
+            faultmask_blocks_current(cpu) ||
             basepri_blocks_system_exc(cpu, scs, MM_VECT_SYSTICK)) {
             result = MM_TRUE;
             goto out;
@@ -2979,7 +3155,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
     }
     {
         enum mm_sec_state irq_sec = MM_SECURE;
-        int pend_irq = mm_nvic_select_routed(nvic, cpu, &irq_sec);
+        int pend_irq = mm_nvic_select_routed_ex(nvic, cpu, scs, &irq_sec);
         if (pend_irq >= 0) {
             mm_u32 exc_num = 16u + (mm_u32)pend_irq;
             mm_nvic_set_pending(nvic, (mm_u32)pend_irq, MM_FALSE);
@@ -3668,6 +3844,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     enum mm_sec_state sec;
     mm_bool use_psp_entry;
     mm_bool fp_stack;
+    mm_bool fp_lazy;
     enum mm_mode pre_mode;
     mm_u32 exc_ret_val;
     mm_bool tail_chain = MM_FALSE;
@@ -3726,7 +3903,8 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     frame[6] = return_pc & ~1u;
     frame[7] = xpsr_in | 0x01000000u; /* preserve full xPSR/IT/flags/IPSR; ensure T */
 
-    fp_stack = (!tail_chain) && fpu_stack_active(cpu, scs);
+    fp_stack = (!tail_chain) && fpu_auto_preserve_enabled(cpu, scs);
+    fp_lazy = fp_stack && fpu_lazy_preserve_enabled(cpu, scs);
     if (pre_mode == MM_HANDLER) {
         use_psp_entry = MM_FALSE;
         exc_ret_val = exc_return_encode(sec, MM_FALSE, MM_FALSE, fp_stack ? MM_FALSE : MM_TRUE);
@@ -3809,21 +3987,25 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
             }
             if (fp_stack) {
                 sp_fp = sp_frame - FP_STACK_BYTES;
-                for (i = 0; i < 16; ++i) {
-                    if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
-                        printf("HardFault: FP stacking failed at 0x%08lx\n",
-                               (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
-                        record_bus_fault(scs, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                if (!fp_lazy) {
+                    for (i = 0; i < 16; ++i) {
+                        if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
+                            printf("HardFault: FP stacking failed at 0x%08lx\n",
+                                   (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
+                            record_bus_fault(scs, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                            return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
+                        }
+                    }
+                    if (!mm_memmap_write(map, sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
+                        record_bus_fault(scs, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                         return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
                     }
-                }
-                if (!mm_memmap_write(map, sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
-                    record_bus_fault(scs, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
-                    return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
-                }
-                if (!mm_memmap_write(map, sec, sp_fp + (17u * 4u), 4u, 0u)) {
-                    record_bus_fault(scs, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
-                    return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
+                    if (!mm_memmap_write(map, sec, sp_fp + (17u * 4u), 4u, 0u)) {
+                        record_bus_fault(scs, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                        return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
+                    }
+                } else {
+                    scs->fpccr |= FPCCR_LSPACT;
                 }
                 scs->fpcar = sp_fp;
                 sp = sp_fp;
@@ -3841,6 +4023,8 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
             cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
             cpu->exc_sec[cpu->exc_depth] = sec;
             cpu->exc_num[cpu->exc_depth] = (mm_u16)exc_num;
+            cpu->exc_fp_reserved[cpu->exc_depth] = fp_stack;
+            cpu->exc_fp_saved[cpu->exc_depth] = fp_stack && !fp_lazy;
             cpu->exc_depth++;
         }
     }
@@ -5350,7 +5534,7 @@ int main(int argc, char **argv)
                         wake = MM_TRUE;
                     } else if (scs.pend_st || scs.pend_sv) {
                         wake = MM_TRUE;
-                    } else if (mm_nvic_select(&nvic, &cpu) >= 0) {
+                    } else if (mm_nvic_select_ex(&nvic, &cpu, &scs) >= 0) {
                         wake = MM_TRUE;
                     } else if (cpu.sleep_wfe && mm_nvic_any_pending(&nvic)) {
                         if (getenv("M33MU_SLEEP_TRACE")) {
@@ -5395,7 +5579,7 @@ int main(int argc, char **argv)
                                 done = MM_TRUE;
                                 continue;
                             }
-                            if (scs.pend_st || scs.pend_sv || mm_nvic_select(&nvic, &cpu) >= 0 ||
+                            if (scs.pend_st || scs.pend_sv || mm_nvic_select_ex(&nvic, &cpu, &scs) >= 0 ||
                                 (cpu.sleep_wfe && mm_nvic_any_pending(&nvic))) {
                                 cpu.sleeping = MM_FALSE;
                                 cpu.sleep_wfe = MM_FALSE;
@@ -5452,6 +5636,7 @@ int main(int argc, char **argv)
                 /* Handle pending system exceptions (SysTick, PendSV). */
 handle_pending:
                 if (cpu.mode == MM_THREAD && scs.pend_sv &&
+                    !faultmask_blocks_current(&cpu) &&
                     !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_PENDSV)) {
                     if (!enter_exception(&cpu, &map, &scs, MM_VECT_PENDSV, cpu.r[15] & ~1u, cpu.xpsr)) {
                         done = MM_TRUE;
@@ -5461,6 +5646,7 @@ handle_pending:
                     continue;
                 }
                 if (cpu.mode == MM_THREAD && scs.pend_st &&
+                    !faultmask_blocks_current(&cpu) &&
                     !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_SYSTICK)) {
                     if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {
                         done = MM_TRUE;
@@ -5473,7 +5659,7 @@ handle_pending:
                 /* Manage interrupts */
                 {
                     enum mm_sec_state irq_sec = MM_SECURE;
-                    pend_irq = mm_nvic_select_routed(&nvic, &cpu, &irq_sec);
+                    pend_irq = mm_nvic_select_routed_ex(&nvic, &cpu, &scs, &irq_sec);
                     if (pend_irq >= 0) {
                         mm_u32 exc_num = 16u + (mm_u32)pend_irq;
                         /* Clear pending when accepted. */

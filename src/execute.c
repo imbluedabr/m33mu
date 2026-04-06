@@ -113,6 +113,7 @@ static mm_bool svc_stack_trace_enabled(void)
 
 #define CPACR_CP10_SHIFT 20u
 #define CPACR_CP11_SHIFT 22u
+#define FPCCR_LSPACT (1u << 0)
 
 static mm_u32 cpacr_for_sec(const struct mm_scs *scs, enum mm_sec_state sec)
 {
@@ -162,10 +163,51 @@ static mm_bool dcp_access_allowed(const struct mm_cpu *cpu, const struct mm_scs 
 
 static mm_bool fpu_check_or_fault(struct mm_execute_ctx *ctx)
 {
+    int i;
+    int idx;
+    mm_u32 sp;
+    enum mm_sec_state sec;
     if (ctx == 0 || ctx->cpu == 0 || ctx->scs == 0) {
         return MM_FALSE;
     }
     if (fpu_access_allowed(ctx->cpu, ctx->scs)) {
+        if (ctx->cpu->mode == MM_HANDLER &&
+            ctx->cpu->exc_depth > 0) {
+            idx = ctx->cpu->exc_depth - 1;
+            if (idx < MM_EXC_STACK_MAX &&
+                ctx->cpu->exc_fp_reserved[idx] &&
+                !ctx->cpu->exc_fp_saved[idx]) {
+                sp = ctx->cpu->exc_sp[idx];
+                sec = ctx->cpu->exc_sec[idx];
+                for (i = 0; i < 16; ++i) {
+                    if (!mm_memmap_write(ctx->map, sec, sp + (mm_u32)(i * 4u), 4u, ctx->cpu->s[i])) {
+                        if (ctx->raise_mem_fault != 0 && ctx->fetch != 0) {
+                            if (!ctx->raise_mem_fault(ctx->cpu, ctx->map, ctx->scs,
+                                                     ctx->fetch->pc_fetch, ctx->cpu->xpsr,
+                                                     sp + (mm_u32)(i * 4u), MM_FALSE) &&
+                                ctx->done != 0) {
+                                *ctx->done = MM_TRUE;
+                            }
+                        }
+                        return MM_FALSE;
+                    }
+                }
+                if (!mm_memmap_write(ctx->map, sec, sp + (16u * 4u), 4u, ctx->cpu->fpscr) ||
+                    !mm_memmap_write(ctx->map, sec, sp + (17u * 4u), 4u, 0u)) {
+                    if (ctx->raise_mem_fault != 0 && ctx->fetch != 0) {
+                        if (!ctx->raise_mem_fault(ctx->cpu, ctx->map, ctx->scs,
+                                                 ctx->fetch->pc_fetch, ctx->cpu->xpsr,
+                                                 sp + (16u * 4u), MM_FALSE) &&
+                            ctx->done != 0) {
+                            *ctx->done = MM_TRUE;
+                        }
+                    }
+                    return MM_FALSE;
+                }
+                ctx->cpu->exc_fp_saved[idx] = MM_TRUE;
+                ctx->scs->fpccr &= ~FPCCR_LSPACT;
+            }
+        }
         return MM_TRUE;
     }
     if (ctx->raise_usage_fault != 0 && ctx->fetch != 0) {
@@ -209,14 +251,34 @@ static mm_u32 fpu_f32_to_u32(float f)
     return u.u;
 }
 
-static mm_u32 fpu_vcvt_s32_from_f32(float a, mm_bool round)
+static double fpu_round_to_int(float a, mm_u32 fpscr, mm_bool round)
+{
+    mm_u32 rmode;
+    if (!round) {
+        return (double)truncf(a);
+    }
+    rmode = (fpscr >> 22) & 0x3u;
+    switch (rmode) {
+    case 0x1u:
+        return (double)ceilf(a);
+    case 0x2u:
+        return (double)floorf(a);
+    case 0x3u:
+        return (double)truncf(a);
+    case 0x0u:
+    default:
+        return (double)nearbyintf(a);
+    }
+}
+
+static mm_u32 fpu_vcvt_s32_from_f32(const struct mm_cpu *cpu, float a, mm_bool round)
 {
     double v;
 
     if (a != a) {
         return 0u;
     }
-    v = round ? (double)nearbyintf(a) : (double)truncf(a);
+    v = fpu_round_to_int(a, cpu ? cpu->fpscr : 0u, round);
     if (v > 2147483647.0) {
         return 0x7fffffffu;
     }
@@ -226,14 +288,14 @@ static mm_u32 fpu_vcvt_s32_from_f32(float a, mm_bool round)
     return (mm_u32)(mm_i32)v;
 }
 
-static mm_u32 fpu_vcvt_u32_from_f32(float a, mm_bool round)
+static mm_u32 fpu_vcvt_u32_from_f32(const struct mm_cpu *cpu, float a, mm_bool round)
 {
     double v;
 
     if (a != a) {
         return 0u;
     }
-    v = round ? (double)nearbyintf(a) : (double)truncf(a);
+    v = fpu_round_to_int(a, cpu ? cpu->fpscr : 0u, round);
     if (v <= 0.0) {
         return 0u;
     }
@@ -250,6 +312,25 @@ static mm_u32 fpu_vmov_imm_to_u32(mm_u8 imm8)
     mm_u32 mant = (mm_u32)(imm8 & 0x0fu) << 19;
     exp = exp + 124u;
     return (sign << 31) | (exp << 23) | mant;
+}
+
+static mm_bool exec_read_signed(struct mm_memmap *map,
+                                enum mm_sec_state sec,
+                                mm_u32 addr,
+                                mm_u32 size,
+                                mm_u32 *value_out)
+{
+    mm_u32 value = 0;
+    if (!mm_memmap_read(map, sec, addr, size, &value)) {
+        return MM_FALSE;
+    }
+    if (size == 1u && (value & 0x80u) != 0u) {
+        value |= 0xffffff80u;
+    } else if (size == 2u && (value & 0x8000u) != 0u) {
+        value |= 0xffff0000u;
+    }
+    *value_out = value;
+    return MM_TRUE;
 }
 
 static void fpu_set_fpscr_nzcv(struct mm_cpu *cpu, mm_u32 nzcv)
@@ -829,7 +910,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                           EXEC_RAISE_UNDEF();
                                                       }
                                                       a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                      cpu.s[d.rd] = fpu_vcvt_s32_from_f32(a, MM_FALSE);
+                                                      cpu.s[d.rd] = fpu_vcvt_s32_from_f32(&cpu, a, MM_FALSE);
                                                       fpu_mark_active(&cpu);
                                                       break;
                                                   }
@@ -842,7 +923,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                           EXEC_RAISE_UNDEF();
                                                       }
                                                       a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                      cpu.s[d.rd] = fpu_vcvt_s32_from_f32(a, MM_TRUE);
+                                                      cpu.s[d.rd] = fpu_vcvt_s32_from_f32(&cpu, a, MM_TRUE);
                                                       fpu_mark_active(&cpu);
                                                       break;
                                                   }
@@ -855,7 +936,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                           EXEC_RAISE_UNDEF();
                                                       }
                                                       a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                      cpu.s[d.rd] = fpu_vcvt_u32_from_f32(a, MM_FALSE);
+                                                      cpu.s[d.rd] = fpu_vcvt_u32_from_f32(&cpu, a, MM_FALSE);
                                                       fpu_mark_active(&cpu);
                                                       break;
                                                   }
@@ -868,7 +949,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                           EXEC_RAISE_UNDEF();
                                                       }
                                                       a = fpu_u32_to_f32(cpu.s[d.rm]);
-                                                      cpu.s[d.rd] = fpu_vcvt_u32_from_f32(a, MM_TRUE);
+                                                      cpu.s[d.rd] = fpu_vcvt_u32_from_f32(&cpu, a, MM_TRUE);
                                                       fpu_mark_active(&cpu);
                                                       break;
                                                   }
@@ -2280,18 +2361,19 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                         } break;
                         case MM_OP_SMMUL:
                         case MM_OP_SMMLA:
-                        case MM_OP_SMMLS: {
+                        case MM_OP_SMMLS:
+                        case MM_OP_SMMLSR: {
                                               mm_i64 prod = (mm_i64)(mm_i32)cpu.r[d.rn] * (mm_i64)(mm_i32)cpu.r[d.rm];
                                               mm_i64 result;
                                               if (d.kind == MM_OP_SMMLA) {
                                                   result = prod + ((mm_i64)(mm_i32)cpu.r[d.ra] << 32);
-                                              } else if (d.kind == MM_OP_SMMLS) {
+                                              } else if (d.kind == MM_OP_SMMLS || d.kind == MM_OP_SMMLSR) {
                                                   result = (mm_i64)(mm_i32)cpu.r[d.ra] << 32;
                                                   result = result - prod;
                                               } else {
                                                   result = prod;
                                               }
-                                              if (d.imm != 0u) {
+                                              if (d.imm != 0u || d.kind == MM_OP_SMMLSR) {
                                                   result += 0x80000000LL;
                                               }
                                               cpu.r[d.rd] = (mm_u32)(result >> 32);
@@ -2935,13 +3017,18 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 if (cflag) cpu.xpsr |= (1u << 29);
                                                 if (vflag) cpu.xpsr |= (1u << 28);
                                             } break;
-                        case MM_OP_BKPT:
+                        case MM_OP_BKPT: {
+                                            mm_u32 ret_pc = f.pc_fetch + 2u;
+                                            scs.dfsr |= (1u << 1); /* BKPT */
                                             if (opt_gdb) {
                                                 mm_gdb_stub_notify_stop(&gdb, 5);
-                                            } else {
+                                            } else if (enter_exception == 0 ||
+                                                       !enter_exception(&cpu, &map, &scs, MM_VECT_DEBUGMON, ret_pc, cpu.xpsr)) {
                                                 done = MM_TRUE;
+                                            } else {
+                                                itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
                                             }
-                                            break;
+                                        } break;
                         case MM_OP_LDR_LITERAL: {
                                                     static int ldr_lit_trace = -1;
                                                     mm_u32 val = 0;
@@ -2968,7 +3055,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     }
                                                     cpu.r[d.rd] = val;
                                                 } break;
-                        case MM_OP_LDR_IMM: {
+                        case MM_OP_LDR_IMM:
+                        case MM_OP_LDRT: {
                                                 mm_u32 val = 0;
                                                 mm_u32 addr = cpu.r[d.rn] + d.imm;
                                                 if (!mm_memmap_read(&map, cpu.sec_state, addr, 4u, &val)) {
@@ -3022,6 +3110,18 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                               }
                                               mm_cpu_excl_set(&cpu, cpu.sec_state, addr, 1u);
                                           } break;
+                        case MM_OP_LDREXH: {
+                                              mm_u32 val = 0;
+                                              mm_u32 addr = cpu.r[d.rn];
+                                              if (!mm_memmap_read(&map, cpu.sec_state, addr, 2u, &val)) {
+                                                  if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd != 15u) {
+                                                  cpu.r[d.rd] = val & 0xffffu;
+                                              }
+                                              mm_cpu_excl_set(&cpu, cpu.sec_state, addr, 2u);
+                                          } break;
                         case MM_OP_CLREX: {
                                               mm_cpu_excl_clear(&cpu);
                                           } break;
@@ -3051,7 +3151,21 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                   cpu.r[d.rd] = ok ? 0u : 1u;
                                               }
                                           } break;
-                        case MM_OP_STR_IMM: {
+                        case MM_OP_STREXH: {
+                                              mm_u32 addr = cpu.r[d.rn];
+                                              mm_bool ok = mm_cpu_excl_check_and_clear(&cpu, cpu.sec_state, addr, 2u);
+                                              if (ok) {
+                                                  if (!mm_memmap_write(&map, cpu.sec_state, addr, 2u, cpu.r[d.rm] & 0xffffu)) {
+                                                      if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
+                                                      return MM_EXEC_CONTINUE;
+                                                  }
+                                              }
+                                              if (d.rd != 15u) {
+                                                  cpu.r[d.rd] = ok ? 0u : 1u;
+                                              }
+                                          } break;
+                        case MM_OP_STR_IMM:
+                        case MM_OP_STRT: {
                                                 mm_u32 base = cpu.r[d.rn];
                                                 mm_u32 addr = base + d.imm;
                                                 if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.r[d.rd])) {
@@ -3202,7 +3316,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  }
                                                  cpu.r[d.rd] = val & 0xffu;
                                              } break;
-                        case MM_OP_LDRB_IMM: {
+                        case MM_OP_LDRB_IMM:
+                        case MM_OP_LDRBT: {
                                                  mm_u32 addr = cpu.r[d.rn] + d.imm;
                                                  mm_u32 val = 0;
                                                  if (!mm_memmap_read(&map, cpu.sec_state, addr, 1u, &val)) {
@@ -3211,14 +3326,15 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                  }
                                                  cpu.r[d.rd] = val & 0xffu;
                                              } break;
-                        case MM_OP_LDRSB_IMM: {
+                        case MM_OP_LDRSB_IMM:
+                        case MM_OP_LDRSBT: {
                                                   mm_u32 addr = cpu.r[d.rn] + d.imm;
                                                   mm_u32 val = 0;
-                                                  if (!mm_memmap_read(&map, cpu.sec_state, addr, 1u, &val)) {
+                                                  if (!exec_read_signed(&map, cpu.sec_state, addr, 1u, &val)) {
                                                       if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                       return MM_EXEC_CONTINUE;
                                                   }
-                                                  cpu.r[d.rd] = (val & 0x80u) ? (val | 0xffffff80u) : (val & 0xffu);
+                                                  cpu.r[d.rd] = val;
                                               } break;
                         case MM_OP_LDRSB_POST_IMM: {
                                                       mm_u32 base = cpu.r[d.rn];
@@ -3230,15 +3346,13 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                       cpu.r[d.rd] = (val & 0x80u) ? (val | 0xffffff80u) : (val & 0xffu);
                                                       cpu.r[d.rn] = base + d.imm;
                                                   } break;
-                        case MM_OP_LDRSH_IMM: {
+                        case MM_OP_LDRSH_IMM:
+                        case MM_OP_LDRSHT: {
                                                   mm_u32 addr = cpu.r[d.rn] + d.imm;
                                                   mm_u32 val = 0;
-                                                  if (!mm_memmap_read(&map, cpu.sec_state, addr, 2u, &val)) {
+                                                  if (!exec_read_signed(&map, cpu.sec_state, addr, 2u, &val)) {
                                                       if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                       return MM_EXEC_CONTINUE;
-                                                  }
-                                                  if ((val & 0x8000u) != 0u) {
-                                                      val |= 0xffff0000u;
                                                   }
                                                   cpu.r[d.rd] = val;
                                               } break;
@@ -3269,14 +3383,16 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                   }
                                                   cpu.r[d.rd] = val;
                                               } break;
-                        case MM_OP_STRB_IMM: {
+                        case MM_OP_STRB_IMM:
+                        case MM_OP_STRBT: {
                                                  mm_u32 addr = cpu.r[d.rn] + d.imm;
                                                  if (!mm_memmap_write(&map, cpu.sec_state, addr, 1u, cpu.r[d.rd])) {
                                                      if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                      return MM_EXEC_CONTINUE;
                                                  }
                                              } break;
-                        case MM_OP_LDRH_IMM: {
+                        case MM_OP_LDRH_IMM:
+                        case MM_OP_LDRHT: {
                                                  mm_u32 addr = cpu.r[d.rn] + d.imm;
                                                  mm_u32 val = 0;
                                                  if (!mm_memmap_read(&map, cpu.sec_state, addr, 2u, &val)) {
@@ -3330,7 +3446,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                   }
                                                   cpu.r[d.rd] = (val & 0x80u) ? (val | 0xffffff80u) : (val & 0xffu);
                                               } break;
-                        case MM_OP_STRH_IMM: {
+                        case MM_OP_STRH_IMM:
+                        case MM_OP_STRHT: {
                                                  mm_u32 addr = cpu.r[d.rn] + d.imm;
                                                  mm_u32 val = cpu.r[d.rd] & 0xffffu;
                                                  if (!mm_memmap_write(&map, cpu.sec_state, addr, 2u, val)) {
@@ -3542,10 +3659,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             }
                                         } break;
                         case MM_OP_WFI:
+                        case MM_OP_WFI_W:
                                         cpu.sleeping = MM_TRUE;
                                         cpu.sleep_wfe = MM_FALSE;
                                         break;
                         case MM_OP_WFE:
+                        case MM_OP_WFE_W:
                                         if (cpu.event_reg) {
                                             cpu.event_reg = MM_FALSE;
                                         } else {
@@ -3554,9 +3673,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                         }
                                         break;
                         case MM_OP_SEV:
+                        case MM_OP_SEV_W:
+                        case MM_OP_SEVL_W:
                                         cpu.event_reg = MM_TRUE;
                                         break;
                         case MM_OP_YIELD:
+                        case MM_OP_YIELD_W:
                                         /* Hint: currently no scheduler hook; treat as NOP. */
                                         break;
                         case MM_OP_SVC: {

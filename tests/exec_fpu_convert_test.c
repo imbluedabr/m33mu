@@ -107,7 +107,11 @@ static mm_bool stub_enter_exception(struct mm_cpu *cpu,
     return MM_FALSE;
 }
 
-static int run_vcvt_case(enum mm_op_kind kind, float input, mm_u32 expected, const char *name)
+static int run_vcvt_case_with_fpscr(enum mm_op_kind kind,
+                                    float input,
+                                    mm_u32 expected,
+                                    mm_u32 fpscr,
+                                    const char *name)
 {
     struct mm_cpu cpu;
     struct mm_memmap map;
@@ -136,6 +140,7 @@ static int run_vcvt_case(enum mm_op_kind kind, float input, mm_u32 expected, con
     cpu.sec_state = MM_SECURE;
     cpu.mode = MM_THREAD;
     cpu.s[1] = f32_to_u32(input);
+    cpu.fpscr = fpscr;
 
     scs.fpu_present = MM_TRUE;
     scs.cpacr_s = 0x00f00000u;
@@ -179,6 +184,11 @@ static int run_vcvt_case(enum mm_op_kind kind, float input, mm_u32 expected, con
     }
 
     return 0;
+}
+
+static int run_vcvt_case(enum mm_op_kind kind, float input, mm_u32 expected, const char *name)
+{
+    return run_vcvt_case_with_fpscr(kind, input, expected, 0u, name);
 }
 
 static int run_vmov_sr_case(mm_u32 src_reg, mm_u32 value, mm_u32 dest_s, const char *name)
@@ -333,6 +343,9 @@ int main(void)
     if (run_vcvt_case(MM_OP_VCVT_U32_F32, -1.0f, 0u, "vcvt_u32_f32_sat_zero") != 0) return 1;
     if (run_vcvt_case(MM_OP_VCVTR_U32_F32, 0.5f, 0u, "vcvtr_u32_f32_half_even") != 0) return 1;
     if (run_vcvt_case(MM_OP_VCVTR_U32_F32, 4294967296.0f, 0xffffffffu, "vcvtr_u32_f32_sat_max") != 0) return 1;
+    if (run_vcvt_case_with_fpscr(MM_OP_VCVTR_S32_F32, 1.25f, 2u, 1u << 22, "vcvtr_s32_f32_round_plus_inf") != 0) return 1;
+    if (run_vcvt_case_with_fpscr(MM_OP_VCVTR_S32_F32, -1.25f, 0xfffffffeu, 2u << 22, "vcvtr_s32_f32_round_minus_inf") != 0) return 1;
+    if (run_vcvt_case_with_fpscr(MM_OP_VCVTR_U32_F32, 1.75f, 1u, 3u << 22, "vcvtr_u32_f32_round_zero") != 0) return 1;
     if (run_vmov_sr_case(14u, 0x12345678u, 3u, "vmov_sr_lr_allowed") != 0) return 1;
     if (run_vmov_rs_case(5u, 0x89abcdefu, 14u, "vmov_rs_lr_allowed") != 0) return 1;
     return 0;

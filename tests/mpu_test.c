@@ -92,6 +92,33 @@ static int test_banked_secure_vs_nonsecure(void)
     return 0;
 }
 
+static int test_ap_permissions_enforced(void)
+{
+    struct mm_scs scs;
+    mm_scs_init(&scs, 0);
+
+    scs.mpu_ctrl_s = 0x1u;
+    scs.mpu_rbar_s[0] = 0x00001000u | (2u << 1); /* AP=10 */
+    scs.mpu_rlar_s[0] = 0x00001FE0u | 0x1u;
+
+    if (mm_mpu_allows_access(&scs, MM_SECURE, 0x00001010u, MM_TRUE, MM_MPU_ACCESS_READ) != MM_TRUE) return 1;
+    if (mm_mpu_allows_access(&scs, MM_SECURE, 0x00001010u, MM_TRUE, MM_MPU_ACCESS_WRITE) != MM_FALSE) return 1;
+    if (mm_mpu_allows_access(&scs, MM_SECURE, 0x00001010u, MM_FALSE, MM_MPU_ACCESS_READ) != MM_FALSE) return 1;
+    return 0;
+}
+
+static int test_background_region_privileged_only(void)
+{
+    struct mm_scs scs;
+    mm_scs_init(&scs, 0);
+
+    scs.mpu_ctrl_s = 0x5u; /* ENABLE|PRIVDEFENA */
+
+    if (mm_mpu_allows_access(&scs, MM_SECURE, 0x20000000u, MM_TRUE, MM_MPU_ACCESS_READ) != MM_TRUE) return 1;
+    if (mm_mpu_allows_access(&scs, MM_SECURE, 0x20000000u, MM_FALSE, MM_MPU_ACCESS_READ) != MM_FALSE) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
@@ -99,6 +126,8 @@ int main(void)
         { "basic_xn_match", test_basic_xn_match },
         { "highest_region_wins", test_highest_region_wins },
         { "banked_secure_vs_nonsecure", test_banked_secure_vs_nonsecure },
+        { "ap_permissions_enforced", test_ap_permissions_enforced },
+        { "background_region_privileged_only", test_background_region_privileged_only },
     };
     int failures = 0;
     int i;
@@ -117,4 +146,3 @@ int main(void)
     }
     return 0;
 }
-

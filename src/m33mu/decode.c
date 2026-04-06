@@ -1413,6 +1413,15 @@ static struct mm_decoded decode_32(mm_u32 insn)
         return d;
     }
 
+    /* LDAEXH/LDREXH (halfword) */
+    if ((insn & 0xfff00ff0u) == 0xe8d00f50u) {
+        d.kind = MM_OP_LDREXH;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rd = (mm_u8)((insn >> 12) & 0x0fu);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
     /* STREX (word) */
     if ((insn & 0xfff000ffu) == 0xe8400000u) {
         d.kind = MM_OP_STREX;
@@ -1426,6 +1435,16 @@ static struct mm_decoded decode_32(mm_u32 insn)
     /* STREXB (byte) */
     if ((insn & 0xfff00ff0u) == 0xe8c00f40u) {
         d.kind = MM_OP_STREXB;
+        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
+        d.rm = (mm_u8)((insn >> 12) & 0x0fu); /* Rt value */
+        d.rd = (mm_u8)(insn & 0x0fu);        /* Rd status */
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* STLEXH/STREXH (halfword) */
+    if ((insn & 0xfff00ff0u) == 0xe8c00f50u) {
+        d.kind = MM_OP_STREXH;
         d.rn = (mm_u8)((insn >> 16) & 0x0fu);
         d.rm = (mm_u8)((insn >> 12) & 0x0fu); /* Rt value */
         d.rd = (mm_u8)(insn & 0x0fu);        /* Rd status */

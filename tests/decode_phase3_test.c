@@ -483,6 +483,27 @@ static int test_strex(void)
     return 0;
 }
 
+static int test_ldrexh(void)
+{
+    struct mm_decoded dec;
+    if (decode_insn(0xe8d1u, 0x2f50u, &dec) != 0) return 1;
+    if (dec.kind != MM_OP_LDREXH) return 1;
+    if (dec.rn != 1u) return 1;
+    if (dec.rd != 2u) return 1;
+    return 0;
+}
+
+static int test_strexh(void)
+{
+    struct mm_decoded dec;
+    if (decode_insn(0xe8c1u, 0x0f52u, &dec) != 0) return 1;
+    if (dec.kind != MM_OP_STREXH) return 1;
+    if (dec.rn != 1u) return 1;
+    if (dec.rm != 0u) return 1;
+    if (dec.rd != 2u) return 1;
+    return 0;
+}
+
 static int test_sg(void)
 {
     struct mm_decoded dec;
@@ -521,6 +542,8 @@ int main(void)
         { "tbh", test_tbh },
         { "ldrex", test_ldrex },
         { "strex", test_strex },
+        { "ldrexh", test_ldrexh },
+        { "strexh", test_strexh },
         { "clrex", test_clrex },
         { "strd_postindex_zero", test_strd_postindex_zero_decode },
         { "strd_postindex_pc_base_undefined", test_strd_postindex_pc_base_undefined },

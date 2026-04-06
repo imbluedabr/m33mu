@@ -20,14 +20,17 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 #include "m33mu/nvic.h"
 #include "m33mu/cpu.h"
+#include "m33mu/scs.h"
 
 static int test_pending_selection(void)
 {
     struct mm_nvic nvic;
     struct mm_cpu cpu;
     int i;
+    memset(&cpu, 0, sizeof(cpu));
     for (i = 0; i < 16; ++i) cpu.r[i] = 0;
     cpu.sec_state = MM_SECURE;
     cpu.primask_s = 0;
@@ -48,6 +51,7 @@ static int test_disable_blocks(void)
     struct mm_nvic nvic;
     struct mm_cpu cpu;
     int i;
+    memset(&cpu, 0, sizeof(cpu));
     for (i = 0; i < 16; ++i) cpu.r[i] = 0;
     cpu.sec_state = MM_SECURE;
     cpu.primask_s = 0;
@@ -60,11 +64,46 @@ static int test_disable_blocks(void)
     return 0;
 }
 
+static int test_faultmask_blocks(void)
+{
+    struct mm_nvic nvic;
+    struct mm_cpu cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.sec_state = MM_SECURE;
+    cpu.faultmask_s = 1u;
+    mm_nvic_init(&nvic);
+    mm_nvic_set_enable(&nvic, 5u, MM_TRUE);
+    mm_nvic_set_pending(&nvic, 5u, MM_TRUE);
+    nvic.priority[5] = 0x20u;
+    if (mm_nvic_select(&nvic, &cpu) != -1) return 1;
+    return 0;
+}
+
+static int test_prigroup_masks_subpriority(void)
+{
+    struct mm_nvic nvic;
+    struct mm_cpu cpu;
+    struct mm_scs scs;
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    cpu.sec_state = MM_SECURE;
+    cpu.basepri_s = 0x20u;
+    scs.aircr_s = (1u << 8); /* PRIGROUP=1 */
+    mm_nvic_init(&nvic);
+    mm_nvic_set_enable(&nvic, 9u, MM_TRUE);
+    mm_nvic_set_pending(&nvic, 9u, MM_TRUE);
+    nvic.priority[9] = 0x23u;
+    if (mm_nvic_select_ex(&nvic, &cpu, &scs) != -1) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "pending_selection", test_pending_selection },
         { "disable_blocks", test_disable_blocks },
+        { "faultmask_blocks", test_faultmask_blocks },
+        { "prigroup_masks_subpriority", test_prigroup_masks_subpriority },
     };
     int failures = 0;
     int i;

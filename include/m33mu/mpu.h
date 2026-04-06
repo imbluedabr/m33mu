@@ -26,12 +26,11 @@
 #include "m33mu/scs.h"
 #include "m33mu/cpu.h"
 
-/*
- * Minimal ARMv8-M MPU helper.
- *
- * For the initial TrustZone/memory-protection tests we only need enough
- * behavior to model instruction fetch execute-never (XN) based on RBAR/RLAR.
- */
+enum mm_mpu_access {
+    MM_MPU_ACCESS_READ = 0,
+    MM_MPU_ACCESS_WRITE = 1,
+    MM_MPU_ACCESS_EXEC = 2
+};
 
 mm_bool mm_mpu_enabled(const struct mm_scs *scs, enum mm_sec_state sec);
 
@@ -40,5 +39,12 @@ mm_bool mm_mpu_is_xn_exec(const struct mm_scs *scs, enum mm_sec_state sec, mm_u3
 
 /* Returns MM_TRUE if addr is covered by any enabled region (highest-numbered wins). */
 mm_bool mm_mpu_region_lookup(const struct mm_scs *scs, enum mm_sec_state sec, mm_u32 addr, mm_u32 *rbar_out, mm_u32 *rlar_out);
+
+/* Returns MM_TRUE when MPU rules allow the requested access. */
+mm_bool mm_mpu_allows_access(const struct mm_scs *scs,
+                             enum mm_sec_state sec,
+                             mm_u32 addr,
+                             mm_bool privileged,
+                             enum mm_mpu_access access);
 
 #endif /* M33MU_MPU_H */

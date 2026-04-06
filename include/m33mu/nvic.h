@@ -28,6 +28,8 @@
 
 #define MM_MAX_IRQ 128
 
+struct mm_scs;
+
 struct mm_nvic {
     mm_u32 enable_mask[(MM_MAX_IRQ + 31) / 32];
     mm_u32 pending_mask[(MM_MAX_IRQ + 31) / 32];
@@ -53,8 +55,13 @@ void mm_nvic_notify_enable_mask(mm_u32 idx, mm_u32 old_mask, mm_u32 new_mask);
 
 /* Simplified: select highest-priority pending enabled IRQ; returns -1 if none. */
 int mm_nvic_select(const struct mm_nvic *nvic, const struct mm_cpu *cpu);
+int mm_nvic_select_ex(const struct mm_nvic *nvic, const struct mm_cpu *cpu, const struct mm_scs *scs);
 
 /* Select IRQ and report its target security state using ITNS. */
 int mm_nvic_select_routed(const struct mm_nvic *nvic, const struct mm_cpu *cpu, enum mm_sec_state *target_sec_out);
+int mm_nvic_select_routed_ex(const struct mm_nvic *nvic,
+                             const struct mm_cpu *cpu,
+                             const struct mm_scs *scs,
+                             enum mm_sec_state *target_sec_out);
 
 #endif /* M33MU_NVIC_H */

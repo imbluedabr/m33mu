@@ -500,6 +500,26 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
             return MM_FALSE;
         }
     }
+    if (ctx->scs != 0) {
+        enum mm_mpu_access mpu_access = MM_MPU_ACCESS_READ;
+        switch (type) {
+        case MM_ACCESS_WRITE:
+            mpu_access = MM_MPU_ACCESS_WRITE;
+            break;
+        case MM_ACCESS_EXEC:
+            mpu_access = MM_MPU_ACCESS_EXEC;
+            break;
+        case MM_ACCESS_READ:
+        default:
+            mpu_access = MM_MPU_ACCESS_READ;
+            break;
+        }
+        if (!mm_mpu_allows_access(ctx->scs, sec, addr, privileged, mpu_access)) {
+            memfault_reason(ctx, type, sec, addr, "mpu-ap", attr, addr_sec, mpcbb_hit);
+            record_memfault(ctx, sec, type, addr);
+            return MM_FALSE;
+        }
+    }
 
     switch (type) {
     case MM_ACCESS_READ: needed = MM_PROT_PERM_READ; break;

@@ -21,8 +21,12 @@
 
 #include "m33mu/nvic.h"
 #include "m33mu/mmio.h"
+#include "m33mu/scs.h"
 #include <stdlib.h>
 #include <stdio.h>
+
+#define AIRCR_PRIGROUP_SHIFT 8u
+#define AIRCR_PRIGROUP_MASK (0x7u << AIRCR_PRIGROUP_SHIFT)
 
 static mm_nvic_enable_hook_t g_enable_hook = 0;
 static void *g_enable_hook_opaque = 0;
@@ -206,6 +210,17 @@ static mm_bool primask_blocks_target(const struct mm_cpu *cpu, enum mm_sec_state
     return cpu->primask_s != 0u;
 }
 
+static mm_bool faultmask_blocks_target(const struct mm_cpu *cpu, enum mm_sec_state target_sec)
+{
+    if (cpu == 0) {
+        return MM_FALSE;
+    }
+    if (target_sec == MM_NONSECURE) {
+        return cpu->faultmask_ns != 0u;
+    }
+    return cpu->faultmask_s != 0u;
+}
+
 static mm_u8 basepri_for_target(const struct mm_cpu *cpu, enum mm_sec_state target_sec)
 {
     if (cpu == 0) {
@@ -215,16 +230,44 @@ static mm_u8 basepri_for_target(const struct mm_cpu *cpu, enum mm_sec_state targ
                                         : (mm_u8)(cpu->basepri_s & 0xFFu);
 }
 
-static mm_bool basepri_blocks_target(const struct mm_cpu *cpu, enum mm_sec_state target_sec, mm_u8 irq_prio)
+static mm_u8 prigroup_for_target(const struct mm_scs *scs, enum mm_sec_state target_sec)
+{
+    mm_u32 aircr;
+    if (scs == 0) {
+        return 0u;
+    }
+    aircr = (target_sec == MM_NONSECURE) ? scs->aircr_ns : scs->aircr_s;
+    return (mm_u8)((aircr & AIRCR_PRIGROUP_MASK) >> AIRCR_PRIGROUP_SHIFT);
+}
+
+static mm_u8 preempt_priority_value(mm_u8 prio, mm_u8 prigroup)
+{
+    mm_u8 sub_bits;
+    if (prigroup > 7u) {
+        prigroup = 7u;
+    }
+    sub_bits = (mm_u8)(prigroup + 1u);
+    if (sub_bits >= 8u) {
+        return 0u;
+    }
+    return (mm_u8)(prio & (mm_u8)(0xFFu << sub_bits));
+}
+
+static mm_bool basepri_blocks_target(const struct mm_cpu *cpu,
+                                     enum mm_sec_state target_sec,
+                                     const struct mm_scs *scs,
+                                     mm_u8 irq_prio)
 {
     mm_u8 basepri = basepri_for_target(cpu, target_sec);
+    mm_u8 prigroup = prigroup_for_target(scs, target_sec);
     if (basepri == 0u) {
         return MM_FALSE;
     }
     if (irq_prio == 0u) {
         return MM_FALSE;
     }
-    return (irq_prio >= basepri) ? MM_TRUE : MM_FALSE;
+    return preempt_priority_value(irq_prio, prigroup) >=
+           preempt_priority_value(basepri, prigroup) ? MM_TRUE : MM_FALSE;
 }
 
 static mm_bool usb_trace_enabled(void)
@@ -268,7 +311,10 @@ static void usb_trace_irq14_mask(mm_bool masked, enum mm_sec_state tsec, const s
     *last = MM_FALSE;
 }
 
-int mm_nvic_select_routed(const struct mm_nvic *nvic, const struct mm_cpu *cpu, enum mm_sec_state *target_sec_out)
+int mm_nvic_select_routed_ex(const struct mm_nvic *nvic,
+                             const struct mm_cpu *cpu,
+                             const struct mm_scs *scs,
+                             enum mm_sec_state *target_sec_out)
 {
     mm_u32 best_irq = 0xffffffffu;
     mm_u8 best_prio = 0xffu;
@@ -295,7 +341,10 @@ int mm_nvic_select_routed(const struct mm_nvic *nvic, const struct mm_cpu *cpu, 
             }
             continue;
         }
-        if (basepri_blocks_target(cpu, tsec, nvic->priority[irq])) {
+        if (faultmask_blocks_target(cpu, tsec)) {
+            continue;
+        }
+        if (basepri_blocks_target(cpu, tsec, scs, nvic->priority[irq])) {
             continue;
         }
         if (irq == 14u) {
@@ -321,9 +370,19 @@ int mm_nvic_select_routed(const struct mm_nvic *nvic, const struct mm_cpu *cpu, 
     return (int)best_irq;
 }
 
+int mm_nvic_select_routed(const struct mm_nvic *nvic, const struct mm_cpu *cpu, enum mm_sec_state *target_sec_out)
+{
+    return mm_nvic_select_routed_ex(nvic, cpu, 0, target_sec_out);
+}
+
 int mm_nvic_select(const struct mm_nvic *nvic, const struct mm_cpu *cpu)
 {
-    return mm_nvic_select_routed(nvic, cpu, 0);
+    return mm_nvic_select_ex(nvic, cpu, 0);
+}
+
+int mm_nvic_select_ex(const struct mm_nvic *nvic, const struct mm_cpu *cpu, const struct mm_scs *scs)
+{
+    return mm_nvic_select_routed_ex(nvic, cpu, scs, 0);
 }
 
 struct mm_nvic_mmio {
