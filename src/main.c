@@ -2565,6 +2565,9 @@ static mm_bool tailchain_select_pending(const struct mm_cpu *cpu,
     struct mm_nvic *nvic;
     enum mm_sec_state irq_sec = MM_SECURE;
     int pend_irq;
+    mm_bool have_best = MM_FALSE;
+    mm_u8 best_preempt = 0xffu;
+    mm_u8 best_raw_prio = 0xffu;
 
     if (cpu == 0 || scs == 0 || exc_num_out == 0 || handler_sec_out == 0 ||
         is_irq_out == 0 || irq_num_out == 0) {
@@ -2579,30 +2582,57 @@ static mm_bool tailchain_select_pending(const struct mm_cpu *cpu,
         !primask_blocks_current(cpu) &&
         !faultmask_blocks_current(cpu) &&
         !basepri_blocks_system_exc(cpu, scs, MM_VECT_PENDSV)) {
+        mm_u8 prigroup = aircr_prigroup_for_sec(scs, cpu->sec_state);
+        mm_u8 prio = system_exc_priority(cpu, scs, MM_VECT_PENDSV);
+        best_preempt = preempt_priority_value(prio, prigroup);
+        best_raw_prio = prio;
         *exc_num_out = MM_VECT_PENDSV;
-        return MM_TRUE;
+        *handler_sec_out = cpu->sec_state;
+        *is_irq_out = MM_FALSE;
+        *irq_num_out = 0u;
+        have_best = MM_TRUE;
     }
     if (scs->pend_st &&
         !primask_blocks_current(cpu) &&
         !faultmask_blocks_current(cpu) &&
         !basepri_blocks_system_exc(cpu, scs, MM_VECT_SYSTICK)) {
-        *exc_num_out = MM_VECT_SYSTICK;
-        return MM_TRUE;
+        mm_u8 prigroup = aircr_prigroup_for_sec(scs, cpu->sec_state);
+        mm_u8 prio = system_exc_priority(cpu, scs, MM_VECT_SYSTICK);
+        mm_u8 preempt = preempt_priority_value(prio, prigroup);
+        if (!have_best ||
+            preempt < best_preempt ||
+            (preempt == best_preempt && prio < best_raw_prio)) {
+            best_preempt = preempt;
+            best_raw_prio = prio;
+            *exc_num_out = MM_VECT_SYSTICK;
+            *handler_sec_out = cpu->sec_state;
+            *is_irq_out = MM_FALSE;
+            *irq_num_out = 0u;
+            have_best = MM_TRUE;
+        }
     }
 
     nvic = nvic_for_cpu(cpu);
-    if (nvic == 0) {
-        return MM_FALSE;
+    if (nvic != 0) {
+        pend_irq = mm_nvic_select_routed_ex(nvic, cpu, scs, &irq_sec);
+        if (pend_irq >= 0) {
+            mm_u8 prigroup = aircr_prigroup_for_sec(scs, irq_sec);
+            mm_u8 prio = nvic->priority[pend_irq];
+            mm_u8 preempt = preempt_priority_value(prio, prigroup);
+            if (!have_best ||
+                preempt < best_preempt ||
+                (preempt == best_preempt && prio < best_raw_prio)) {
+                best_preempt = preempt;
+                best_raw_prio = prio;
+                *exc_num_out = 16u + (mm_u32)pend_irq;
+                *handler_sec_out = irq_sec;
+                *is_irq_out = MM_TRUE;
+                *irq_num_out = (mm_u32)pend_irq;
+                have_best = MM_TRUE;
+            }
+        }
     }
-    pend_irq = mm_nvic_select_routed_ex(nvic, cpu, scs, &irq_sec);
-    if (pend_irq < 0) {
-        return MM_FALSE;
-    }
-    *exc_num_out = 16u + (mm_u32)pend_irq;
-    *handler_sec_out = irq_sec;
-    *is_irq_out = MM_TRUE;
-    *irq_num_out = (mm_u32)pend_irq;
-    return MM_TRUE;
+    return have_best;
 }
 
 static mm_bool exc_return_unstack(struct mm_cpu *cpu,
@@ -2662,13 +2692,16 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
                (unsigned long)cpu->control_ns);
     }
 
-    if (info.to_thread &&
+    if (cpu->exc_depth > 0 && cpu->exc_depth <= MM_EXC_STACK_MAX) {
+        tail_current_exc_num = cpu->exc_num[cpu->exc_depth - 1];
+    }
+    if (MM_FALSE &&
+        info.to_thread &&
+        tail_current_exc_num >= 16u &&
         cpu->exc_depth > 0 &&
-        tailchain_select_pending(cpu, scs, &tail_exc_num, &tail_handler_sec, &tail_is_irq, &tail_irq_num)) {
-        if (cpu->exc_depth <= MM_EXC_STACK_MAX) {
-            tail_current_exc_num = cpu->exc_num[cpu->exc_depth - 1];
-        }
-        if (tail_current_exc_num >= 16u) {
+        tailchain_select_pending(cpu, scs, &tail_exc_num, &tail_handler_sec, &tail_is_irq, &tail_irq_num) &&
+        tail_is_irq) {
+        {
             struct mm_nvic *nvic = nvic_for_cpu(cpu);
             if (nvic != 0) {
                 mm_nvic_set_active(nvic, tail_current_exc_num - 16u, MM_FALSE);
@@ -3285,10 +3318,14 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
             exec_ctx.dec = &d;
             exec_ctx.opt_dump = MM_FALSE;
             exec_ctx.opt_gdb = MM_FALSE;
+            exec_ctx.opt_expect_bkpt = MM_FALSE;
+            exec_ctx.expect_bkpt = 0u;
             exec_ctx.it_pattern = it_pattern;
             exec_ctx.it_remaining = it_remaining;
             exec_ctx.it_cond = it_cond;
             exec_ctx.done = done;
+            exec_ctx.bkpt_hit = 0;
+            exec_ctx.bkpt_imm = 0;
             exec_ctx.handle_pc_write = handle_pc_write;
             exec_ctx.raise_mem_fault = raise_mem_fault;
             exec_ctx.raise_usage_fault = raise_usage_fault;
@@ -5719,7 +5756,7 @@ handle_pending:
                     }
                     code_cache.fpu_ok = fast_fpu_ok;
                     if (fast_mode) {
-                        struct mm_tb *tb = mm_tb_lookup(&code_cache, cpu.r[15] & ~1u, cpu.sec_state);
+                    struct mm_tb *tb = mm_tb_lookup(&code_cache, cpu.r[15] & ~1u, cpu.sec_state);
                         if (tb == 0) {
                             tb = mm_tb_build(&code_cache, &cpu, &map, &scs, cpu.r[15] & ~1u, cpu.sec_state, opt_gdb);
                         }
@@ -5748,10 +5785,14 @@ handle_pending:
                             exec_ctx.dec = 0;
                             exec_ctx.opt_dump = opt_dump;
                             exec_ctx.opt_gdb = opt_gdb;
+                            exec_ctx.opt_expect_bkpt = opt_expect_bkpt;
+                            exec_ctx.expect_bkpt = expect_bkpt;
                             exec_ctx.it_pattern = &it_pattern;
                             exec_ctx.it_remaining = &it_remaining;
                             exec_ctx.it_cond = &it_cond;
                             exec_ctx.done = &done;
+                            exec_ctx.bkpt_hit = &tb_bkpt_hit;
+                            exec_ctx.bkpt_imm = &tb_bkpt_imm;
                             exec_ctx.handle_pc_write = handle_pc_write;
                             exec_ctx.raise_mem_fault = raise_mem_fault;
                             exec_ctx.raise_usage_fault = raise_usage_fault;
@@ -5772,6 +5813,8 @@ handle_pending:
                                     if (tb_bkpt_imm == expect_bkpt) {
                                         expect_bkpt_hit = MM_TRUE;
                                         printf("[EXPECT BKPT] Success\n");
+                                        done = MM_TRUE;
+                                        break;
                                     } else {
                                         printf("[EXPECT BKPT] Fail\n");
                                     }
@@ -6093,6 +6136,8 @@ handle_pending:
 
                     {
                         struct mm_execute_ctx exec_ctx;
+                        mm_bool exec_bkpt_hit = MM_FALSE;
+                        mm_u32 exec_bkpt_imm = 0u;
                         calltrace_handle_decoded(&cpu, &f, &d);
                         exec_ctx.cpu = &cpu;
                         exec_ctx.map = &map;
@@ -6102,10 +6147,14 @@ handle_pending:
                         exec_ctx.dec = &d;
                         exec_ctx.opt_dump = opt_dump;
                         exec_ctx.opt_gdb = opt_gdb;
+                        exec_ctx.opt_expect_bkpt = opt_expect_bkpt;
+                        exec_ctx.expect_bkpt = expect_bkpt;
                         exec_ctx.it_pattern = &it_pattern;
                         exec_ctx.it_remaining = &it_remaining;
                         exec_ctx.it_cond = &it_cond;
                         exec_ctx.done = &done;
+                        exec_ctx.bkpt_hit = &exec_bkpt_hit;
+                        exec_ctx.bkpt_imm = &exec_bkpt_imm;
                         exec_ctx.handle_pc_write = handle_pc_write;
                         exec_ctx.raise_mem_fault = raise_mem_fault;
                         exec_ctx.raise_usage_fault = raise_usage_fault;
@@ -6113,6 +6162,18 @@ handle_pending:
                         exec_ctx.enter_exception = enter_exception;
                         {
                             int exec_res = mm_execute_decoded(&exec_ctx);
+                            if (exec_bkpt_hit) {
+                                printf("[BKPT] imm=0x%02lx\n", (unsigned long)exec_bkpt_imm);
+                                if (opt_expect_bkpt) {
+                                    if (exec_bkpt_imm == expect_bkpt) {
+                                        expect_bkpt_hit = MM_TRUE;
+                                        printf("[EXPECT BKPT] Success\n");
+                                        done = MM_TRUE;
+                                    } else {
+                                        printf("[EXPECT BKPT] Fail\n");
+                                    }
+                                }
+                            }
                             if (exec_res == MM_EXEC_CONTINUE) {
                                 if (execute_it && d.kind != MM_OP_IT) {
                                     mm_it_advance(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
@@ -6129,17 +6190,6 @@ handle_pending:
                                     }
                                 }
                                 continue;
-                            }
-                        }
-                        if (d.kind == MM_OP_BKPT) {
-                            printf("[BKPT] imm=0x%02lx\n", (unsigned long)d.imm);
-                            if (opt_expect_bkpt) {
-                                if (d.imm == expect_bkpt) {
-                                    expect_bkpt_hit = MM_TRUE;
-                                    printf("[EXPECT BKPT] Success\n");
-                                } else {
-                                    printf("[EXPECT BKPT] Fail\n");
-                                }
                             }
                         }
                         if (opt_tui && !opt_gdb && done && d.kind == MM_OP_BKPT) {

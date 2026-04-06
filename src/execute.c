@@ -3019,6 +3019,16 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             } break;
                         case MM_OP_BKPT: {
                                             mm_u32 ret_pc = f.pc_fetch + 2u;
+                                            if (ctx->bkpt_hit != 0) {
+                                                *ctx->bkpt_hit = MM_TRUE;
+                                            }
+                                            if (ctx->bkpt_imm != 0) {
+                                                *ctx->bkpt_imm = d.imm;
+                                            }
+                                            if (ctx->opt_expect_bkpt) {
+                                                done = MM_TRUE;
+                                                break;
+                                            }
                                             scs.dfsr |= (1u << 1); /* BKPT */
                                             if (opt_gdb) {
                                                 mm_gdb_stub_notify_stop(&gdb, 5);

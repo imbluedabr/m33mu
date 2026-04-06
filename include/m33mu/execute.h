@@ -44,10 +44,14 @@ struct mm_execute_ctx {
     const struct mm_decoded *dec;
     mm_bool opt_dump;
     mm_bool opt_gdb;
+    mm_bool opt_expect_bkpt;
+    mm_u32 expect_bkpt;
     mm_u8 *it_pattern;
     mm_u8 *it_remaining;
     mm_u8 *it_cond;
     mm_bool *done;
+    mm_bool *bkpt_hit;
+    mm_u32 *bkpt_imm;
     mm_bool (*handle_pc_write)(struct mm_cpu *cpu,
                                struct mm_memmap *map,
                                struct mm_scs *scs,
