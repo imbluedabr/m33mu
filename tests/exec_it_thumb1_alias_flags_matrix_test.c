@@ -228,6 +228,10 @@ int main(void)
         0x00, 0x20, 0xc0, 0x43, 0x47, 0x21, 0x3d, 0x29, 0x18, 0xbf, 0xc0, 0x43,
         0x18, 0xbf, 0x01, 0x22,
     };
+    static const mm_u8 neg_case[] = {
+        0x00, 0x20, 0x47, 0x21, 0x3d, 0x29, 0x18, 0xbf, 0x40, 0x42, 0x18, 0xbf,
+        0x01, 0x22,
+    };
     static const struct alias_case cases[] = {
         { "mov_imm_it_flags", mov_case, sizeof(mov_case) },
         { "add_imm_it_flags", add_case, sizeof(add_case) },
@@ -237,6 +241,7 @@ int main(void)
         { "asr_imm_it_flags", asr_case, sizeof(asr_case) },
         { "ror_reg_it_flags", ror_case, sizeof(ror_case) },
         { "mvn_reg_it_flags", mvn_case, sizeof(mvn_case) },
+        { "neg_reg_it_flags", neg_case, sizeof(neg_case) },
     };
     size_t i;
 

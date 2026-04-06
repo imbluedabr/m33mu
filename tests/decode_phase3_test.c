@@ -118,6 +118,17 @@ static int test_sbfx(void)
     return 0;
 }
 
+static int test_sbfx_fields(void)
+{
+    struct mm_decoded dec;
+    /* sbfx r2, r1, #5, #7 */
+    if (decode_insn(0xf341u, 0x1246u, &dec) != 0) return 1;
+    if (dec.kind != MM_OP_SBFX) return 1;
+    if (dec.rd != 2u || dec.rn != 1u) return 1;
+    if (dec.imm != (5u | (6u << 8))) return 1;
+    return 0;
+}
+
 static int test_bfi(void)
 {
     struct mm_decoded dec;
@@ -472,6 +483,17 @@ static int test_ldrex(void)
     return 0;
 }
 
+static int test_ldrex_imm8(void)
+{
+    struct mm_decoded dec;
+    if (decode_insn(0xe851u, 0x0f02u, &dec) != 0) return 1;
+    if (dec.kind != MM_OP_LDREX) return 1;
+    if (dec.rn != 1u) return 1;
+    if (dec.rd != 0u) return 1;
+    if (dec.imm != 8u) return 1;
+    return 0;
+}
+
 static int test_strex(void)
 {
     struct mm_decoded dec;
@@ -480,6 +502,18 @@ static int test_strex(void)
     if (dec.rn != 1u) return 1;
     if (dec.rd != 2u) return 1;
     if (dec.rm != 0u) return 1;
+    return 0;
+}
+
+static int test_strex_imm8(void)
+{
+    struct mm_decoded dec;
+    if (decode_insn(0xe841u, 0x0201u, &dec) != 0) return 1;
+    if (dec.kind != MM_OP_STREX) return 1;
+    if (dec.rn != 1u) return 1;
+    if (dec.rd != 2u) return 1;
+    if (dec.rm != 0u) return 1;
+    if (dec.imm != 4u) return 1;
     return 0;
 }
 
@@ -536,12 +570,15 @@ int main(void)
         { "mvn_reg_w", test_mvn_reg_w },
         { "ubfx", test_ubfx },
         { "sbfx", test_sbfx },
+        { "sbfx_fields", test_sbfx_fields },
         { "bfi", test_bfi },
         { "bfc", test_bfc },
         { "tbb", test_tbb },
         { "tbh", test_tbh },
         { "ldrex", test_ldrex },
+        { "ldrex_imm8", test_ldrex_imm8 },
         { "strex", test_strex },
+        { "strex_imm8", test_strex_imm8 },
         { "ldrexh", test_ldrexh },
         { "strexh", test_strexh },
         { "clrex", test_clrex },

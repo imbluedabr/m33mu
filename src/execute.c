@@ -1734,13 +1734,16 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_u32 res;
                                             mm_bool cflag;
                                             mm_bool vflag;
+                                            mm_bool setflags = (d.len == 2u && it_remaining > 0u) ? MM_FALSE : MM_TRUE;
                                             mm_add_with_carry(0u, ~cpu.r[d.rm], MM_TRUE, &res, &cflag, &vflag);
                                             cpu.r[d.rd] = res;
-                                            cpu.xpsr &= ~(0xF0000000u);
-                                            if (res == 0u) cpu.xpsr |= (1u << 30);
-                                            if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
-                                            if (cflag) cpu.xpsr |= (1u << 29);
-                                            if (vflag) cpu.xpsr |= (1u << 28);
+                                            if (setflags) {
+                                                cpu.xpsr &= ~(0xF0000000u);
+                                                if (res == 0u) cpu.xpsr |= (1u << 30);
+                                                if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                                if (cflag) cpu.xpsr |= (1u << 29);
+                                                if (vflag) cpu.xpsr |= (1u << 28);
+                                            }
                                         } break;
                         case MM_OP_SBCS_REG: {
                                                  mm_bool reg_form = ((d.raw & 0xfe000000u) == 0xea000000u);
@@ -2764,6 +2767,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                         } break;
                         case MM_OP_SUB_IMM:
                                         {
+                                            mm_u32 lhs = (d.rn == 15u) ? mm_pc_operand(&f) : cpu.r[d.rn];
                                             mm_bool setflags = MM_FALSE;
                                             if (d.len == 2u) {
                                                 /* Thumb-1 SUBS aliases inside IT must not clobber flags. */
@@ -2776,7 +2780,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_bool cflag;
                                                 mm_bool vflag;
                                                 /* Thumb SUB (immediate) updates flags (SUBS). */
-                                                mm_add_with_carry(cpu.r[d.rn], ~d.imm, MM_TRUE, &res, &cflag, &vflag);
+                                                mm_add_with_carry(lhs, ~d.imm, MM_TRUE, &res, &cflag, &vflag);
                                                 if (d.rd == 15u) {
                                                     if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
                                                         done = MM_TRUE;
@@ -2793,7 +2797,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 if (cflag) cpu.xpsr |= (1u << 29);
                                                 if (vflag) cpu.xpsr |= (1u << 28);
                                             } else {
-                                                mm_u32 res = cpu.r[d.rn] - d.imm;
+                                                mm_u32 res = lhs - d.imm;
                                                 if (d.rd == 15u) {
                                                     if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
                                                         done = MM_TRUE;
@@ -2809,7 +2813,8 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                         break;
                         case MM_OP_SUB_IMM_NF:
                                         {
-                                            mm_u32 res = cpu.r[d.rn] - d.imm;
+                                            mm_u32 lhs = (d.rn == 15u) ? mm_pc_operand(&f) : cpu.r[d.rn];
+                                            mm_u32 res = lhs - d.imm;
                                             if (d.rd == 15u) {
                                                 if (!handle_pc_write(&cpu, &map, &scs, res, &it_pattern, &it_remaining, &it_cond)) {
                                                     done = MM_TRUE;
@@ -3098,7 +3103,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             } break;
                         case MM_OP_LDREX: {
                                               mm_u32 val = 0;
-                                              mm_u32 addr = cpu.r[d.rn];
+                                              mm_u32 addr = cpu.r[d.rn] + d.imm;
                                               if (!mm_memmap_read(&map, cpu.sec_state, addr, 4u, &val)) {
                                                   if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                   return MM_EXEC_CONTINUE;
@@ -3136,7 +3141,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                               mm_cpu_excl_clear(&cpu);
                                           } break;
                         case MM_OP_STREX: {
-                                              mm_u32 addr = cpu.r[d.rn];
+                                              mm_u32 addr = cpu.r[d.rn] + d.imm;
                                               mm_bool ok = mm_cpu_excl_check_and_clear(&cpu, cpu.sec_state, addr, 4u);
                                               if (ok) {
                                                   if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.r[d.rm])) {

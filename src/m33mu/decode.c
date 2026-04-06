@@ -1400,6 +1400,7 @@ static struct mm_decoded decode_32(mm_u32 insn)
         d.kind = MM_OP_LDREX;
         d.rn = (mm_u8)((insn >> 16) & 0x0fu);
         d.rd = (mm_u8)((insn >> 12) & 0x0fu);
+        d.imm = (insn & 0xffu) << 2;
         d.undefined = MM_FALSE;
         return d;
     }
@@ -1423,11 +1424,12 @@ static struct mm_decoded decode_32(mm_u32 insn)
     }
 
     /* STREX (word) */
-    if ((insn & 0xfff000ffu) == 0xe8400000u) {
+    if ((insn & 0xfff00000u) == 0xe8400000u) {
         d.kind = MM_OP_STREX;
         d.rn = (mm_u8)((insn >> 16) & 0x0fu);
         d.rm = (mm_u8)((insn >> 12) & 0x0fu); /* Rt value */
         d.rd = (mm_u8)((insn >> 8) & 0x0fu);  /* Rd status */
+        d.imm = (insn & 0xffu) << 2;
         d.undefined = MM_FALSE;
         return d;
     }
@@ -2965,11 +2967,11 @@ static struct mm_decoded decode_32(mm_u32 insn)
         }
     }
 
-    /* SBFX (Thumb-2): 1111 0111 0100 Rn | 0 imm3 Rd 0 imm2 widthm1 */
+    /* SBFX (Thumb-2): 1111 0011 0100 Rn | 0 imm3 Rd 0 imm2 widthm1 */
     {
         mm_u16 hw1 = (mm_u16)(insn >> 16);
         mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
-        if ((hw1 & 0xfff0u) == 0xf740u) {
+        if ((hw1 & 0xfff0u) == 0xf340u) {
             mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
             mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
             mm_u8 imm3 = (mm_u8)((hw2 >> 12) & 0x7u);
@@ -2985,15 +2987,6 @@ static struct mm_decoded decode_32(mm_u32 insn)
                 return d;
             }
         }
-    }
-
-    /* SBFX */
-    if ((insn & 0xfff00000u) == 0xf3400000u) {
-        d.kind = MM_OP_SBFX;
-        d.rd = (mm_u8)((insn >> 8) & 0x0fu);
-        d.rn = (mm_u8)((insn >> 16) & 0x0fu);
-        d.undefined = MM_FALSE;
-        return d;
     }
 
     /* BFI/BFC (Thumb-2), encoding family with bit5 in low halfword required 0.

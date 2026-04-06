@@ -323,6 +323,82 @@ static int test_ldrexh_strexh_execute(void)
     return 0;
 }
 
+static int test_ldrex_strex_word_offset_execute(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[64];
+    mm_u32 value = 0;
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.r[0] = 0x20000000u;
+    if (!mm_memmap_write(&map, cpu.sec_state, cpu.r[0], 4u, 0x11111111u)) return 1;
+    if (!mm_memmap_write(&map, cpu.sec_state, cpu.r[0] + 8u, 4u, 0xA5A5A5A5u)) return 1;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_LDREX;
+    dec.rn = 0u;
+    dec.rd = 1u;
+    dec.imm = 8u;
+    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (cpu.r[1] != 0xA5A5A5A5u) return 1;
+
+    dec.kind = MM_OP_STREX;
+    dec.rn = 0u;
+    dec.rm = 2u;
+    dec.rd = 3u;
+    dec.imm = 8u;
+    cpu.r[2] = 0x12345678u;
+    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (cpu.r[3] != 0u) return 1;
+    if (!mm_memmap_read(&map, cpu.sec_state, cpu.r[0], 4u, &value)) return 1;
+    if (value != 0x11111111u) return 1;
+    if (!mm_memmap_read(&map, cpu.sec_state, cpu.r[0] + 8u, 4u, &value)) return 1;
+    if (value != 0x12345678u) return 1;
+    return 0;
+}
+
+static int test_sub_imm_pc_align_execute(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 0x1003u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_SUB_IMM;
+    dec.rn = 15u;
+    dec.rd = 0u;
+    dec.imm = 4u;
+    dec.len = 2u;
+    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (cpu.r[0] != 0x1000u) return 1;
+
+    cpu.r[1] = 0u;
+    dec.kind = MM_OP_SUB_IMM_NF;
+    dec.rd = 1u;
+    if (exec_one(&cpu, &map, &scs, &dec) != 0) return 1;
+    if (cpu.r[1] != 0x1000u) return 1;
+    return 0;
+}
+
 int main(void)
 {
     if (test_unprivileged_t_forms_execute() != 0) {
@@ -339,6 +415,14 @@ int main(void)
     }
     if (test_ldrexh_strexh_execute() != 0) {
         printf("FAIL: ldrexh_strexh_execute\n");
+        return 1;
+    }
+    if (test_ldrex_strex_word_offset_execute() != 0) {
+        printf("FAIL: ldrex_strex_word_offset_execute\n");
+        return 1;
+    }
+    if (test_sub_imm_pc_align_execute() != 0) {
+        printf("FAIL: sub_imm_pc_align_execute\n");
         return 1;
     }
     return 0;
