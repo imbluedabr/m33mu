@@ -1593,7 +1593,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                mm_u32 res;
                                                mm_bool cflag;
                                                mm_bool vflag;
-                                               mm_bool setflags = (d.raw & (1u << 20)) != 0u;
+                                               mm_bool setflags = MM_FALSE;
+                                               if ((d.raw & (1u << 20)) != 0u) {
+                                                   setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                               }
                                                mm_add_with_carry(d.imm, ~cpu.r[d.rn], MM_TRUE, &res, &cflag, &vflag);
                                                cpu.r[d.rd] = res;
                                                if (setflags) {
@@ -1627,16 +1630,19 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                        if ((d.raw & 0xfe000000u) == 0xea000000u) {
                                            mm_u32 rhs = shift_reg_operand(cpu.r[d.rm], d.imm, cpu.xpsr, NULL);
                                            if ((d.raw & (1u << 20)) != 0u) {
+                                               mm_bool setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                mm_u32 res;
                                                mm_bool cflag;
                                                mm_bool vflag;
                                                mm_add_with_carry(cpu.r[d.rn], rhs, MM_FALSE, &res, &cflag, &vflag);
                                                cpu.r[d.rd] = res;
-                                               cpu.xpsr &= ~(0xF0000000u);
-                                               if (res == 0u) cpu.xpsr |= (1u << 30);
-                                               if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
-                                               if (cflag) cpu.xpsr |= (1u << 29);
-                                               if (vflag) cpu.xpsr |= (1u << 28);
+                                               if (setflags) {
+                                                   cpu.xpsr &= ~(0xF0000000u);
+                                                   if (res == 0u) cpu.xpsr |= (1u << 30);
+                                                   if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                                   if (cflag) cpu.xpsr |= (1u << 29);
+                                                   if (vflag) cpu.xpsr |= (1u << 28);
+                                               }
                                            } else {
                                                cpu.r[d.rd] = cpu.r[d.rn] + rhs;
                                            }
@@ -1827,11 +1833,16 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                         case MM_OP_ROR_REG: {
                                                 mm_u32 val = cpu.r[d.rn];
                                                 mm_u32 sh = cpu.r[d.rm] & 0xffu;
-                                                /* Thumb-1 RORS aliases inside IT must not clobber flags. */
-                                                mm_bool setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
+                                                mm_bool setflags = MM_FALSE;
                                                 mm_bool carry_in = (cpu.xpsr & (1u << 29)) != 0u;
                                                 mm_bool carry_out = carry_in;
                                                 mm_u32 res = mm_ror_reg_shift_c(val, sh, carry_in, &carry_out);
+                                                if (d.len == 2u) {
+                                                    /* Thumb-1 RORS aliases inside IT must not clobber flags. */
+                                                    setflags = (it_remaining == 0u) ? MM_TRUE : MM_FALSE;
+                                                } else if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
+                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                }
                                                 cpu.r[d.rd] = res;
                                                 if (setflags) {
                                                     cpu.xpsr &= ~(0xE0000000u);
@@ -1903,7 +1914,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                 mm_add_with_carry(cpu.r[d.rn], d.imm, carry_in, &res, &cflag, &vflag);
                                                 cpu.r[d.rd] = res;
                                                 if (d.len == 4u && ((d.raw >> 20) & 1u) != 0u) {
-                                                    setflags = MM_TRUE;
+                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                 }
                                                 if (setflags) {
                                                     cpu.xpsr &= ~(0xF0000000u);
@@ -2723,6 +2734,9 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     }
                                                     break;
                                                 case 0x0b: /* PSPLIM */
+                                                    if (cpu.sec_state == MM_NONSECURE && cpu.mode == MM_THREAD && unpriv) {
+                                                        break;
+                                                    }
                                                     if (cpu.sec_state == MM_NONSECURE) {
                                                         cpu.psplim_ns = val & ~0x7u;
                                                     } else {
@@ -2767,6 +2781,9 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                     }
                                                     break;
                                                 case 0x8b: /* PSPLIM_NS */
+                                                    if (cpu.sec_state == MM_NONSECURE && cpu.mode == MM_THREAD && unpriv) {
+                                                        break;
+                                                    }
                                                     cpu.psplim_ns = val & ~0x7u;
                                                     if (splim_trace_enabled()) {
                                                         printf("[SPLIM] PSPLIM NS=0x%08lx pc=0x%08lx mode=%d\n",
@@ -2825,11 +2842,14 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             /* MSR does not affect PC; fall through with normal PC increment. */
                                         } break;
                         case MM_OP_MVN_IMM: {
-                                                mm_bool setflags = (d.raw & (1u << 20)) != 0u; /* Thumb-2 MVN immediate S bit. */
+                                                mm_bool setflags = MM_FALSE;
                                                 mm_bool carry_in = (cpu.xpsr & (1u << 29)) != 0u;
                                                 mm_bool carry_out = carry_in;
                                                 mm_u32 imm32 = 0;
                                                 mm_u32 res;
+                                                if ((d.raw & (1u << 20)) != 0u) {
+                                                    setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
+                                                }
                                                 mm_thumb_expand_imm12_c(d.imm, carry_in, &imm32, &carry_out);
                                                 res = ~imm32;
                                                 cpu.r[d.rd] = res;
@@ -2870,12 +2890,20 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             } break;
                         case MM_OP_CPS: {
                                             mm_bool disable = (d.imm & 0x10u) != 0u;
+                                            mm_bool affect_f = (d.imm & 0x01u) != 0u;
                                             mm_bool affect_i = (d.imm & 0x02u) != 0u;
                                             if (affect_i) {
                                                 if (cpu.sec_state == MM_NONSECURE) {
                                                     cpu.primask_ns = disable ? 1u : 0u;
                                                 } else {
                                                     cpu.primask_s = disable ? 1u : 0u;
+                                                }
+                                            }
+                                            if (affect_f) {
+                                                if (cpu.sec_state == MM_NONSECURE) {
+                                                    cpu.faultmask_ns = disable ? 1u : 0u;
+                                                } else {
+                                                    cpu.faultmask_s = disable ? 1u : 0u;
                                                 }
                                             }
                                         } break;
@@ -2946,14 +2974,17 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             mm_u32 rhs = shift_reg_operand(cpu.r[d.rm], d.imm, cpu.xpsr, NULL);
                                             mm_u32 res;
                                             if ((d.raw & (1u << 20)) != 0u) {
+                                                mm_bool setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                 mm_bool cflag;
                                                 mm_bool vflag;
                                                 mm_add_with_carry(cpu.r[d.rn], ~rhs, MM_TRUE, &res, &cflag, &vflag);
-                                                cpu.xpsr &= ~(0xF0000000u);
-                                                if (res == 0u) cpu.xpsr |= (1u << 30);
-                                                if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
-                                                if (cflag) cpu.xpsr |= (1u << 29);
-                                                if (vflag) cpu.xpsr |= (1u << 28);
+                                                if (setflags) {
+                                                    cpu.xpsr &= ~(0xF0000000u);
+                                                    if (res == 0u) cpu.xpsr |= (1u << 30);
+                                                    if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                                    if (cflag) cpu.xpsr |= (1u << 29);
+                                                    if (vflag) cpu.xpsr |= (1u << 28);
+                                                }
                                             } else {
                                                 res = cpu.r[d.rn] - rhs;
                                             }
@@ -2998,16 +3029,19 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                         case MM_OP_RSB_REG: {
                                                mm_u32 rhs = shift_reg_operand(cpu.r[d.rm], d.imm, cpu.xpsr, NULL);
                                                if ((d.raw & (1u << 20)) != 0u) {
+                                                   mm_bool setflags = (it_remaining <= 1u) ? MM_TRUE : MM_FALSE;
                                                    mm_u32 res;
                                                    mm_bool cflag;
                                                    mm_bool vflag;
                                                    mm_add_with_carry(rhs, ~cpu.r[d.rn], MM_TRUE, &res, &cflag, &vflag);
                                                    cpu.r[d.rd] = res;
-                                                   cpu.xpsr &= ~(0xF0000000u);
-                                                   if (res == 0u) cpu.xpsr |= (1u << 30);
-                                                   if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
-                                                   if (cflag) cpu.xpsr |= (1u << 29);
-                                                   if (vflag) cpu.xpsr |= (1u << 28);
+                                                   if (setflags) {
+                                                       cpu.xpsr &= ~(0xF0000000u);
+                                                       if (res == 0u) cpu.xpsr |= (1u << 30);
+                                                       if (res & 0x80000000u) cpu.xpsr |= (1u << 31);
+                                                       if (cflag) cpu.xpsr |= (1u << 29);
+                                                       if (vflag) cpu.xpsr |= (1u << 28);
+                                                   }
                                                } else {
                                                    cpu.r[d.rd] = rhs - cpu.r[d.rn];
                                                }

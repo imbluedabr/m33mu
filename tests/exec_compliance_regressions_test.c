@@ -895,6 +895,213 @@ static int test_asr_reg_wide_updates_flags(void)
     return 0;
 }
 
+static int test_ror_reg_wide_updates_flags(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.xpsr = (1u << 28); /* V=1 should be preserved */
+    cpu.r[1] = 0x80000001u;
+    cpu.r[2] = 1u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_ROR_REG;
+    dec.len = 4u;
+    dec.raw = (1u << 20); /* setflags */
+    dec.rd = 0u;
+    dec.rn = 1u;
+    dec.rm = 2u;
+
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.r[0] != 0xC0000000u) {
+        printf("ror_reg_wide: result=0x%08lx\n", (unsigned long)cpu.r[0]);
+        return 1;
+    }
+    if ((cpu.xpsr & (1u << 31)) == 0u || (cpu.xpsr & (1u << 30)) != 0u ||
+        (cpu.xpsr & (1u << 29)) == 0u || (cpu.xpsr & (1u << 28)) == 0u) {
+        printf("ror_reg_wide: xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_psplim_unprivileged_nonsecure_write_ignored(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_NONSECURE;
+    cpu.mode = MM_THREAD;
+    cpu.control_ns = 0x1u; /* unprivileged */
+    cpu.r[15] = 1u;
+    cpu.r[0] = 0x20001023u;
+    cpu.psplim_ns = 0x20000000u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_MSR;
+    dec.rm = 0u;
+    dec.imm = 0x0bu; /* PSPLIM */
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.psplim_ns != 0x20000000u) {
+        printf("psplim_unpriv_ns: psplim_ns=0x%08lx\n", (unsigned long)cpu.psplim_ns);
+        return 1;
+    }
+
+    dec.imm = 0x8bu; /* PSPLIM_NS */
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.psplim_ns != 0x20000000u) {
+        printf("psplim_ns_unpriv_ns: psplim_ns=0x%08lx\n", (unsigned long)cpu.psplim_ns);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_cps_faultmask_affects_current_security_bank(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_CPS;
+
+    cpu.sec_state = MM_SECURE;
+    dec.imm = 0x11u; /* CPSID f */
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.faultmask_s != 1u || cpu.faultmask_ns != 0u) {
+        printf("cps_faultmask_secure_set: s=%lu ns=%lu\n",
+               (unsigned long)cpu.faultmask_s, (unsigned long)cpu.faultmask_ns);
+        return 1;
+    }
+    dec.imm = 0x01u; /* CPSIE f */
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.faultmask_s != 0u) {
+        printf("cps_faultmask_secure_clear: s=%lu\n", (unsigned long)cpu.faultmask_s);
+        return 1;
+    }
+
+    cpu.sec_state = MM_NONSECURE;
+    dec.imm = 0x11u; /* CPSID f */
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.faultmask_ns != 1u || cpu.faultmask_s != 0u) {
+        printf("cps_faultmask_ns_set: s=%lu ns=%lu\n",
+               (unsigned long)cpu.faultmask_s, (unsigned long)cpu.faultmask_ns);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_wide_s_ops_suppress_flags_mid_it_consistently(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[32];
+    mm_u32 xpsr_before;
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.r[1] = 5u;
+    cpu.r[2] = 3u;
+    cpu.r[3] = 0x12345678u;
+    xpsr_before = 0xB0000000u;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.len = 4u;
+    dec.raw = (1u << 20);
+    dec.rd = 0u;
+    dec.rn = 1u;
+    dec.rm = 2u;
+    dec.imm = 0u;
+
+    dec.kind = MM_OP_RSB_IMM;
+    dec.imm = 1u;
+    cpu.xpsr = xpsr_before;
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 2u, 0u) != 0) return 1;
+    if ((cpu.xpsr & 0xF0000000u) != xpsr_before) {
+        printf("mid_it_rsb_imm: xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+
+    dec.kind = MM_OP_ADD_REG;
+    dec.imm = 0u;
+    cpu.xpsr = xpsr_before;
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 2u, 0u) != 0) return 1;
+    if ((cpu.xpsr & 0xF0000000u) != xpsr_before) {
+        printf("mid_it_add_reg: xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+
+    dec.kind = MM_OP_ADC_IMM;
+    dec.imm = 1u;
+    cpu.xpsr = xpsr_before | (1u << 29);
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 2u, 0u) != 0) return 1;
+    if ((cpu.xpsr & 0xF0000000u) != (xpsr_before | (1u << 29))) {
+        printf("mid_it_adc_imm: xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+
+    dec.kind = MM_OP_MVN_IMM;
+    dec.imm = 0u;
+    cpu.xpsr = xpsr_before;
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 2u, 0u) != 0) return 1;
+    if ((cpu.xpsr & 0xF0000000u) != xpsr_before) {
+        printf("mid_it_mvn_imm: xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+
+    dec.kind = MM_OP_SUB_REG;
+    dec.imm = 0u;
+    cpu.xpsr = xpsr_before;
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 2u, 0u) != 0) return 1;
+    if ((cpu.xpsr & 0xF0000000u) != xpsr_before) {
+        printf("mid_it_sub_reg: xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+
+    dec.kind = MM_OP_RSB_REG;
+    cpu.xpsr = xpsr_before;
+    if (exec_one_it(&cpu, &map, &scs, 0, &dec, 0u, 2u, 0u) != 0) return 1;
+    if ((cpu.xpsr & 0xF0000000u) != xpsr_before) {
+        printf("mid_it_rsb_reg: xpsr=0x%08lx\n", (unsigned long)cpu.xpsr);
+        return 1;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
     if (test_ldrsb_reg_wide_shift_execute() != 0) {
@@ -963,6 +1170,22 @@ int main(void)
     }
     if (test_asr_reg_wide_updates_flags() != 0) {
         printf("FAIL: asr_reg_wide_updates_flags\n");
+        return 1;
+    }
+    if (test_ror_reg_wide_updates_flags() != 0) {
+        printf("FAIL: ror_reg_wide_updates_flags\n");
+        return 1;
+    }
+    if (test_psplim_unprivileged_nonsecure_write_ignored() != 0) {
+        printf("FAIL: psplim_unprivileged_nonsecure_write_ignored\n");
+        return 1;
+    }
+    if (test_cps_faultmask_affects_current_security_bank() != 0) {
+        printf("FAIL: cps_faultmask_affects_current_security_bank\n");
+        return 1;
+    }
+    if (test_wide_s_ops_suppress_flags_mid_it_consistently() != 0) {
+        printf("FAIL: wide_s_ops_suppress_flags_mid_it_consistently\n");
         return 1;
     }
     return 0;

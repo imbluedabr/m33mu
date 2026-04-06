@@ -556,6 +556,17 @@ static int test_ldr_literal_w_pc(void)
     return 0;
 }
 
+static int test_ror_reg_wide_s_decode(void)
+{
+    struct mm_decoded dec;
+    if (decode_insn(0xfa71u, 0xf002u, &dec) != 0) return 1; /* rors.w r0, r1, r2 */
+    if (dec.kind != MM_OP_ROR_REG) return 1;
+    if (dec.rn != 1u) return 1;
+    if (dec.rd != 0u) return 1;
+    if (dec.rm != 2u) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct {
@@ -613,6 +624,7 @@ int main(void)
         { "revsh_w_decode", test_revsh_w_decode },
         { "sg", test_sg },
         { "ldr_literal_w_pc", test_ldr_literal_w_pc },
+        { "ror_reg_wide_s_decode", test_ror_reg_wide_s_decode },
     };
     const int test_count = (int)(sizeof(tests) / sizeof(tests[0]));
     int failures = 0;

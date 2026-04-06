@@ -1741,7 +1741,7 @@ static struct mm_decoded decode_32(mm_u32 insn)
 
     /* ROR (register) Thumb-2, T2: 1111 1010 0110 Rm | 1111 Rd 0000 Rs */
     if ((insn & 0xffe0f0f0u) == 0xfa60f000u) {
-        d.kind = MM_OP_ROR_REG_NF;
+        d.kind = MM_OP_ROR_REG;
         d.rn = (mm_u8)((insn >> 16) & 0x0fu); /* Rm (value) */
         d.rd = (mm_u8)((insn >> 8) & 0x0fu);
         d.rm = (mm_u8)(insn & 0x0fu);         /* Rs (shift) */
