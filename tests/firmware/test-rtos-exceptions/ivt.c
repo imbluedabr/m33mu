@@ -28,6 +28,7 @@ extern void UsageFault_Handler(void);
 extern void SVC_Handler(void);
 extern void PendSV_Handler(void);
 extern void SysTick_Handler(void);
+extern void IRQ0_Handler(void);
 
 __attribute__((section(".isr_vector")))
 const uint32_t vector_table[] = {
@@ -44,4 +45,5 @@ const uint32_t vector_table[] = {
     0, /* Reserved */
     (uint32_t)&PendSV_Handler, /* PendSV */
     (uint32_t)&SysTick_Handler, /* SysTick */
+    (uint32_t)&IRQ0_Handler, /* IRQ0 */
 };
