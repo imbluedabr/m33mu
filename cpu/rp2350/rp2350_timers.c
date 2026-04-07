@@ -40,6 +40,7 @@ struct rp2350_timer {
     mm_u64 time_us;
     mm_u32 timelw_shadow;
     mm_u64 read_latch;
+    mm_bool read_latch_valid;
     mm_u32 alarm[4];
     mm_u32 armed;
     mm_u32 intr;
@@ -152,11 +153,13 @@ static mm_bool timer_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
 
     switch (base_off) {
     case TIMER_TIMEHR:
-        time = (t->read_latch != 0u) ? t->read_latch : t->time_us;
+        time = t->read_latch_valid ? t->read_latch : t->time_us;
+        t->read_latch_valid = MM_FALSE;
         *value_out = (mm_u32)(time >> 32);
         return MM_TRUE;
     case TIMER_TIMELR:
         t->read_latch = t->time_us;
+        t->read_latch_valid = MM_TRUE;
         *value_out = (mm_u32)(t->read_latch & 0xffffffffu);
         return MM_TRUE;
     case TIMER_TIMERAWH:

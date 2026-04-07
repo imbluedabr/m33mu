@@ -40,6 +40,7 @@ void mm_nrf54lm20_timers_tick(mm_u64 cycles)
         mm_u32 prescaler;
         mm_u32 mask;
         mm_u32 old;
+        mm_u32 now;
         mm_u32 j;
         if (!t->running) continue;
         prescaler = t->regs[0x510u / 4u] & 0xFu;
@@ -50,10 +51,16 @@ void mm_nrf54lm20_timers_tick(mm_u64 cycles)
         t->accum -= ticks * div;
         mask = nrf_timer_bitmask(t);
         old = t->counter;
-        t->counter = (t->counter + (mm_u32)ticks) & mask;
-        if (t->counter == old) continue;
+        now = (old + (mm_u32)ticks) & mask;
+        t->counter = now;
+        if (now == old) continue;
         for (j = 0; j < NRF_TIMER_MAX_CC; ++j) {
-            if (t->cc[j] == t->counter) {
+            mm_u32 cc = t->cc[j] & mask;
+            if (old <= now) {
+                if (cc > old && cc <= now) {
+                    nrf_timer_set_event(t, (mm_u32)j);
+                }
+            } else if (cc > old || cc <= now) {
                 nrf_timer_set_event(t, (mm_u32)j);
             }
         }

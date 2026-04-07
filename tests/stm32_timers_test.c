@@ -134,11 +134,88 @@ static int test_secure_alias_blocks_nonsecure_access(void)
     return 0;
 }
 
+static int test_reset_preserves_timer_identity(void)
+{
+    struct stm32_timers_state state;
+    struct stm32_timer_soc soc;
+    struct mm_nvic nvic;
+    struct mmio_bus bus;
+    struct mmio_region regions[16];
+    mm_u32 value = 0;
+
+    reset_fakes();
+    memset(&state, 0, sizeof(state));
+    memset(&soc, 0, sizeof(soc));
+    mm_nvic_init(&nvic);
+    mmio_bus_init(&bus, regions, 16);
+
+    soc.apb1enr_offset = 0x58u;
+    soc.rcc_regs = fake_rcc_regs;
+    soc.tzsc_regs = fake_tzsc_regs;
+    soc.exti_set_nvic = fake_exti_set_nvic;
+    soc.watchdog_tick = fake_watchdog_tick;
+
+    stm32_timers_init(&state, &soc, &bus, &nvic);
+    g_rcc_regs[0x58u / 4u] = 1u;
+
+    if (!mmio_bus_write(&bus, 0x40000000u + 0x2Cu, 4u, 7u)) return 1;
+    if (!mmio_bus_write(&bus, 0x40000000u + 0x00u, 4u, 1u)) return 1;
+    stm32_timers_reset(&state);
+
+    if (state.nvic != &nvic) return 1;
+    if (state.soc != &soc) return 1;
+    if (state.timers[0].owner != &state) return 1;
+    if (state.timers[0].irq != 45) return 1;
+    if (state.timers[0].arr_mask != 0xFFFFFFFFu) return 1;
+    if (state.timers[0].arr != 0xFFFFFFFFu) return 1;
+
+    if (!mmio_bus_write(&bus, 0x40000000u + 0x2Cu, 4u, 7u)) return 1;
+    if (!mmio_bus_write(&bus, 0x40000000u + 0x00u, 4u, 1u)) return 1;
+    stm32_timers_tick(&state, 3u);
+    if (!mmio_bus_read(&bus, 0x40000000u + 0x24u, 4u, &value)) return 1;
+    if (value != 3u) return 1;
+
+    return 0;
+}
+
+static int test_update_generation_respects_downcounting_reload(void)
+{
+    struct stm32_timers_state state;
+    struct stm32_timer_soc soc;
+    struct mm_nvic nvic;
+    struct mmio_bus bus;
+    struct mmio_region regions[16];
+    mm_u32 value = 0;
+
+    reset_fakes();
+    memset(&state, 0, sizeof(state));
+    memset(&soc, 0, sizeof(soc));
+    mm_nvic_init(&nvic);
+    mmio_bus_init(&bus, regions, 16);
+
+    soc.apb1enr_offset = 0x58u;
+    soc.rcc_regs = fake_rcc_regs;
+    soc.tzsc_regs = fake_tzsc_regs;
+
+    stm32_timers_init(&state, &soc, &bus, &nvic);
+    g_rcc_regs[0x58u / 4u] = 1u;
+
+    if (!mmio_bus_write(&bus, 0x40000000u + 0x2Cu, 4u, 100u)) return 1;
+    if (!mmio_bus_write(&bus, 0x40000000u + 0x00u, 4u, 0x11u)) return 1;
+    if (!mmio_bus_write(&bus, 0x40000000u + 0x14u, 4u, 1u)) return 1;
+    if (!mmio_bus_read(&bus, 0x40000000u + 0x24u, 4u, &value)) return 1;
+    if (value != 100u) return 1;
+
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "clock_gate_offset", test_clock_gate_offset_controls_ticks },
         { "secure_alias", test_secure_alias_blocks_nonsecure_access },
+        { "reset_preserves_identity", test_reset_preserves_timer_identity },
+        { "egr_ug_downcount_reload", test_update_generation_respects_downcounting_reload },
     };
     int failures = 0;
     int i;

@@ -395,7 +395,14 @@ mm_bool mm_memmap_read(const struct mm_memmap *map, enum mm_sec_state sec, mm_u3
     }
     /* MMIO */
     mmio_set_active_sec(sec);
-    return mmio_bus_read(&map->mmio, addr, size, value_out);
+    if (mmio_bus_read(&map->mmio, addr, size, value_out)) {
+        return MM_TRUE;
+    }
+    if (addr >= 0xE000E000u && addr < 0xE0010000u) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+    return MM_FALSE;
 }
 
 void mm_memmap_set_watch(mm_u32 addr, mm_u32 size)

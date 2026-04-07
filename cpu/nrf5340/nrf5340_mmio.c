@@ -347,17 +347,19 @@ static mm_bool clock_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
     if (offset == CLOCK_EVENTS_HFCLKSTARTED && size_bytes == 4) {
         if (value == 0u) {
             clk->regs[CLOCK_EVENTS_HFCLKSTARTED / 4] = 0u;
-        } else {
-            clk->regs[CLOCK_EVENTS_HFCLKSTARTED / 4] = value;
         }
         return MM_TRUE;
     }
     if (offset == CLOCK_EVENTS_LFCLKSTARTED && size_bytes == 4) {
-        clk->regs[CLOCK_EVENTS_LFCLKSTARTED / 4] = (value == 0u) ? 0u : value;
+        if (value == 0u) {
+            clk->regs[CLOCK_EVENTS_LFCLKSTARTED / 4] = 0u;
+        }
         return MM_TRUE;
     }
     if (offset == CLOCK_EVENTS_HFCLK192MSTARTED && size_bytes == 4) {
-        clk->regs[CLOCK_EVENTS_HFCLK192MSTARTED / 4] = (value == 0u) ? 0u : value;
+        if (value == 0u) {
+            clk->regs[CLOCK_EVENTS_HFCLK192MSTARTED / 4] = 0u;
+        }
         return MM_TRUE;
     }
 
@@ -445,11 +447,15 @@ static mm_bool rtc_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
         return MM_TRUE;
     }
     if (offset == RTC_EVENTS_TICK || offset == RTC_EVENTS_OVRFLW) {
-        rtc->regs[offset / 4] = (value == 0u) ? 0u : value;
+        if (value == 0u) {
+            rtc->regs[offset / 4] = 0u;
+        }
         return MM_TRUE;
     }
     if (offset >= RTC_EVENTS_COMPARE0 && offset < RTC_EVENTS_COMPARE0 + RTC_COMPARE_COUNT * 4u) {
-        rtc->regs[offset / 4] = (value == 0u) ? 0u : value;
+        if (value == 0u) {
+            rtc->regs[offset / 4] = 0u;
+        }
         return MM_TRUE;
     }
     if (offset == RTC_SHORTS) {

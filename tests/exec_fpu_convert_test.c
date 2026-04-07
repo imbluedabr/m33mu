@@ -438,7 +438,7 @@ static int test_lazy_fp_save_on_first_handler_fp_use(void)
         return 1;
     }
     for (i = 0; i < 16; ++i) {
-        if (!mm_memmap_read(&map, MM_SECURE, 0x20000040u + (mm_u32)(i * 4u), 4u, &val) ||
+        if (!mm_memmap_read(&map, MM_SECURE, 0x20000060u + (mm_u32)(i * 4u), 4u, &val) ||
             val != cpu.s[i]) {
             printf("lazy_fp_save: s%d got=0x%08lx expected=0x%08lx\n",
                    i,
@@ -447,13 +447,13 @@ static int test_lazy_fp_save_on_first_handler_fp_use(void)
             return 1;
         }
     }
-    if (!mm_memmap_read(&map, MM_SECURE, 0x20000080u, 4u, &val) || val != cpu.fpscr) {
+    if (!mm_memmap_read(&map, MM_SECURE, 0x200000a0u, 4u, &val) || val != cpu.fpscr) {
         printf("lazy_fp_save: fpscr got=0x%08lx expected=0x%08lx\n",
                (unsigned long)val,
                (unsigned long)cpu.fpscr);
         return 1;
     }
-    if (!mm_memmap_read(&map, MM_SECURE, 0x20000084u, 4u, &val) || val != 0u) {
+    if (!mm_memmap_read(&map, MM_SECURE, 0x200000a4u, 4u, &val) || val != 0u) {
         printf("lazy_fp_save: reserved word got=0x%08lx expected=0\n",
                (unsigned long)val);
         return 1;

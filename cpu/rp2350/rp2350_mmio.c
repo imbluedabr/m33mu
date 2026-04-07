@@ -362,6 +362,7 @@ struct rp2350_multicore_state {
 
 struct bank_regs {
     mm_u32 regs[0x1000u / 4u];
+    mm_u8 write_once_locked[2];
 };
 
 static struct reset_state resets;
@@ -1061,7 +1062,11 @@ static mm_bool bootram_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_
     if (b == 0 || size_bytes == 0u || size_bytes > 4u) return MM_FALSE;
     if ((offset + size_bytes) > BOOTRAM_SIZE) return MM_FALSE;
     if (offset == BOOTRAM_WRITE_ONCE0 || offset == BOOTRAM_WRITE_ONCE1) {
-        b->regs[offset / 4u] |= value;
+        mm_u32 idx = (offset == BOOTRAM_WRITE_ONCE0) ? 0u : 1u;
+        if (b->write_once_locked[idx] == 0u) {
+            b->regs[offset / 4u] = value;
+            b->write_once_locked[idx] = 1u;
+        }
         return MM_TRUE;
     }
     if (offset == BOOTRAM_BOOTLOCK_STAT) {

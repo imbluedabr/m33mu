@@ -257,7 +257,11 @@ static mm_bool tim_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     if (offset >= TIM_EGR && (offset + size_bytes) <= (TIM_EGR + 4u)) {
         mm_u32 egr = apply_write(0u, offset - TIM_EGR, size_bytes, value);
         if ((egr & EGR_UG) != 0u) {
-            t->cnt = 0u;
+            if ((t->cr1 & CR1_DIR) != 0u) {
+                t->cnt = t->arr & t->arr_mask;
+            } else {
+                t->cnt = 0u;
+            }
             t->psc_accum = 0u;
             tim_raise_update(t);
         }
@@ -353,8 +357,15 @@ void stm32_timers_reset(struct stm32_timers_state *state)
         return;
     }
     for (i = 0; i < sizeof(state->timers) / sizeof(state->timers[0]); ++i) {
-        memset(&state->timers[i], 0, sizeof(state->timers[i]));
+        struct stm32_timer_inst *t = &state->timers[i];
+        t->cr1 = 0u;
+        t->dier = 0u;
+        t->sr = 0u;
+        t->cnt = 0u;
+        t->psc = 0u;
+        t->arr = t->arr_mask;
+        t->psc_accum = 0u;
+        t->secure_only = MM_FALSE;
+        t->current_sec = MM_SECURE;
     }
-    state->nvic = 0;
-    state->soc = 0;
 }

@@ -116,6 +116,13 @@ static mm_bool usart_read(struct sercom_inst *sc, mm_u32 offset,
 static mm_bool usart_write(struct sercom_inst *sc, mm_u32 offset,
                            mm_u32 size_bytes, mm_u32 value)
 {
+    if (offset == SERCOM_INTFLAG && size_bytes <= 4u) {
+        mm_u32 cur = 0u;
+        memcpy(&cur, (mm_u8 *)sc->regs + SERCOM_INTFLAG, size_bytes);
+        cur &= ~value;
+        memcpy((mm_u8 *)sc->regs + SERCOM_INTFLAG, &cur, size_bytes);
+        return MM_TRUE;
+    }
     if (offset == SERCOM_DATA && size_bytes <= 4u) {
         mm_u32 ctrla;
         memcpy(&ctrla, (mm_u8 *)sc->regs + SERCOM_CTRLA, 4u);
@@ -160,6 +167,13 @@ static mm_bool spi_read(struct sercom_inst *sc, mm_u32 offset,
 static mm_bool spi_write(struct sercom_inst *sc, mm_u32 offset,
                          mm_u32 size_bytes, mm_u32 value)
 {
+    if (offset == SERCOM_INTFLAG && size_bytes <= 4u) {
+        mm_u32 cur = 0u;
+        memcpy(&cur, (mm_u8 *)sc->regs + SERCOM_INTFLAG, size_bytes);
+        cur &= ~value;
+        memcpy((mm_u8 *)sc->regs + SERCOM_INTFLAG, &cur, size_bytes);
+        return MM_TRUE;
+    }
     if (offset == SERCOM_DATA && size_bytes <= 4u) {
         mm_u32 ctrla;
         memcpy(&ctrla, (mm_u8 *)sc->regs + SERCOM_CTRLA, 4u);

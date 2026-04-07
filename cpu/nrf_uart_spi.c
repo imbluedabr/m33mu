@@ -258,7 +258,9 @@ static mm_bool serial_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u
         return MM_TRUE;
     }
     if (serial_is_event_reg(s->owner, offset) && size_bytes == 4u) {
-        s->regs[offset / 4u] = value;
+        if (value == 0u) {
+            s->regs[offset / 4u] = 0u;
+        }
         return MM_TRUE;
     }
     if (offset == INTENSET && size_bytes == 4u) {

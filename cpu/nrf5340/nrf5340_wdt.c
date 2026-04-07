@@ -121,8 +121,6 @@ static mm_bool wdt_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     if (offset == WDT_EVENTS_TIMEOUT && size_bytes == 4) {
         if (value == 0u) {
             w->regs[WDT_EVENTS_TIMEOUT / 4] = 0u;
-        } else {
-            w->regs[WDT_EVENTS_TIMEOUT / 4] = value;
         }
         return MM_TRUE;
     }

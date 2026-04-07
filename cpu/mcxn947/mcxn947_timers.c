@@ -40,6 +40,7 @@
 struct lptmr_state {
     mm_u32 regs[LPTMR_SIZE / 4];
     mm_u32 counter;  /* Internal counter value */
+    mm_u64 psc_accum;
 };
 
 static struct lptmr_state lptmr0;
@@ -140,8 +141,9 @@ void mm_mcxn947_timers_tick(mm_u64 cycles)
     }
 
     /* Apply prescaler */
-    step = (mm_u32)((cycles > 0xffffffffu) ? 0xffffffffu : cycles);
-    step = step / divisor;
+    lptmr0.psc_accum += cycles;
+    step = (mm_u32)(lptmr0.psc_accum / divisor);
+    lptmr0.psc_accum = lptmr0.psc_accum % divisor;
     if (step == 0u) return;
 
     /* Increment counter */

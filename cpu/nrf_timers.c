@@ -82,7 +82,9 @@ static mm_bool timer_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
         return MM_TRUE;
     }
     if (offset >= TIMER_EVENTS_COMPARE0 && offset < TIMER_EVENTS_COMPARE0 + NRF_TIMER_MAX_CC * 4u && size_bytes == 4u) {
-        t->regs[offset / 4u] = value;
+        if (value == 0u) {
+            t->regs[offset / 4u] = 0u;
+        }
         return MM_TRUE;
     }
     if (offset == TIMER_INTENSET && size_bytes == 4u) {

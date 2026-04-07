@@ -265,7 +265,7 @@ static mm_bool fpu_check_or_fault(struct mm_execute_ctx *ctx)
             if (idx < MM_EXC_STACK_MAX &&
                 ctx->cpu->exc_fp_reserved[idx] &&
                 !ctx->cpu->exc_fp_saved[idx]) {
-                sp = ctx->cpu->exc_sp[idx];
+                sp = ctx->cpu->exc_sp[idx] + 32u;
                 sec = ctx->cpu->exc_sec[idx];
                 for (i = 0; i < 16; ++i) {
                     if (!mm_memmap_write(ctx->map, sec, sp + (mm_u32)(i * 4u), 4u, ctx->cpu->s[i])) {
