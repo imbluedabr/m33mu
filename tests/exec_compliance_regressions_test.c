@@ -727,6 +727,63 @@ static int test_ldrex_strex_word_offset_execute(void)
     return 0;
 }
 
+static int test_exclusive_unaligned_raise_usagefault(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[64];
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.r[0] = 0x20000001u;
+    cpu.r[2] = 0x11223344u;
+
+    g_last_ufsr_bits = 0u;
+    g_raise_usage_fault_calls = 0;
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_LDREX;
+    dec.rn = 0u;
+    dec.rd = 1u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 1) return 1;
+    if (g_raise_usage_fault_calls != 1 || g_last_ufsr_bits != (1u << 24)) return 1;
+
+    g_last_ufsr_bits = 0u;
+    g_raise_usage_fault_calls = 0;
+    dec.kind = MM_OP_STREX;
+    dec.rm = 2u;
+    dec.rd = 3u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 1) return 1;
+    if (g_raise_usage_fault_calls != 1 || g_last_ufsr_bits != (1u << 24)) return 1;
+
+    cpu.r[0] = 0x20000001u;
+    g_last_ufsr_bits = 0u;
+    g_raise_usage_fault_calls = 0;
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_LDREXH;
+    dec.rn = 0u;
+    dec.rd = 1u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 1) return 1;
+    if (g_raise_usage_fault_calls != 1 || g_last_ufsr_bits != (1u << 24)) return 1;
+
+    g_last_ufsr_bits = 0u;
+    g_raise_usage_fault_calls = 0;
+    dec.kind = MM_OP_STREXH;
+    dec.rm = 2u;
+    dec.rd = 3u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 1) return 1;
+    if (g_raise_usage_fault_calls != 1 || g_last_ufsr_bits != (1u << 24)) return 1;
+
+    return 0;
+}
+
 static int test_sub_imm_pc_align_execute(void)
 {
     struct mm_cpu cpu;
@@ -1240,6 +1297,10 @@ int main(void)
     }
     if (test_ldrex_strex_word_offset_execute() != 0) {
         printf("FAIL: ldrex_strex_word_offset_execute\n");
+        return 1;
+    }
+    if (test_exclusive_unaligned_raise_usagefault() != 0) {
+        printf("FAIL: exclusive_unaligned_raise_usagefault\n");
         return 1;
     }
     if (test_sub_imm_pc_align_execute() != 0) {

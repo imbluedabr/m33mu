@@ -3254,6 +3254,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                         case MM_OP_LDREX: {
                                               mm_u32 val = 0;
                                               mm_u32 addr = cpu.r[d.rn] + d.imm;
+                                              if ((addr & 0x3u) != 0u) {
+                                                  if (!raise_usage_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, UFSR_UNALIGNED)) done = MM_TRUE;
+                                                  return MM_EXEC_CONTINUE;
+                                              }
                                               if (!mm_memmap_read(&map, cpu.sec_state, addr, 4u, &val)) {
                                                   if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                   return MM_EXEC_CONTINUE;
@@ -3278,6 +3282,10 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                         case MM_OP_LDREXH: {
                                               mm_u32 val = 0;
                                               mm_u32 addr = cpu.r[d.rn];
+                                              if ((addr & 0x1u) != 0u) {
+                                                  if (!raise_usage_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, UFSR_UNALIGNED)) done = MM_TRUE;
+                                                  return MM_EXEC_CONTINUE;
+                                              }
                                               if (!mm_memmap_read(&map, cpu.sec_state, addr, 2u, &val)) {
                                                   if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                   return MM_EXEC_CONTINUE;
@@ -3292,7 +3300,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                           } break;
                         case MM_OP_STREX: {
                                               mm_u32 addr = cpu.r[d.rn] + d.imm;
-                                              mm_bool ok = mm_cpu_excl_check_and_clear(&cpu, cpu.sec_state, addr, 4u);
+                                              mm_bool ok;
+                                              if ((addr & 0x3u) != 0u) {
+                                                  if (!raise_usage_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, UFSR_UNALIGNED)) done = MM_TRUE;
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              ok = mm_cpu_excl_check_and_clear(&cpu, cpu.sec_state, addr, 4u);
                                               if (ok) {
                                                   if (!mm_memmap_write(&map, cpu.sec_state, addr, 4u, cpu.r[d.rm])) {
                                                       if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
@@ -3318,7 +3331,12 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                           } break;
                         case MM_OP_STREXH: {
                                               mm_u32 addr = cpu.r[d.rn];
-                                              mm_bool ok = mm_cpu_excl_check_and_clear(&cpu, cpu.sec_state, addr, 2u);
+                                              mm_bool ok;
+                                              if ((addr & 0x1u) != 0u) {
+                                                  if (!raise_usage_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, UFSR_UNALIGNED)) done = MM_TRUE;
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              ok = mm_cpu_excl_check_and_clear(&cpu, cpu.sec_state, addr, 2u);
                                               if (ok) {
                                                   if (!mm_memmap_write(&map, cpu.sec_state, addr, 2u, cpu.r[d.rm] & 0xffffu)) {
                                                       if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
@@ -3509,7 +3527,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                           return MM_EXEC_CONTINUE;
                                                       }
                                                       cpu.r[d.rd] = (val & 0x80u) ? (val | 0xffffff80u) : (val & 0xffu);
-                                                      cpu.r[d.rn] = base + d.imm;
+                                                      if (d.rn == 13u) {
+                                                          EXEC_SET_SP(base + d.imm);
+                                                      } else {
+                                                          cpu.r[d.rn] = base + d.imm;
+                                                      }
                                                   } break;
                         case MM_OP_LDRSH_IMM:
                         case MM_OP_LDRSHT: {
@@ -3564,14 +3586,7 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                      if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                      return MM_EXEC_CONTINUE;
                                                  }
-                                                 if ((d.raw & 0xfff00000u) == 0xf9b00000u) {
-                                                     if ((val & 0x8000u) != 0u) {
-                                                         val |= 0xffff0000u;
-                                                     }
-                                                     cpu.r[d.rd] = val;
-                                                 } else {
-                                                     cpu.r[d.rd] = val & 0xffffu;
-                                                 }
+                                                 cpu.r[d.rd] = val & 0xffffu;
                                              } break;
                         case MM_OP_LDRH_PRE_IMM: {
                                                     mm_u32 addr = cpu.r[d.rn] + d.imm;
@@ -3581,7 +3596,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                         return MM_EXEC_CONTINUE;
                                                     }
                                                     cpu.r[d.rd] = val & 0xffffu;
-                                                    cpu.r[d.rn] = addr;
+                                                    if (d.rn == 13u) {
+                                                        EXEC_SET_SP(addr);
+                                                    } else {
+                                                        cpu.r[d.rn] = addr;
+                                                    }
                                                 } break;
                         case MM_OP_LDRH_POST_IMM: {
                                                      mm_u32 base = cpu.r[d.rn];
@@ -3591,7 +3610,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                          return MM_EXEC_CONTINUE;
                                                      }
                                                      cpu.r[d.rd] = val & 0xffffu;
-                                                     cpu.r[d.rn] = base + d.imm;
+                                                     if (d.rn == 13u) {
+                                                         EXEC_SET_SP(base + d.imm);
+                                                     } else {
+                                                         cpu.r[d.rn] = base + d.imm;
+                                                     }
                                                  } break;
                         case MM_OP_LDRH_REG: {
                                                  mm_u32 addr = cpu.r[d.rn] + (cpu.r[d.rm] << (d.imm & 0x3u));
@@ -3627,7 +3650,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                         if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, addr, MM_FALSE)) done = MM_TRUE;
                                                         return MM_EXEC_CONTINUE;
                                                     }
-                                                    cpu.r[d.rn] = addr;
+                                                    if (d.rn == 13u) {
+                                                        EXEC_SET_SP(addr);
+                                                    } else {
+                                                        cpu.r[d.rn] = addr;
+                                                    }
                                                 } break;
                         case MM_OP_STRH_POST_IMM: {
                                                      mm_u32 base = cpu.r[d.rn];
@@ -3636,7 +3663,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                          if (!raise_mem_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, base, MM_FALSE)) done = MM_TRUE;
                                                          return MM_EXEC_CONTINUE;
                                                      }
-                                                     cpu.r[d.rn] = base + d.imm;
+                                                     if (d.rn == 13u) {
+                                                         EXEC_SET_SP(base + d.imm);
+                                                     } else {
+                                                         cpu.r[d.rn] = base + d.imm;
+                                                     }
                                                  } break;
                         case MM_OP_STRH_REG: {
                                                  mm_u32 addr = cpu.r[d.rn] + (cpu.r[d.rm] << (d.imm & 0x3u));

@@ -255,9 +255,114 @@ static int test_psplim_ok(void)
     return 0;
 }
 
+static int test_sp_writeback_paths_use_exec_set_sp(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_gdb_stub gdb;
+    struct mm_execute_ctx ctx;
+    struct mm_decoded dec;
+    struct mm_fetch_result fetch;
+    struct mm_target_cfg cfg;
+    struct mmio_region regions[1];
+    mm_u8 ram[64];
+    mm_u8 it_pattern = 0;
+    mm_u8 it_remaining = 0;
+    mm_u8 it_cond = 0;
+    mm_bool done = MM_FALSE;
+    size_t i;
+    static const enum mm_op_kind kinds[] = {
+        MM_OP_LDRSB_POST_IMM,
+        MM_OP_LDRH_PRE_IMM,
+        MM_OP_LDRH_POST_IMM,
+        MM_OP_STRH_PRE_IMM,
+        MM_OP_STRH_POST_IMM,
+    };
+
+    for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); ++i) {
+        memset(&cpu, 0, sizeof(cpu));
+        memset(&map, 0, sizeof(map));
+        memset(&scs, 0, sizeof(scs));
+        memset(&gdb, 0, sizeof(gdb));
+        memset(&ctx, 0, sizeof(ctx));
+        memset(&dec, 0, sizeof(dec));
+        memset(&fetch, 0, sizeof(fetch));
+        memset(&cfg, 0, sizeof(cfg));
+        memset(regions, 0, sizeof(regions));
+        memset(ram, 0, sizeof(ram));
+
+        mm_memmap_init(&map, regions, 1u);
+        cfg.ram_base_s = 0x20000000u;
+        cfg.ram_size_s = (mm_u32)sizeof(ram);
+        cfg.ram_base_ns = 0x20000000u;
+        cfg.ram_size_ns = (mm_u32)sizeof(ram);
+        (void)mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE);
+        cpu.sec_state = MM_SECURE;
+        cpu.mode = MM_THREAD;
+        cpu.control_s = 0u;
+        cpu.msp_s = 0x20000020u;
+        cpu.r[13] = 0x20000020u;
+        cpu.r[0] = 0x12345678u;
+        cpu.msplim_s = 0x20000020u;
+
+        dec.kind = kinds[i];
+        dec.rn = 13u;
+        dec.rd = 0u;
+        dec.imm = (mm_u32)(0u - 4u);
+        fetch.pc_fetch = 0x300u + (mm_u32)(i * 2u);
+
+        g_ufsr_bits = 0u;
+        g_ufsr_count = 0;
+        done = MM_FALSE;
+
+        ctx.cpu = &cpu;
+        ctx.map = &map;
+        ctx.scs = &scs;
+        ctx.gdb = &gdb;
+        ctx.fetch = &fetch;
+        ctx.dec = &dec;
+        ctx.it_pattern = &it_pattern;
+        ctx.it_remaining = &it_remaining;
+        ctx.it_cond = &it_cond;
+        ctx.done = &done;
+        ctx.handle_pc_write = stub_handle_pc_write;
+        ctx.raise_mem_fault = stub_raise_mem_fault;
+        ctx.raise_usage_fault = stub_raise_usage_fault;
+        ctx.exc_return_unstack = stub_exc_return_unstack;
+        ctx.enter_exception = stub_enter_exception;
+
+        {
+            enum mm_exec_status status = mm_execute_decoded(&ctx);
+            if (status != MM_EXEC_OK && status != MM_EXEC_CONTINUE) return 1;
+        }
+        if (!done || g_ufsr_count != 1 || g_ufsr_bits != UFSR_STKOF) {
+            printf("sp_writeback[%lu]: expected STKOF done=%d count=%d bits=0x%lx\n",
+                   (unsigned long)i, (int)done, g_ufsr_count, (unsigned long)g_ufsr_bits);
+            return 1;
+        }
+        if (cpu.msp_s != 0x20000020u || cpu.r[13] != 0x20000020u) {
+            printf("sp_writeback[%lu]: SP changed msp=0x%lx r13=0x%lx\n",
+                   (unsigned long)i, (unsigned long)cpu.msp_s, (unsigned long)cpu.r[13]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(void)
 {
-    if (test_msplim_fault() != 0) return 1;
-    if (test_psplim_ok() != 0) return 1;
+    if (test_msplim_fault() != 0) {
+        printf("FAIL: msplim_fault\n");
+        return 1;
+    }
+    if (test_psplim_ok() != 0) {
+        printf("FAIL: psplim_ok\n");
+        return 1;
+    }
+    if (test_sp_writeback_paths_use_exec_set_sp() != 0) {
+        printf("FAIL: sp_writeback_paths_use_exec_set_sp\n");
+        return 1;
+    }
     return 0;
 }
