@@ -2509,6 +2509,8 @@ static mm_bool allow_system_reset(const struct mm_target_cfg *cfg, const char *c
 
 #define FP_STACK_WORDS 18u
 #define FP_STACK_BYTES (FP_STACK_WORDS * 4u)
+#define EXC_ADDITIONAL_STATE_WORDS 9u
+#define EXC_ADDITIONAL_STATE_BYTES (EXC_ADDITIONAL_STATE_WORDS * 4u)
 #define CPACR_CP10_SHIFT 20u
 #define CPACR_CP11_SHIFT 22u
 #define AIRCR_BFHFNMINS (1u << 13)
@@ -2590,19 +2592,10 @@ static void save_and_clear_secure_callee_regs(struct mm_cpu *cpu, int depth)
     cpu->exc_cross_domain[depth] = MM_TRUE;
 }
 
-static void restore_secure_callee_regs(struct mm_cpu *cpu, int depth)
+static mm_bool cross_domain_additional_state_required(enum mm_sec_state pre_sec,
+                                                      enum mm_sec_state handler_sec)
 {
-    int i;
-
-    if (cpu == 0 || depth < 0 || depth >= MM_EXC_STACK_MAX ||
-        !cpu->exc_cross_domain[depth]) {
-        return;
-    }
-    for (i = 0; i < 8; ++i) {
-        cpu->r[4 + i] = cpu->exc_callee_saved[depth][i];
-        cpu->exc_callee_saved[depth][i] = 0u;
-    }
-    cpu->exc_cross_domain[depth] = MM_FALSE;
+    return (pre_sec == MM_SECURE && handler_sec == MM_NONSECURE) ? MM_TRUE : MM_FALSE;
 }
 
 static mm_u32 shcsr_active_mask_for_exc(mm_u32 exc_num)
@@ -2656,7 +2649,11 @@ static void scs_set_vectactive(struct mm_scs *scs, enum mm_sec_state sec, mm_u32
     *icsr = (*icsr & ~0x1FFu) | (exc_num & 0x1FFu);
 }
 
-static mm_u32 exc_return_encode(enum mm_sec_state sec, mm_bool use_psp, mm_bool to_thread, mm_bool basic_frame)
+static mm_u32 exc_return_encode(enum mm_sec_state sec,
+                                mm_bool use_psp,
+                                mm_bool to_thread,
+                                mm_bool basic_frame,
+                                mm_bool default_callee_stacking)
 {
     /* EXC_RETURN encodings (Armv8-M, DDI0553):
      *  bits[31:24] = 0xFF, bits[23:7] = RES1
@@ -2673,7 +2670,9 @@ static mm_u32 exc_return_encode(enum mm_sec_state sec, mm_bool use_psp, mm_bool 
         base |= (1u << 6); /* Secure stack */
         base |= 1u;        /* ES=Secure */
     }
-    base |= (1u << 5);     /* DCRS */
+    if (default_callee_stacking) {
+        base |= (1u << 5); /* DCRS */
+    }
     if (basic_frame) {
         base |= (1u << 4); /* FType */
     }
@@ -2787,9 +2786,12 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     mm_u32 control_s_val;
     mm_u32 control_ns_val;
     mm_u16 exc_num = 0u;
-    mm_u32 fp_base_sp;
+    mm_u32 basic_sp;
+    mm_u32 fp_sp;
+    mm_u32 callee_sp;
     mm_u32 fp_reserved;
     int i;
+    enum mm_sec_state handler_sec;
 
     info = mm_exc_return_decode(exc_ret);
     if (!info.valid) {
@@ -2944,7 +2946,9 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
     (void)msp_s_val; (void)msp_ns_val; (void)psp_s_val; (void)psp_ns_val;
     (void)control_s_val; (void)control_ns_val;
 
-    fp_base_sp = sp;
+    basic_sp = sp;
+    fp_sp = sp + 32u;
+    callee_sp = fp_sp + (info.basic_frame ? 0u : FP_STACK_BYTES);
     if (!info.basic_frame) {
         mm_bool fp_saved = MM_TRUE;
         if (cpu->exc_depth < MM_EXC_STACK_MAX &&
@@ -2954,17 +2958,17 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
         }
         if (fp_saved) {
             for (i = 0; i < 16; ++i) {
-                if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4u), 4u, &cpu->s[i])) {
-                    record_bus_fault(scs, info.target_sec, sp + (mm_u32)(i * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                if (!mm_memmap_read(map, info.target_sec, fp_sp + (mm_u32)(i * 4u), 4u, &cpu->s[i])) {
+                    record_bus_fault(scs, info.target_sec, fp_sp + (mm_u32)(i * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                     return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
                 }
             }
-            if (!mm_memmap_read(map, info.target_sec, sp + (16u * 4u), 4u, &cpu->fpscr)) {
-                record_bus_fault(scs, info.target_sec, sp + (16u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+            if (!mm_memmap_read(map, info.target_sec, fp_sp + (16u * 4u), 4u, &cpu->fpscr)) {
+                record_bus_fault(scs, info.target_sec, fp_sp + (16u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
             }
-            if (!mm_memmap_read(map, info.target_sec, sp + (17u * 4u), 4u, &fp_reserved)) {
-                record_bus_fault(scs, info.target_sec, sp + (17u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+            if (!mm_memmap_read(map, info.target_sec, fp_sp + (17u * 4u), 4u, &fp_reserved)) {
+                record_bus_fault(scs, info.target_sec, fp_sp + (17u * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
             }
             (void)fp_reserved;
@@ -2975,13 +2979,24 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
                 cpu->control_s |= (1u << 2);
             }
         }
-        scs->fpcar = fp_base_sp;
+        scs->fpcar = fp_sp;
         scs->fpccr &= ~FPCCR_LSPACT;
-        sp += FP_STACK_BYTES;
+    }
+    if (!info.default_callee_stacking &&
+        cpu->exc_depth < MM_EXC_STACK_MAX &&
+        cpu->exc_cross_domain[cpu->exc_depth]) {
+        for (i = 0; i < 8; ++i) {
+            if (!mm_memmap_read(map, info.target_sec, callee_sp + (mm_u32)(i * 4u), 4u, &cpu->r[4 + i])) {
+                record_bus_fault(scs, info.target_sec, callee_sp + (mm_u32)(i * 4u), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
+            }
+            cpu->exc_callee_saved[cpu->exc_depth][i] = 0u;
+        }
+        cpu->exc_cross_domain[cpu->exc_depth] = MM_FALSE;
     }
     for (i = 0; i < 8; ++i) {
-        if (!mm_memmap_read(map, info.target_sec, sp + (mm_u32)(i * 4), 4u, &frame[i])) {
-            record_bus_fault(scs, info.target_sec, sp + (mm_u32)(i * 4), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+        if (!mm_memmap_read(map, info.target_sec, basic_sp + (mm_u32)(i * 4), 4u, &frame[i])) {
+            record_bus_fault(scs, info.target_sec, basic_sp + (mm_u32)(i * 4), BFSR_UNSTKERR | BFSR_PRECISERR | BFSR_BFARVALID);
             return raise_hard_fault(cpu, map, scs, cpu->r[15] & ~1u, cpu->xpsr);
         }
     }
@@ -3062,7 +3077,13 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
         cpu->xpsr = frame[7];
     }
 
-    sp += 32u;
+    sp = basic_sp + 32u;
+    if (!info.basic_frame) {
+        sp += FP_STACK_BYTES;
+    }
+    if (!info.default_callee_stacking) {
+        sp += EXC_ADDITIONAL_STATE_BYTES;
+    }
     if ((frame[7] & (1u << 9)) != 0u) {
         sp += 4u;
     }
@@ -3119,17 +3140,18 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
                (int)info.to_thread,
                (int)info.use_psp);
     }
+    handler_sec = cpu->sec_state;
     cpu->sec_state = info.return_sec;
     cpu->mode = info.to_thread ? MM_THREAD : MM_HANDLER;
     scs_set_vectactive(scs, info.return_sec, info.to_thread ? 0u : (cpu->xpsr & 0x1FFu));
     if (exc_num != MM_VECT_NMI) {
-        if (info.return_sec == MM_NONSECURE) cpu->faultmask_ns = 0u;
+        if (handler_sec == MM_NONSECURE) cpu->faultmask_ns = 0u;
         else cpu->faultmask_s = 0u;
     }
     if (cpu->exc_depth < MM_EXC_STACK_MAX) {
-        restore_secure_callee_regs(cpu, cpu->exc_depth);
         cpu->exc_fp_reserved[cpu->exc_depth] = MM_FALSE;
         cpu->exc_fp_saved[cpu->exc_depth] = MM_FALSE;
+        cpu->exc_cross_domain[cpu->exc_depth] = MM_FALSE;
     }
     if (info.to_thread && exc_num >= 16u) {
         calltrace_log_irq_resume(cpu->r[15]);
@@ -3565,6 +3587,8 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     mm_u32 exc_ret_val;
     mm_bool use_psp_entry;
     mm_bool fp_stack;
+    mm_bool fp_lazy;
+    mm_bool addl_state;
     enum mm_mode pre_mode;
     mm_u32 frame[8];
     enum mm_sec_state sec;
@@ -3624,8 +3648,14 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
 
     pre_mode = cpu->mode;
     use_psp_entry = (pre_mode == MM_THREAD) && (((stack_sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s) & 0x2u);
-    fp_stack = fpu_stack_active(cpu, scs);
-    exc_ret_val = exc_return_encode(stack_sec, use_psp_entry, pre_mode == MM_THREAD, fp_stack ? MM_FALSE : MM_TRUE);
+    fp_stack = fpu_auto_preserve_enabled(cpu, scs);
+    fp_lazy = fp_stack && fpu_lazy_preserve_enabled(cpu, scs);
+    addl_state = cross_domain_additional_state_required(sec, handler_sec);
+    exc_ret_val = exc_return_encode(stack_sec,
+                                    use_psp_entry,
+                                    pre_mode == MM_THREAD,
+                                    fp_stack ? MM_FALSE : MM_TRUE,
+                                    addl_state ? MM_FALSE : MM_TRUE);
     {
         mm_u32 ctrl = (stack_sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s;
         mm_u32 cpacr = cpacr_for_sec(scs, stack_sec);
@@ -3650,8 +3680,10 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         frame[7] &= ~(1u << 9);
     }
     {
-        mm_u32 sp_frame = sp - 32u;
-        mm_u32 sp_fp = sp_frame;
+        mm_u32 sp_total = sp - 32u - (fp_stack ? FP_STACK_BYTES : 0u) - (addl_state ? EXC_ADDITIONAL_STATE_BYTES : 0u);
+        mm_u32 sp_frame = sp_total;
+        mm_u32 sp_fp = sp_total + 32u;
+        mm_u32 sp_addl = sp_fp + (fp_stack ? FP_STACK_BYTES : 0u);
         for (i = 0; i < 8; ++i) {
             if (!mm_memmap_write(map, stack_sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
                 printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
@@ -3660,28 +3692,41 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
             }
         }
         if (fp_stack) {
-            sp_fp = sp_frame - FP_STACK_BYTES;
-            for (i = 0; i < 16; ++i) {
-                if (!mm_memmap_write(map, stack_sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
-                    printf("HardFault: FP stacking failed at 0x%08lx\n",
-                           (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
-                    record_bus_fault(scs, sec, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+            if (!fp_lazy) {
+                for (i = 0; i < 16; ++i) {
+                    if (!mm_memmap_write(map, stack_sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
+                        printf("HardFault: FP stacking failed at 0x%08lx\n",
+                               (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
+                        record_bus_fault(scs, sec, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                        return MM_FALSE;
+                    }
+                }
+                if (!mm_memmap_write(map, stack_sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
+                    record_bus_fault(scs, sec, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    return MM_FALSE;
+                }
+                if (!mm_memmap_write(map, stack_sec, sp_fp + (17u * 4u), 4u, 0u)) {
+                    record_bus_fault(scs, sec, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    return MM_FALSE;
+                }
+            } else {
+                scs->fpccr |= FPCCR_LSPACT;
+            }
+            scs->fpcar = sp_fp;
+        }
+        if (addl_state) {
+            for (i = 0; i < 8; ++i) {
+                if (!mm_memmap_write(map, stack_sec, sp_addl + (mm_u32)(i * 4u), 4u, cpu->r[4 + i])) {
+                    record_bus_fault(scs, sec, sp_addl + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                     return MM_FALSE;
                 }
             }
-            if (!mm_memmap_write(map, stack_sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
-                record_bus_fault(scs, sec, sp_fp + (16u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+            if (!mm_memmap_write(map, stack_sec, sp_addl + (8u * 4u), 4u, 0u)) {
+                record_bus_fault(scs, sec, sp_addl + (8u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
                 return MM_FALSE;
             }
-            if (!mm_memmap_write(map, stack_sec, sp_fp + (17u * 4u), 4u, 0u)) {
-                record_bus_fault(scs, sec, sp_fp + (17u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
-                return MM_FALSE;
-            }
-            scs->fpcar = sp_fp;
-            sp = sp_fp;
-        } else {
-            sp = sp_frame;
         }
+        sp = sp_total;
     }
     if (use_psp_entry) {
         if (stack_sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
@@ -3696,7 +3741,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         cpu->exc_fp_reserved[cpu->exc_depth] = fp_stack;
         cpu->exc_fp_saved[cpu->exc_depth] = fp_stack;
         cpu->exc_cross_domain[cpu->exc_depth] = MM_FALSE;
-        if (sec == MM_SECURE && handler_sec == MM_NONSECURE) {
+        if (addl_state) {
             save_and_clear_secure_callee_regs(cpu, cpu->exc_depth);
         }
         cpu->exc_depth++;
@@ -3715,6 +3760,11 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     cpu->xpsr = (fault_xpsr & 0xF8000000u) | 0x01000003u;
     cpu->r[14] = exc_ret_val;
     cpu->mode = MM_HANDLER;
+    if (handler_sec == MM_NONSECURE) {
+        cpu->control_ns &= ~0x2u;
+    } else {
+        cpu->control_s &= ~0x2u;
+    }
     cpu->sec_state = handler_sec;
     scs_set_vectactive(scs, handler_sec, MM_VECT_HARDFAULT);
     cpu->r[15] = handler | 1u;
@@ -3849,6 +3899,7 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     mm_bool use_psp_entry;
     mm_u32 exc_ret_val;
     mm_bool fp_stack;
+    mm_bool fp_lazy;
     int i;
     enum mm_sec_state sec;
     mm_u32 *cfsr;
@@ -3915,8 +3966,13 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     (void)psp_ns_val;
     (void)control_s_val;
     (void)control_ns_val;
-    fp_stack = fpu_stack_active(cpu, scs);
-    exc_ret_val = exc_return_encode(sec, use_psp_entry, cpu->mode == MM_THREAD, fp_stack ? MM_FALSE : MM_TRUE);
+    fp_stack = fpu_auto_preserve_enabled(cpu, scs);
+    fp_lazy = fp_stack && fpu_lazy_preserve_enabled(cpu, scs);
+    exc_ret_val = exc_return_encode(sec,
+                                    use_psp_entry,
+                                    cpu->mode == MM_THREAD,
+                                    fp_stack ? MM_FALSE : MM_TRUE,
+                                    MM_TRUE);
     printf("[USGFLT] enter sec=%d mode=%d use_psp=%d active_sp=0x%08lx MSP_S=0x%08lx MSP_NS=0x%08lx PSP_S=0x%08lx PSP_NS=0x%08lx CONTROL_S=0x%08lx CONTROL_NS=0x%08lx fault_pc=0x%08lx xpsr=0x%08lx handler=0x%08lx exc_ret=0x%08lx\n",
            (int)sec,
            (int)cpu->mode,
@@ -3968,8 +4024,9 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
         return MM_FALSE;
     }
     {
-        mm_u32 sp_frame = sp - 32u;
-        mm_u32 sp_fp = sp_frame;
+        mm_u32 sp_total = sp - 32u - (fp_stack ? FP_STACK_BYTES : 0u);
+        mm_u32 sp_frame = sp_total;
+        mm_u32 sp_fp = sp_total + 32u;
         for (i = 0; i < 8; ++i) {
             mm_bool ok = mm_memmap_write(map, sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i]);
             if (!ok) {
@@ -3980,24 +4037,27 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
             }
         }
         if (fp_stack) {
-            sp_fp = sp_frame - FP_STACK_BYTES;
-            for (i = 0; i < 16; ++i) {
-                if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
-                    printf("HardFault: FP stacking failed at 0x%08lx\n",
-                           (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
+            if (!fp_lazy) {
+                for (i = 0; i < 16; ++i) {
+                    if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
+                        printf("HardFault: FP stacking failed at 0x%08lx\n",
+                               (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
+                        return MM_FALSE;
+                    }
+                }
+                if (!mm_memmap_write(map, sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
                     return MM_FALSE;
                 }
-            }
-            if (!mm_memmap_write(map, sec, sp_fp + (16u * 4u), 4u, cpu->fpscr)) {
-                return MM_FALSE;
-            }
-            if (!mm_memmap_write(map, sec, sp_fp + (17u * 4u), 4u, 0u)) {
-                return MM_FALSE;
+                if (!mm_memmap_write(map, sec, sp_fp + (17u * 4u), 4u, 0u)) {
+                    return MM_FALSE;
+                }
+            } else {
+                scs->fpccr |= FPCCR_LSPACT;
             }
             scs->fpcar = sp_fp;
-            sp = sp_fp;
+            sp = sp_total;
         } else {
-            sp = sp_frame;
+            sp = sp_total;
         }
     }
     if (use_psp_entry) {
@@ -4010,6 +4070,9 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
         cpu->exc_use_psp[cpu->exc_depth] = use_psp_entry;
         cpu->exc_sec[cpu->exc_depth] = sec;
         cpu->exc_num[cpu->exc_depth] = (mm_u16)MM_VECT_USAGEFAULT;
+        cpu->exc_fp_reserved[cpu->exc_depth] = fp_stack;
+        cpu->exc_fp_saved[cpu->exc_depth] = fp_stack && !fp_lazy;
+        cpu->exc_cross_domain[cpu->exc_depth] = MM_FALSE;
         cpu->exc_depth++;
     }
     /* Handler mode uses MSP; reflect that in R13. */
@@ -4020,6 +4083,11 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     cpu->xpsr = (fault_xpsr & 0xF8000000u) | 0x01000006u;
     cpu->r[14] = exc_ret_val;
     cpu->mode = MM_HANDLER;
+    if (sec == MM_NONSECURE) {
+        cpu->control_ns &= ~0x2u;
+    } else {
+        cpu->control_s &= ~0x2u;
+    }
     scs_set_vectactive(scs, sec, MM_VECT_USAGEFAULT);
     cpu->r[15] = handler | 1u;
     return MM_TRUE;
@@ -4052,6 +4120,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     mm_bool use_psp_entry;
     mm_bool fp_stack;
     mm_bool fp_lazy;
+    mm_bool addl_state;
     enum mm_mode pre_mode;
     mm_u32 exc_ret_val;
     mm_bool tail_chain = MM_FALSE;
@@ -4087,7 +4156,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
         shcsr_set_exception_active(scs, sec, MM_VECT_SVCALL);
         break;
     case MM_VECT_SECUREFAULT:
-        shcsr_set_exception_active(scs, sec, MM_VECT_SECUREFAULT);
+        shcsr_set_exception_active(scs, MM_SECURE, MM_VECT_SECUREFAULT);
         break;
     case MM_VECT_PENDSV:
         scs->pend_sv = MM_FALSE;
@@ -4112,12 +4181,18 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
 
     fp_stack = (!tail_chain) && fpu_auto_preserve_enabled(cpu, scs);
     fp_lazy = fp_stack && fpu_lazy_preserve_enabled(cpu, scs);
+    addl_state = cross_domain_additional_state_required(sec, handler_sec);
     if (pre_mode == MM_HANDLER) {
         use_psp_entry = MM_FALSE;
-        exc_ret_val = exc_return_encode(sec, MM_FALSE, MM_FALSE, fp_stack ? MM_FALSE : MM_TRUE);
+        exc_ret_val = exc_return_encode(sec, MM_FALSE, MM_FALSE, fp_stack ? MM_FALSE : MM_TRUE, addl_state ? MM_FALSE : MM_TRUE);
     } else {
         use_psp_entry = (((sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s) & 0x2u) != 0u;
-        exc_ret_val = tail_chain ? cpu->r[14] : exc_return_encode(sec, use_psp_entry, MM_TRUE, fp_stack ? MM_FALSE : MM_TRUE);
+        exc_ret_val = tail_chain ? cpu->r[14] :
+            exc_return_encode(sec,
+                              use_psp_entry,
+                              MM_TRUE,
+                              fp_stack ? MM_FALSE : MM_TRUE,
+                              addl_state ? MM_FALSE : MM_TRUE);
     }
 
     sp = use_psp_entry ? ((sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s)
@@ -4182,11 +4257,13 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     }
     if (!tail_chain) {
         {
-            mm_u32 sp_frame = sp - 32u;
-            mm_u32 sp_fp = sp_frame;
+            mm_u32 sp_total = sp - 32u - (fp_stack ? FP_STACK_BYTES : 0u) - (addl_state ? EXC_ADDITIONAL_STATE_BYTES : 0u);
+            mm_u32 sp_frame = sp_total;
+            mm_u32 sp_fp = sp_total + 32u;
+            mm_u32 sp_addl = sp_fp + (fp_stack ? FP_STACK_BYTES : 0u);
             mm_u32 splim = use_psp_entry ? ((sec == MM_NONSECURE) ? cpu->psplim_ns : cpu->psplim_s)
                                          : ((sec == MM_NONSECURE) ? cpu->msplim_ns : cpu->msplim_s);
-            if (splim != 0u && sp_frame < splim) {
+            if (splim != 0u && sp_total < splim) {
                 return raise_usage_fault(cpu, map, scs, return_pc, xpsr_in, UFSR_STKOF);
             }
             for (i = 0; i < 8; ++i) {
@@ -4198,7 +4275,6 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
                 }
             }
             if (fp_stack) {
-                sp_fp = sp_frame - FP_STACK_BYTES;
                 if (!fp_lazy) {
                     for (i = 0; i < 16; ++i) {
                         if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
@@ -4220,10 +4296,20 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
                     scs->fpccr |= FPCCR_LSPACT;
                 }
                 scs->fpcar = sp_fp;
-                sp = sp_fp;
-            } else {
-                sp = sp_frame;
             }
+            if (addl_state) {
+                for (i = 0; i < 8; ++i) {
+                    if (!mm_memmap_write(map, sec, sp_addl + (mm_u32)(i * 4u), 4u, cpu->r[4 + i])) {
+                        record_bus_fault(scs, sec, sp_addl + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                        return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
+                    }
+                }
+                if (!mm_memmap_write(map, sec, sp_addl + (8u * 4u), 4u, 0u)) {
+                    record_bus_fault(scs, sec, sp_addl + (8u * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                    return raise_hard_fault(cpu, map, scs, return_pc, xpsr_in);
+                }
+            }
+            sp = sp_total;
         }
         if (use_psp_entry) {
             if (sec == MM_NONSECURE) cpu->psp_ns = sp; else cpu->psp_s = sp;
@@ -4238,7 +4324,7 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
         cpu->exc_fp_reserved[cpu->exc_depth] = fp_stack;
         cpu->exc_fp_saved[cpu->exc_depth] = fp_stack && !fp_lazy;
         cpu->exc_cross_domain[cpu->exc_depth] = MM_FALSE;
-        if (sec == MM_SECURE && handler_sec == MM_NONSECURE) {
+        if (addl_state) {
             save_and_clear_secure_callee_regs(cpu, cpu->exc_depth);
         }
         cpu->exc_depth++;

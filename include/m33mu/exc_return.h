@@ -28,6 +28,7 @@
 struct mm_exc_return_info {
     mm_bool valid;
     mm_bool use_psp;
+    mm_bool default_callee_stacking; /* true if DCRS=1 */
     mm_bool basic_frame; /* true if no FP context */
     mm_bool to_thread;
     enum mm_sec_state target_sec; /* stack security (EXC_RETURN.S) */

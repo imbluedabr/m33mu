@@ -39,6 +39,7 @@ struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
     struct mm_exc_return_info info;
     info.valid = MM_FALSE;
     info.use_psp = MM_FALSE;
+    info.default_callee_stacking = MM_TRUE;
     info.basic_frame = MM_TRUE;
     info.to_thread = MM_TRUE;
     info.target_sec = MM_SECURE;
@@ -53,6 +54,7 @@ struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
 
     /* Armv8-M EXC_RETURN: bit6 selects stack security, bit2 selects PSP vs MSP,
        bit4=1 means basic frame (no FP context). */
+    info.default_callee_stacking = (value & (1u << 5)) != 0u;
     info.basic_frame = ((value & (1u << 4)) != 0u);
     info.use_psp = (value & (1u << 2)) != 0u;
     /* Bit3 distinguishes Thread (1) vs Handler (0) return (DDI0553 C2.4.5). */
