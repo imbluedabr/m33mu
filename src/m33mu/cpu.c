@@ -271,6 +271,10 @@ mm_bool mm_cpu_get_privileged(const struct mm_cpu *cpu)
     if (cpu == 0) {
         return MM_TRUE;
     }
+    /* Handler mode is always privileged (ARMv8-M B1.4.2) */
+    if (cpu->mode == MM_HANDLER) {
+        return MM_TRUE;
+    }
     if (cpu->sec_state == MM_NONSECURE) {
         return cpu->priv_ns ? MM_FALSE : MM_TRUE;
     }

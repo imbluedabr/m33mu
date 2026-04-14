@@ -45,6 +45,8 @@
 #define SAU_RNR         (*(volatile uint32_t*)(0xE000EDD4u))
 #define SAU_RBAR        (*(volatile uint32_t*)(0xE000EDD8u))
 #define SAU_RLAR        (*(volatile uint32_t*)(0xE000EDDCu))
+#define SAU_SFSR        (*(volatile uint32_t*)(0xE000EDE4u))
+#define SAU_SFAR        (*(volatile uint32_t*)(0xE000EDE8u))
 
 // SAU_RLAR bits (as commonly implemented): [0]=ENABLE, [1]=NSC, [31:5]=LIMIT
 static inline void sau_set_region(uint32_t rnr, uint32_t base, uint32_t limit_inclusive, int nsc) {
@@ -83,6 +85,17 @@ static void gtzc_mpcbb_init(void) {
 
 static inline void dsb(void){ __asm volatile("dsb 0xF" ::: "memory"); }
 static inline void isb(void){ __asm volatile("isb 0xF" ::: "memory"); }
+
+typedef struct {
+  uint32_t r0,r1,r2,r3,r12,lr,pc,xpsr;
+} stack_frame_t;
+
+static uint32_t thumb_insn_len(uint32_t pc) {
+  uint16_t hw = *(uint16_t*)pc;
+  if ((hw & 0xF800u) == 0xE800u || (hw & 0xF800u) == 0xF000u || (hw & 0xF800u) == 0xF800u)
+    return 4;
+  return 2;
+}
 
 void Reset_Handler(void);
 
@@ -131,6 +144,26 @@ extern uint32_t _estack;
 
 void Default_Handler(void) { __asm volatile("bkpt #0x7E"); for(;;){} }
 
+void SecureFault_C(stack_frame_t* f) {
+  SHARED_STATUS |= (1u << 2);      /* SAU fault observed and recovered */
+  f->pc += thumb_insn_len(f->pc);  /* Skip the faulting NS access */
+  SAU_SFSR = 0xFFu;
+  SAU_SFAR = 0u;
+}
+
+__attribute__((naked)) void SecureFault_Handler(void) {
+  __asm volatile(
+    "tst lr, #4       \n"
+    "ite eq           \n"
+    "mrseq r0, msp    \n"
+    "mrsne r0, psp    \n"
+    "tst lr, #0x10    \n"
+    "it eq            \n"
+    "addeq r0, r0, #0x48 \n"
+    "b SecureFault_C  \n"
+  );
+}
+
 void IRQ4_Handler(void) {
   /* Mark that a Secure-targeted external IRQ was delivered. */
   SHARED_STATUS |= (1u << 4);
@@ -146,7 +179,7 @@ const void* const vectors_s[] = {
   (void*)Default_Handler,   /* 4: MemManage */
   (void*)Default_Handler,   /* 5: BusFault */
   (void*)Default_Handler,   /* 6: UsageFault */
-  (void*)Default_Handler,   /* 7: SecureFault */
+  (void*)SecureFault_Handler, /* 7: SecureFault */
   (void*)Default_Handler,   /* 8: Reserved */
   (void*)Default_Handler,   /* 9: Reserved */
   (void*)Default_Handler,   /* 10: Reserved */

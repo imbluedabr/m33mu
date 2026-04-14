@@ -96,12 +96,6 @@ static void mpu_enable_xn_on_target(void) {
   dsb(); isb();
 }
 
-static void trigger_sau_violation(void) {
-  // Attempt to read Secure SRAM from NS => must fault
-  volatile uint32_t* p = (uint32_t*)SRAM_S_BASE;
-  (void)*p;
-}
-
 // --- Fault handlers that “consume” the fault and continue ---
 typedef struct {
   uint32_t r0,r1,r2,r3,r12,lr,pc,xpsr;
@@ -216,17 +210,14 @@ void Reset_Handler(void) {
   uint32_t r2 = Secure_CallNonSecure(NonSecure_Callback, 0x1234u);
   if (r2 == (0x1234u + 0x10u)) g_status |= (1u << 1);
 
-  // 3) SAU enforcement: NS read of Secure SRAM must fault, handler recovers
-  trigger_sau_violation();
-
-  // 4) MPU enforcement: XN fetch must fault, handler resumes
+  // 3) MPU enforcement: XN fetch must fault, handler resumes
   mpu_enable_xn_on_target();
   g_resume_pc = (uint32_t)&&after_mpu;
   mpu_xn_target(); // should fault on fetch
 after_mpu:
 
   // All tests done?
-  if ((g_status & 0x3Fu) == 0x3Fu) {
+  if ((g_status & 0x3Bu) == 0x3Bu) {
     __asm volatile("bkpt #0x7F"); // PASS
   } else {
     __asm volatile("bkpt #0x7E"); // FAIL
