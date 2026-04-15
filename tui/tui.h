@@ -106,6 +106,12 @@ struct mm_tui {
     mm_u32 msp_min_ns;
     mm_bool msp_top_s_valid;
     mm_bool msp_top_ns_valid;
+    mm_u32 psp_top_s;
+    mm_u32 psp_min_s;
+    mm_u32 psp_top_ns;
+    mm_u32 psp_min_ns;
+    mm_bool psp_top_s_valid;
+    mm_bool psp_top_ns_valid;
     mm_u32 msplim_s;
     mm_u32 psplim_s;
     mm_u32 msplim_ns;

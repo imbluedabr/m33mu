@@ -59,6 +59,36 @@ static void cpu_update_msp_min(struct mm_cpu *cpu, enum mm_sec_state sec, mm_u32
     }
 }
 
+static void cpu_init_psp_top(struct mm_cpu *cpu, enum mm_sec_state sec, mm_u32 value)
+{
+    if (sec == MM_NONSECURE) {
+        if (!cpu->psp_top_ns_valid && value != 0u) {
+            cpu->psp_top_ns = value;
+            cpu->psp_min_ns = value;
+            cpu->psp_top_ns_valid = MM_TRUE;
+        }
+        return;
+    }
+    if (!cpu->psp_top_s_valid && value != 0u) {
+        cpu->psp_top_s = value;
+        cpu->psp_min_s = value;
+        cpu->psp_top_s_valid = MM_TRUE;
+    }
+}
+
+static void cpu_update_psp_min(struct mm_cpu *cpu, enum mm_sec_state sec, mm_u32 value)
+{
+    if (sec == MM_NONSECURE) {
+        if (cpu->psp_top_ns_valid && value < cpu->psp_min_ns) {
+            cpu->psp_min_ns = value;
+        }
+        return;
+    }
+    if (cpu->psp_top_s_valid && value < cpu->psp_min_s) {
+        cpu->psp_min_s = value;
+    }
+}
+
 void mm_cpu_note_msp_top(struct mm_cpu *cpu, enum mm_sec_state sec)
 {
     mm_u32 value;
@@ -67,6 +97,16 @@ void mm_cpu_note_msp_top(struct mm_cpu *cpu, enum mm_sec_state sec)
     }
     value = (sec == MM_NONSECURE) ? cpu->msp_ns : cpu->msp_s;
     cpu_init_msp_top(cpu, sec, value);
+}
+
+void mm_cpu_note_psp_top(struct mm_cpu *cpu, enum mm_sec_state sec)
+{
+    mm_u32 value;
+    if (cpu == 0) {
+        return;
+    }
+    value = (sec == MM_NONSECURE) ? cpu->psp_ns : cpu->psp_s;
+    cpu_init_psp_top(cpu, sec, value);
 }
 
 mm_u32 mm_cpu_get_active_sp(const struct mm_cpu *cpu)
@@ -100,6 +140,8 @@ void mm_cpu_set_active_sp(struct mm_cpu *cpu, mm_u32 value)
     if (use_psp) {
         if (cpu->sec_state == MM_NONSECURE) cpu->psp_ns = value;
         else cpu->psp_s = value;
+        cpu_init_psp_top(cpu, cpu->sec_state, value);
+        cpu_update_psp_min(cpu, cpu->sec_state, value);
     } else {
         if (cpu->sec_state == MM_NONSECURE) {
             cpu->msp_ns = value;
@@ -173,6 +215,8 @@ void mm_cpu_set_psp(struct mm_cpu *cpu, enum mm_sec_state sec, mm_u32 value)
     }
     if (sec == MM_NONSECURE) cpu->psp_ns = value;
     else cpu->psp_s = value;
+    cpu_init_psp_top(cpu, sec, value);
+    cpu_update_psp_min(cpu, sec, value);
     if (sec == cpu->sec_state) {
         if (cpu->mode == MM_THREAD && control_sp_sel(cpu)) {
             cpu->r[13] = value;

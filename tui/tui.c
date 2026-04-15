@@ -1305,75 +1305,128 @@ static void tui_draw(struct mm_tui *tui)
         if (line < log_h) {
             line++;
         }
-        if (line < log_h) {
-            mm_u32 cur_used = 0;
-            mm_u32 max_used = 0;
-            mm_u32 total = 0;
-            mm_u32 floor = tui_stack_floor(tui->msplim_s, tui->ram_base_s, tui->ram_size_s);
-            mm_bool unbounded = (tui->msplim_s == 0u) ? MM_TRUE : MM_FALSE;
-            char cur_buf[32];
-            char total_buf[32];
-            char max_buf[32];
-            if (tui->msp_top_s_valid) {
-                if (tui->msp_top_s >= tui->msp_s) {
+        /* Stack usage bars: show each SP bank that has been used.
+         * Highlight the currently active bank.
+         */
+        {
+            mm_bool use_psp;
+            mm_bool active_ns;
+            /* Determine currently active SP bank */
+            active_ns = (tui->core_sec != MM_SECURE);
+            if (tui->core_mode == MM_HANDLER) {
+                use_psp = MM_FALSE;
+            } else {
+                mm_u32 ctrl = active_ns ? tui->control_ns : tui->control_s;
+                use_psp = (ctrl & 0x2u) != 0u;
+            }
+            /* MSP_S */
+            if (tui->msp_top_s_valid && line < log_h) {
+                mm_u32 cur_used = 0, max_used = 0, total = 0;
+                mm_u32 floor = tui_stack_floor(tui->msplim_s, tui->ram_base_s, tui->ram_size_s);
+                mm_bool unbounded = (tui->msplim_s == 0u) ? MM_TRUE : MM_FALSE;
+                mm_bool is_active = (!active_ns && !use_psp);
+                char cur_buf[32], total_buf[32], max_buf[32];
+                if (tui->msp_top_s >= tui->msp_s)
                     cur_used = tui->msp_top_s - tui->msp_s;
-                }
-                if (tui->msp_top_s >= tui->msp_min_s) {
+                if (tui->msp_top_s >= tui->msp_min_s)
                     max_used = tui->msp_top_s - tui->msp_min_s;
-                }
-                if (tui->msp_top_s >= floor) {
+                if (tui->msp_top_s >= floor)
                     total = tui->msp_top_s - floor;
-                }
                 tui_format_size(cur_buf, sizeof(cur_buf), cur_used);
                 tui_format_size(total_buf, sizeof(total_buf), total);
                 tui_format_size(max_buf, sizeof(max_buf), max_used);
-                snprintf(buf, sizeof(buf), "Secure stack: %s used/%s max. %s total%s",
+                snprintf(buf, sizeof(buf), "%sMSP_S: %s used/%s max. %s total%s",
+                         is_active ? "\xE2\x96\xB6 " : "  ",
                          cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
-                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w,
+                              is_active ? console_fg : TUI_FG_DIM, console_bg, buf);
                 line++;
                 if (line < log_h) {
                     tui_draw_stack_bar(inner_x, log_y + line, inner_x + log_w - 1, cur_used, max_used);
+                    line++;
                 }
-            } else {
-                tui_draw_text(inner_x, log_y + line, inner_x + log_w, TUI_FG_DIM, console_bg,
-                              "Secure stack: Unused");
             }
-            line++;
-        }
-        if (show_nonsecure_stack && line < log_h) {
-            if (tui->msp_top_ns_valid) {
-                mm_u32 cur_used = 0;
-                mm_u32 max_used = 0;
-                mm_u32 total = 0;
+            /* PSP_S */
+            if (tui->psp_top_s_valid && line < log_h) {
+                mm_u32 cur_used = 0, max_used = 0, total = 0;
+                mm_u32 floor = tui_stack_floor(tui->psplim_s, tui->ram_base_s, tui->ram_size_s);
+                mm_bool unbounded = (tui->psplim_s == 0u) ? MM_TRUE : MM_FALSE;
+                mm_bool is_active = (!active_ns && use_psp);
+                char cur_buf[32], total_buf[32], max_buf[32];
+                if (tui->psp_top_s >= tui->psp_s)
+                    cur_used = tui->psp_top_s - tui->psp_s;
+                if (tui->psp_top_s >= tui->psp_min_s)
+                    max_used = tui->psp_top_s - tui->psp_min_s;
+                if (tui->psp_top_s >= floor)
+                    total = tui->psp_top_s - floor;
+                tui_format_size(cur_buf, sizeof(cur_buf), cur_used);
+                tui_format_size(total_buf, sizeof(total_buf), total);
+                tui_format_size(max_buf, sizeof(max_buf), max_used);
+                snprintf(buf, sizeof(buf), "%sPSP_S: %s used/%s max. %s total%s",
+                         is_active ? "\xE2\x96\xB6 " : "  ",
+                         cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w,
+                              is_active ? console_fg : TUI_FG_DIM, console_bg, buf);
+                line++;
+                if (line < log_h) {
+                    tui_draw_stack_bar(inner_x, log_y + line, inner_x + log_w - 1, cur_used, max_used);
+                    line++;
+                }
+            }
+            /* MSP_NS */
+            if (show_nonsecure_stack && tui->msp_top_ns_valid && line < log_h) {
+                mm_u32 cur_used = 0, max_used = 0, total = 0;
                 mm_u32 floor = tui_stack_floor(tui->msplim_ns, tui->ram_base_ns, tui->ram_size_ns);
                 mm_bool unbounded = (tui->msplim_ns == 0u) ? MM_TRUE : MM_FALSE;
-                char cur_buf[32];
-                char total_buf[32];
-                char max_buf[32];
-                if (tui->msp_top_ns >= tui->msp_ns) {
+                mm_bool is_active = (active_ns && !use_psp);
+                char cur_buf[32], total_buf[32], max_buf[32];
+                if (tui->msp_top_ns >= tui->msp_ns)
                     cur_used = tui->msp_top_ns - tui->msp_ns;
-                }
-                if (tui->msp_top_ns >= tui->msp_min_ns) {
+                if (tui->msp_top_ns >= tui->msp_min_ns)
                     max_used = tui->msp_top_ns - tui->msp_min_ns;
-                }
-                if (tui->msp_top_ns >= floor) {
+                if (tui->msp_top_ns >= floor)
                     total = tui->msp_top_ns - floor;
-                }
                 tui_format_size(cur_buf, sizeof(cur_buf), cur_used);
                 tui_format_size(total_buf, sizeof(total_buf), total);
                 tui_format_size(max_buf, sizeof(max_buf), max_used);
-                snprintf(buf, sizeof(buf), "Non-Secure stack: %s used/%s max. %s total%s",
+                snprintf(buf, sizeof(buf), "%sMSP_NS: %s used/%s max. %s total%s",
+                         is_active ? "\xE2\x96\xB6 " : "  ",
                          cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
-                tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w,
+                              is_active ? console_fg : TUI_FG_DIM, console_bg, buf);
                 line++;
                 if (line < log_h) {
                     tui_draw_stack_bar(inner_x, log_y + line, inner_x + log_w - 1, cur_used, max_used);
+                    line++;
                 }
-            } else {
-                tui_draw_text(inner_x, log_y + line, inner_x + log_w, TUI_FG_DIM, console_bg,
-                              "Non-Secure stack: Unused");
             }
-            line++;
+            /* PSP_NS */
+            if (show_nonsecure_stack && tui->psp_top_ns_valid && line < log_h) {
+                mm_u32 cur_used = 0, max_used = 0, total = 0;
+                mm_u32 floor = tui_stack_floor(tui->psplim_ns, tui->ram_base_ns, tui->ram_size_ns);
+                mm_bool unbounded = (tui->psplim_ns == 0u) ? MM_TRUE : MM_FALSE;
+                mm_bool is_active = (active_ns && use_psp);
+                char cur_buf[32], total_buf[32], max_buf[32];
+                if (tui->psp_top_ns >= tui->psp_ns)
+                    cur_used = tui->psp_top_ns - tui->psp_ns;
+                if (tui->psp_top_ns >= tui->psp_min_ns)
+                    max_used = tui->psp_top_ns - tui->psp_min_ns;
+                if (tui->psp_top_ns >= floor)
+                    total = tui->psp_top_ns - floor;
+                tui_format_size(cur_buf, sizeof(cur_buf), cur_used);
+                tui_format_size(total_buf, sizeof(total_buf), total);
+                tui_format_size(max_buf, sizeof(max_buf), max_used);
+                snprintf(buf, sizeof(buf), "%sPSP_NS: %s used/%s max. %s total%s",
+                         is_active ? "\xE2\x96\xB6 " : "  ",
+                         cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
+                tui_draw_text(inner_x, log_y + line, inner_x + log_w,
+                              is_active ? console_fg : TUI_FG_DIM, console_bg, buf);
+                line++;
+                if (line < log_h) {
+                    tui_draw_stack_bar(inner_x, log_y + line, inner_x + log_w - 1, cur_used, max_used);
+                    line++;
+                }
+            }
         }
         if (line < log_h) {
             line++;
@@ -1977,6 +2030,12 @@ void mm_tui_set_registers(struct mm_tui *tui, const struct mm_cpu *cpu, mm_bool 
     tui->msp_min_ns = cpu->msp_min_ns;
     tui->msp_top_s_valid = cpu->msp_top_s_valid;
     tui->msp_top_ns_valid = cpu->msp_top_ns_valid;
+    tui->psp_top_s = cpu->psp_top_s;
+    tui->psp_min_s = cpu->psp_min_s;
+    tui->psp_top_ns = cpu->psp_top_ns;
+    tui->psp_min_ns = cpu->psp_min_ns;
+    tui->psp_top_s_valid = cpu->psp_top_s_valid;
+    tui->psp_top_ns_valid = cpu->psp_top_ns_valid;
     tui->msplim_s = cpu->msplim_s;
     tui->psplim_s = cpu->psplim_s;
     tui->msplim_ns = cpu->msplim_ns;
