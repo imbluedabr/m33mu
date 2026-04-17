@@ -1021,7 +1021,7 @@ static void tui_draw(struct mm_tui *tui)
 
     getmaxyx(stdscr, h, w);
     if (w <= 0 || h <= 3) return;
-    show_nonsecure_stack = (tui->core_sec != MM_SECURE) ? MM_TRUE : MM_FALSE;
+    show_nonsecure_stack = (tui->msp_top_ns_valid || tui->psp_top_ns_valid) ? MM_TRUE : MM_FALSE;
     tui->width = w;
     tui->height = h;
     tui_draw_filled(0, 0, w - 1, h - 1, TUI_FG_WHITE, TUI_BG_BLACK);
@@ -1260,10 +1260,11 @@ static void tui_draw(struct mm_tui *tui)
             tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
             line++;
         }
-        if (show_nonsecure_stack && line < log_h) {
+        if (line < log_h) {
             snprintf(buf, sizeof(buf), "msp_ns 0x%08lx  psp_ns 0x%08lx",
                      (unsigned long)tui->msp_ns, (unsigned long)tui->psp_ns);
-            tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+            tui_draw_text(inner_x, log_y + line, inner_x + log_w,
+                          show_nonsecure_stack ? console_fg : TUI_FG_DIM, console_bg, buf);
             line++;
         }
         if (line < log_h) {
@@ -1272,10 +1273,11 @@ static void tui_draw(struct mm_tui *tui)
             tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
             line++;
         }
-        if (show_nonsecure_stack && line < log_h) {
+        if (line < log_h) {
             snprintf(buf, sizeof(buf), "msplim_ns 0x%08lx  psplim_ns 0x%08lx",
                      (unsigned long)tui->msplim_ns, (unsigned long)tui->psplim_ns);
-            tui_draw_text(inner_x, log_y + line, inner_x + log_w, console_fg, console_bg, buf);
+            tui_draw_text(inner_x, log_y + line, inner_x + log_w,
+                          show_nonsecure_stack ? console_fg : TUI_FG_DIM, console_bg, buf);
             line++;
         }
         if (line < log_h) {
@@ -1336,7 +1338,7 @@ static void tui_draw(struct mm_tui *tui)
                 tui_format_size(total_buf, sizeof(total_buf), total);
                 tui_format_size(max_buf, sizeof(max_buf), max_used);
                 snprintf(buf, sizeof(buf), "%sMSP_S: %s used/%s max. %s total%s",
-                         is_active ? "\xE2\x96\xB6 " : "  ",
+                         is_active ? "> " : "  ",
                          cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w,
                               is_active ? console_fg : TUI_FG_DIM, console_bg, buf);
@@ -1363,7 +1365,7 @@ static void tui_draw(struct mm_tui *tui)
                 tui_format_size(total_buf, sizeof(total_buf), total);
                 tui_format_size(max_buf, sizeof(max_buf), max_used);
                 snprintf(buf, sizeof(buf), "%sPSP_S: %s used/%s max. %s total%s",
-                         is_active ? "\xE2\x96\xB6 " : "  ",
+                         is_active ? "> " : "  ",
                          cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w,
                               is_active ? console_fg : TUI_FG_DIM, console_bg, buf);
@@ -1390,7 +1392,7 @@ static void tui_draw(struct mm_tui *tui)
                 tui_format_size(total_buf, sizeof(total_buf), total);
                 tui_format_size(max_buf, sizeof(max_buf), max_used);
                 snprintf(buf, sizeof(buf), "%sMSP_NS: %s used/%s max. %s total%s",
-                         is_active ? "\xE2\x96\xB6 " : "  ",
+                         is_active ? "> " : "  ",
                          cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w,
                               is_active ? console_fg : TUI_FG_DIM, console_bg, buf);
@@ -1417,7 +1419,7 @@ static void tui_draw(struct mm_tui *tui)
                 tui_format_size(total_buf, sizeof(total_buf), total);
                 tui_format_size(max_buf, sizeof(max_buf), max_used);
                 snprintf(buf, sizeof(buf), "%sPSP_NS: %s used/%s max. %s total%s",
-                         is_active ? "\xE2\x96\xB6 " : "  ",
+                         is_active ? "> " : "  ",
                          cur_buf, max_buf, total_buf, unbounded ? " (unbounded)" : "");
                 tui_draw_text(inner_x, log_y + line, inner_x + log_w,
                               is_active ? console_fg : TUI_FG_DIM, console_bg, buf);
