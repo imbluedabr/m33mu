@@ -199,11 +199,12 @@ static void memfault_reason(const struct mm_prot_ctx *ctx,
     if (prot_trace_level() <= 0) {
         return;
     }
-    printf("[MEMFAULT_CAUSE] sec=%s type=%s addr=0x%08lx reason=%s attr=%s addr_sec=%s src=%s priv=%d\n",
+    printf("[MEMFAULT_CAUSE] sec=%s type=%s addr=0x%08lx reason=%s\n",
            sec_name(sec),
            type_name(type),
            (unsigned long)addr,
-           (reason != 0) ? reason : "?",
+           (reason != 0) ? reason : "?");
+    printf("[MEMFAULT_CAUSE] attr=%s addr_sec=%s src=%s priv=%d\n",
            attr_name(attr),
            sec_name(addr_sec),
            mpcbb_hit ? "MPCBB" : "SAU",

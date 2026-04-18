@@ -96,6 +96,7 @@ void mm_uart_io_init(struct mm_uart_io *io)
     if (io == 0) return;
     memset(io, 0, sizeof(*io));
     io->fd = -1;
+    io->rx_fd = -1;
     io->stdout_only = MM_FALSE;
 }
 
@@ -103,9 +104,25 @@ mm_bool mm_uart_io_open(struct mm_uart_io *io, mm_u32 base)
 {
     if (io == 0) return MM_FALSE;
     if (g_uart_stdout && !mm_tui_is_active()) {
+        int rx;
+        struct termios tio;
         io->fd = STDOUT_FILENO;
         io->stdout_only = MM_TRUE;
-        snprintf(io->name, sizeof(io->name), "stdout");
+        g_uart_stdout = MM_FALSE; /* only first UART gets stdio */
+        /* Open /dev/tty for RX — works even when stdin is closed */
+        rx = open("/dev/tty", O_RDONLY | O_NOCTTY | O_NONBLOCK);
+        if (rx < 0) {
+            /* fallback to stdin */
+            rx = fcntl(STDIN_FILENO, F_GETFL, 0) >= 0 ? STDIN_FILENO : -1;
+        }
+        if (rx >= 0 && tcgetattr(rx, &tio) == 0) {
+            tio.c_lflag &= ~(ICANON | ECHO);
+            tio.c_cc[VMIN] = 0;
+            tio.c_cc[VTIME] = 0;
+            tcsetattr(rx, TCSANOW, &tio);
+        }
+        io->rx_fd = rx;
+        snprintf(io->name, sizeof(io->name), "stdio");
         printf("[UART] %08lx attached to %s\n", (unsigned long)base, io->name);
         return MM_TRUE;
     }
@@ -124,6 +141,10 @@ void mm_uart_io_close(struct mm_uart_io *io)
         close(io->fd);
         io->fd = -1;
     }
+    if (io->rx_fd >= 0 && io->rx_fd != STDIN_FILENO) {
+        close(io->rx_fd);
+    }
+    io->rx_fd = -1;
     io->rx_pending = MM_FALSE;
     io->tx_head = io->tx_tail = 0;
 }
@@ -168,11 +189,13 @@ mm_bool mm_uart_io_poll(struct mm_uart_io *io)
 {
     mm_bool new_rx = MM_FALSE;
     if (io == 0 || io->fd < 0) return MM_FALSE;
-    if (io->stdout_only) return MM_FALSE;
     (void)mm_uart_io_flush(io);
     if (!io->rx_pending) {
         mm_u8 b;
-        ssize_t n = read(io->fd, &b, 1);
+        int rx_fd = io->stdout_only ? io->rx_fd : io->fd;
+        ssize_t n;
+        if (rx_fd < 0) return MM_FALSE;
+        n = read(rx_fd, &b, 1);
         if (n == 1) {
             io->rx_byte = b;
             io->rx_pending = MM_TRUE;
@@ -200,7 +223,6 @@ mm_bool mm_uart_io_has_rx(const struct mm_uart_io *io)
 mm_u8 mm_uart_io_peek(const struct mm_uart_io *io)
 {
     if (io == 0) return 0;
-    if (io->stdout_only) return 0;
     if (!io->rx_pending) return 0;
     return io->rx_byte;
 }
@@ -209,7 +231,6 @@ mm_u8 mm_uart_io_read(struct mm_uart_io *io)
 {
     mm_u8 v = 0;
     if (io == 0) return 0;
-    if (io->stdout_only) return 0;
     if (io->rx_pending) {
         v = io->rx_byte;
         io->rx_pending = MM_FALSE;

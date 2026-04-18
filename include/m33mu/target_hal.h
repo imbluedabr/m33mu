@@ -27,6 +27,7 @@
 
 struct mm_uart_io {
     int fd;
+    int rx_fd;
     char name[64];
     mm_u8 tx_buf[1024];
     size_t tx_head;

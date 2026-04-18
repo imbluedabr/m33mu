@@ -3660,14 +3660,16 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
         mm_u32 ctrl = (stack_sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s;
         mm_u32 cpacr = cpacr_for_sec(scs, stack_sec);
         mm_bool fpu_allowed = fpu_access_allowed(cpu, scs);
-        printf("[MEMFAULT_FPU] sec=%d fp_active=%d ctrl=0x%08lx cpacr=0x%08lx nsacr=0x%08lx fpu_allowed=%d fp_stack=%d exc_ret=0x%08lx\n",
+        printf("[MEMFAULT_FPU] sec=%d fp_active=%d fpu_allowed=%d fp_stack=%d\n",
                (int)stack_sec,
                (int)cpu->fp_active,
+               (int)fpu_allowed,
+               (int)fp_stack);
+        printf("[MEMFAULT_FPU] ctrl=0x%08lx cpacr=0x%08lx nsacr=0x%08lx\n",
                (unsigned long)ctrl,
                (unsigned long)cpacr,
-               (unsigned long)scs->nsacr,
-               (int)fpu_allowed,
-               (int)fp_stack,
+               (unsigned long)scs->nsacr);
+        printf("[MEMFAULT_FPU] exc_ret=0x%08lx\n",
                (unsigned long)exc_ret_val);
     }
 
@@ -3804,22 +3806,25 @@ static mm_bool raise_mem_fault(struct mm_cpu *cpu, struct mm_memmap *map, struct
     mm_u32 *cfsr;
     mm_u32 *mmfar;
     sec = cpu->sec_state;
-    printf("[MEMFAULT] pc=0x%08lx addr=0x%08lx r0=%08lx r1=%08lx r2=%08lx r3=%08lx "
-           "r4=%08lx r5=%08lx r6=%08lx r7=%08lx r12=%08lx sp=%08lx lr=%08lx xpsr=%08lx\n",
+    printf("[MEMFAULT] pc=0x%08lx addr=0x%08lx\n",
            (unsigned long)fault_pc,
-           (unsigned long)addr,
-           (unsigned long)cpu->r[0],
-           (unsigned long)cpu->r[1],
-           (unsigned long)cpu->r[2],
-           (unsigned long)cpu->r[3],
-           (unsigned long)cpu->r[4],
-           (unsigned long)cpu->r[5],
-           (unsigned long)cpu->r[6],
-           (unsigned long)cpu->r[7],
-           (unsigned long)cpu->r[12],
+           (unsigned long)addr);
+    printf("[MEMFAULT] sp=0x%08lx lr=0x%08lx xpsr=0x%08lx\n",
            (unsigned long)mm_cpu_get_active_sp(cpu),
            (unsigned long)cpu->r[14],
            (unsigned long)cpu->xpsr);
+    printf("[MEMFAULT] r0=%08lx r1=%08lx r2=%08lx r3=%08lx\n",
+           (unsigned long)cpu->r[0],
+           (unsigned long)cpu->r[1],
+           (unsigned long)cpu->r[2],
+           (unsigned long)cpu->r[3]);
+    printf("[MEMFAULT] r4=%08lx r5=%08lx r6=%08lx r7=%08lx\n",
+           (unsigned long)cpu->r[4],
+           (unsigned long)cpu->r[5],
+           (unsigned long)cpu->r[6],
+           (unsigned long)cpu->r[7]);
+    printf("[MEMFAULT] r12=%08lx\n",
+           (unsigned long)cpu->r[12]);
     if (g_quit_on_faults) {
         g_fault_pending = MM_TRUE;
     }
@@ -3973,24 +3978,30 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
                                     cpu->mode == MM_THREAD,
                                     fp_stack ? MM_FALSE : MM_TRUE,
                                     MM_TRUE);
-    printf("[USGFLT] enter sec=%d mode=%d use_psp=%d active_sp=0x%08lx MSP_S=0x%08lx MSP_NS=0x%08lx PSP_S=0x%08lx PSP_NS=0x%08lx CONTROL_S=0x%08lx CONTROL_NS=0x%08lx fault_pc=0x%08lx xpsr=0x%08lx handler=0x%08lx exc_ret=0x%08lx\n",
+    printf("[USGFLT] enter sec=%d mode=%d use_psp=%d active_sp=0x%08lx\n",
            (int)sec,
            (int)cpu->mode,
            (int)use_psp_entry,
-           (unsigned long)sp,
+           (unsigned long)sp);
+    printf("[USGFLT] msp_s=0x%08lx msp_ns=0x%08lx\n",
            (unsigned long)msp_s_val,
-           (unsigned long)msp_ns_val,
+           (unsigned long)msp_ns_val);
+    printf("[USGFLT] psp_s=0x%08lx psp_ns=0x%08lx\n",
            (unsigned long)psp_s_val,
-           (unsigned long)psp_ns_val,
+           (unsigned long)psp_ns_val);
+    printf("[USGFLT] ctrl_s=0x%08lx ctrl_ns=0x%08lx\n",
            (unsigned long)control_s_val,
-           (unsigned long)control_ns_val,
+           (unsigned long)control_ns_val);
+    printf("[USGFLT] fault_pc=0x%08lx xpsr=0x%08lx\n",
            (unsigned long)fault_pc,
-           (unsigned long)fault_xpsr,
+           (unsigned long)fault_xpsr);
+    printf("[USGFLT] handler=0x%08lx exc_ret=0x%08lx\n",
            (unsigned long)handler,
            (unsigned long)exc_ret_val);
-    printf("[USGFLT] MSPLIM_S=0x%08lx MSPLIM_NS=0x%08lx PSPLIM_S=0x%08lx PSPLIM_NS=0x%08lx\n",
+    printf("[USGFLT] msplim_s=0x%08lx msplim_ns=0x%08lx\n",
            (unsigned long)cpu->msplim_s,
-           (unsigned long)cpu->msplim_ns,
+           (unsigned long)cpu->msplim_ns);
+    printf("[USGFLT] psplim_s=0x%08lx psplim_ns=0x%08lx\n",
            (unsigned long)cpu->psplim_s,
            (unsigned long)cpu->psplim_ns);
         {
