@@ -144,7 +144,11 @@ static void spi_set_enabled(struct stm32_spi_inst *s, mm_bool enable)
         s->tsize_rem = 0u;
         s->rx_head = 0u;
         s->rx_tail = 0u;
-        mm_spi_bus_end(s->bus_index);
+        /* When CS is GPIO-driven and the backend polls it, transaction
+         * boundaries must follow CS, not SPE transitions. */
+        if (s->owner == 0 || s->owner->cfg == 0 || !s->owner->cfg->poll_cs) {
+            mm_spi_bus_end(s->bus_index);
+        }
     }
     update_sr(s);
 }
@@ -188,7 +192,6 @@ static void spi_handle_tx(struct stm32_spi_inst *s, mm_u32 value, mm_u32 size_by
         s->transfer_active = MM_FALSE;
         s->eot_pending = MM_TRUE;
         spi_bus_poll_if_needed(s);
-        mm_spi_bus_end(s->bus_index);
     }
     update_sr(s);
 }
@@ -350,7 +353,8 @@ static mm_bool spi_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
         if ((value & CR1_CSTART) != 0u && s->enabled) {
             spi_start_transfer(s);
         }
-        if (was_enabled && (value & CR1_SPE) == 0u) {
+        if (was_enabled && (value & CR1_SPE) == 0u &&
+            (s->owner == 0 || s->owner->cfg == 0 || !s->owner->cfg->poll_cs)) {
             mm_spi_bus_end(s->bus_index);
         }
         return MM_TRUE;

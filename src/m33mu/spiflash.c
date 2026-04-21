@@ -242,6 +242,24 @@ static mm_u8 spiflash_read_byte(const struct mm_spiflash *flash, mm_u32 addr)
     return flash->data[addr % flash->size];
 }
 
+/* Derive the JEDEC capacity byte (log2 of size) from the backing image. */
+static mm_u8 spiflash_capacity_byte(const struct mm_spiflash *flash)
+{
+    mm_u32 sz;
+    mm_u8 code;
+
+    if (flash == 0 || flash->size == 0u) {
+        return 0u;
+    }
+    sz = flash->size;
+    code = 0u;
+    while (sz > 1u) {
+        sz >>= 1;
+        code++;
+    }
+    return code;
+}
+
 static mm_u8 spiflash_bus_xfer(void *opaque, mm_u8 out)
 {
     struct mm_spiflash *flash = (struct mm_spiflash *)opaque;
@@ -297,7 +315,7 @@ mm_u8 mm_spiflash_xfer(struct mm_spiflash *flash, mm_u8 out)
         case 0x9F: /* RDID */
             flash->state = SPIFLASH_READ;
             flash->addr = 0;
-            return 0xC2u; /* generic manufacturer */
+            return 0xC2u; /* generic manufacturer (Macronix) */
         case 0x03: /* READ */
         case 0x0B: /* FAST READ */
             flash->addr_need = 3;
@@ -356,10 +374,12 @@ mm_u8 mm_spiflash_xfer(struct mm_spiflash *flash, mm_u8 out)
         return 0xFFu;
     case SPIFLASH_READ:
         if (flash->cmd == 0x9F) {
-            /* Return a fixed 3-byte JEDEC ID stream. */
+            /* Return a 3-byte JEDEC ID stream. The third byte encodes
+             * the flash capacity as log2(size_bytes) so the guest driver
+             * can derive the real geometry of the backing image. */
             if (flash->addr == 0) resp = 0xC2u;
             else if (flash->addr == 1) resp = 0x20u;
-            else resp = 0x18u;
+            else resp = spiflash_capacity_byte(flash);
             flash->addr++;
             return resp;
         }

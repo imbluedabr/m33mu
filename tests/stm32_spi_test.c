@@ -76,7 +76,7 @@ static int test_u585_cs_polling(void)
     if (!mmio_bus_write(&bus, bases[0] + 0x00u, 4, (1u << 0) | (1u << 9))) return 1;
     if (!mmio_bus_write(&bus, bases[0] + 0x20u, 1, 0x12u)) return 1;
     if (dev.xfer_count != 1) return 1;
-    if (dev.end_count == 0) return 1;
+    if (dev.end_count != 0) return 1;
     if (dev.poll_count < 3) return 1;
     return 0;
 }
