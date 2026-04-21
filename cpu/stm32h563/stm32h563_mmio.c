@@ -35,6 +35,7 @@
 #include "stm32h563/stm32h563_mmio.h"
 #include "stm32h563/stm32h563_usb.h"
 #include "stm32h563/stm32h563_eth.h"
+#include "stm32h563/stm32h563_i2c.h"
 #include "m33mu/memmap.h"
 #include "m33mu/flash_persist.h"
 #include "m33mu/otp.h"
@@ -671,6 +672,7 @@ void mm_stm32h563_mmio_reset(void)
     }
     mm_stm32h563_usb_reset();
     mm_stm32h563_eth_reset();
+    mm_stm32h563_i2c_reset();
     mm_gpio_bank_set_reader(stm32h563_gpio_bank_read, 0);
     mm_gpio_bank_set_moder_reader(stm32h563_gpio_bank_read_moder, 0);
     mm_gpio_bank_set_clock_reader(stm32h563_gpio_bank_clock, 0);
@@ -2325,6 +2327,7 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
 
     if (!mm_stm32h563_usb_register_mmio(bus)) return MM_FALSE;
     if (!mm_stm32h563_eth_register_mmio(bus)) return MM_FALSE;
+    mm_stm32h563_i2c_init(bus, 0);
     return MM_TRUE;
 }
 

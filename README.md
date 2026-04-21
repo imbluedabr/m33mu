@@ -17,7 +17,7 @@ It can run as:
 - Runs firmware images directly from your host machine
 - Supports debugging through a built-in GDB remote server
 - Can load multiple images, including Secure and Non-secure firmware combinations
-- Exposes UART, SPI flash, TPM, USB, Ethernet, and other target-specific peripherals
+- Exposes UART, SPI flash, TPM, TA-100/SE050 secure elements, USB, Ethernet, and other target-specific peripherals
 
 ## Documentation Index
 

@@ -60,6 +60,7 @@
 #include "m33mu/tpm_tis.h"
 #endif
 #include "m33mu/ta100.h"
+#include "m33mu/se050.h"
 #include "tui.h"
 #include <string.h>
 #include <time.h>
@@ -4461,6 +4462,8 @@ int main(int argc, char **argv)
 #endif
     struct mm_ta100_cfg ta100_cfgs[4];
     int ta100_count = 0;
+    struct mm_se050_cfg se050_cfgs[4];
+    int se050_count = 0;
     mm_bool opt_no_tz = MM_FALSE;
     const char *memwatch_env = getenv("M33MU_MEMWATCH");
     const char *capstone_pc_env = getenv("CAPSTONE_PC");
@@ -4802,6 +4805,16 @@ int main(int argc, char **argv)
                 return 1;
             }
             ta100_count++;
+        } else if (strncmp(argv[i], "--se050:", 8) == 0) {
+            if (se050_count >= (int)(sizeof(se050_cfgs) / sizeof(se050_cfgs[0]))) {
+                fprintf(stderr, "too many se050 configs\n");
+                return 1;
+            }
+            if (!mm_se050_parse_spec(argv[i] + 8, &se050_cfgs[se050_count])) {
+                fprintf(stderr, "invalid se050 spec: %s\n", argv[i]);
+                return 1;
+            }
+            se050_count++;
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "unknown option: %s\n", argv[i]);
             return 1;
@@ -4844,6 +4857,7 @@ int main(int argc, char **argv)
                         "[--tpm:SPIx:cs=GPIONAME[:file=<path>]] "
 #endif
                         "[--ta100:SPIx:cs=GPIONAME[:file=<path>][:profile=<name>][:serial=<hex>]] "
+                        "[--se050:I2Cx[:host[:port]]] "
                         "<image.bin[:offset]|image.elf|image.hex|image.uf2> [more images...]\n",
                 argv[0]);
         fprintf(stderr, "supported CPUs:");
@@ -4953,6 +4967,12 @@ int main(int argc, char **argv)
     for (i = 0; i < ta100_count; ++i) {
         if (!mm_ta100_register_cfg(&ta100_cfgs[i])) {
             fprintf(stderr, "failed to register ta100\n");
+            return 1;
+        }
+    }
+    for (i = 0; i < se050_count; ++i) {
+        if (!mm_se050_register_cfg(&se050_cfgs[i])) {
+            fprintf(stderr, "failed to register se050\n");
             return 1;
         }
     }
@@ -5212,6 +5232,7 @@ int main(int argc, char **argv)
             mm_tpm_tis_reset_all();
 #endif
             mm_ta100_reset_all();
+            mm_se050_reset_all();
             mm_memmap_configure_flash(&map, &cfg, flash, MM_TRUE);
             mm_memmap_configure_flash(&map, &cfg, flash, MM_FALSE);
             mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE);
@@ -6578,6 +6599,7 @@ cleanup:
     mm_tpm_tis_shutdown_all();
 #endif
     mm_ta100_shutdown_all();
+    mm_se050_shutdown_all();
     mm_usbdev_stop();
     mm_eth_backend_stop();
     if (opt_capstone) {

@@ -309,6 +309,22 @@ Attach a Microchip TA\-100 Trust Anchor secure element over SPI.
 The emulated device provides 4KB of NV storage and supports a subset of common cryptographic operations including RNG, ECC P\-256 key generation, ECDSA signing, and SHA\-256.
 
 Use this when firmware expects a TA\-100 peripheral and should run without physical hardware.
+.TP
+.BR --se050:I2Cx[:host[:port]]
+Attach an NXP SE050 secure element simulator to the selected I2C bus.
+
+The device connects as a TCP client to LinuxJedi's SE050 simulator
+.B tcp_server
+and forwards I2C T=1 frames over that socket. The default host is
+.B 127.0.0.1
+and the default port is
+.BR 8050 .
+
+Use human hardware bus names. For STM32H563, use
+.B I2C1
+or another implemented STM32 I2C instance; invalid names such as
+.B I2C0
+are rejected rather than remapped.
 .SH ENVIRONMENT
 .TP
 .B CAPSTONE_PC
@@ -350,6 +366,9 @@ Run a firmware test suitable for CI: log UART to stdout, fail if the expected BK
 .TP
 .B m33mu --boot spiflash --spiflash:SPI1:file=flash.img:size=0x200000:mmap=0x90000000 firmware.bin
 Attach memory\-mapped SPI flash and boot from it.
+.TP
+.B m33mu --se050:I2C1:127.0.0.1:8050 firmware.bin
+Attach an SE050 simulator running on localhost port 8050 to STM32H563 I2C1.
 .TP
 .B m33mu --tap firmware.bin
 Run with the TAP Ethernet backend using the default interface name.
