@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include "mcxn947/mcxn947_mmio.h"
 #include "mcxn947/mcxn947_romapi.h"
+#include "mcxn947/mcxn947_secure.h"
 #include "m33mu/memmap.h"
 #include "m33mu/mmio.h"
 #include "m33mu/gpio.h"
@@ -673,8 +674,8 @@ void mm_mcxn947_mmio_reset(void)
     g_gpio_nvic = 0;
 
     /* Initialize SYSCON reset states */
-    syscon.regs[SYSCON_AHBCLKCTRL0 / 4] = 0x001FFE603u; /* ROM/SRAM + PORT0-5 + GPIO0-5 enabled */
-    syscon.regs[SYSCON_PRESETCTRL0 / 4] = 0x001FFE000u; /* Release PORT0-5 + GPIO0-5 resets */
+    syscon.regs[SYSCON_AHBCLKCTRL0 / 4] = 0x021FFE603u; /* + ELS clock bit */
+    syscon.regs[SYSCON_PRESETCTRL0 / 4] = 0x021FFE000u; /* + ELS reset released */
 
     scg.regs[SCG_VERID / 4u] = 0x00000000u;
     scg.regs[SCG_PARAM / 4u] = 0x000001FEu;
@@ -722,6 +723,7 @@ void mm_mcxn947_mmio_reset(void)
     mm_gpio_bank_set_seccfgr_reader(mcxn947_gpio_bank_read_seccfgr, 0);
     mm_gpio_set_bank_info_reader(mcxn947_gpio_bank_info, 0);
     mm_rcc_set_clock_list_reader(mcxn947_rcc_clock_list_line, 0);
+    mm_mcxn947_secure_reset();
     mm_mcxn947_romapi_reset();
 }
 
@@ -733,12 +735,28 @@ mm_bool mm_mcxn947_syscon_clock_on(mm_u32 reg_offset)
     return (reg != 0u) ? MM_TRUE : MM_FALSE;
 }
 
+mm_bool mm_mcxn947_syscon_clock_bit_on(mm_u32 reg_offset, mm_u32 bit)
+{
+    mm_u32 reg;
+    if (reg_offset >= SYSCON_SIZE || bit >= 32u) return MM_FALSE;
+    reg = syscon.regs[reg_offset / 4u];
+    return ((reg >> bit) & 1u) ? MM_TRUE : MM_FALSE;
+}
+
 mm_bool mm_mcxn947_syscon_reset_released(mm_u32 reg_offset)
 {
     mm_u32 reg;
     if (reg_offset >= SYSCON_SIZE) return MM_FALSE;
     reg = syscon.regs[reg_offset / 4];
     return (reg != 0u) ? MM_TRUE : MM_FALSE;
+}
+
+mm_bool mm_mcxn947_syscon_reset_bit_released(mm_u32 reg_offset, mm_u32 bit)
+{
+    mm_u32 reg;
+    if (reg_offset >= SYSCON_SIZE || bit >= 32u) return MM_FALSE;
+    reg = syscon.regs[reg_offset / 4u];
+    return ((reg >> bit) & 1u) ? MM_TRUE : MM_FALSE;
 }
 
 static mm_bool syscon_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
@@ -889,6 +907,8 @@ mm_bool mm_mcxn947_register_mmio(struct mmio_bus *bus)
     reg.base = TRDC_SEC_BASE;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
+    if (!mm_mcxn947_secure_register_mmio(bus)) return MM_FALSE;
+
     return MM_TRUE;
 }
 
@@ -898,11 +918,7 @@ void mm_mcxn947_flash_bind(struct mm_memmap *map,
                            const struct mm_flash_persist *persist,
                            mm_u32 flags)
 {
-    (void)map;
-    (void)flash;
-    (void)flash_size;
-    (void)persist;
-    (void)flags;
+    mm_mcxn947_secure_flash_bind(map, flash, flash_size, persist, flags);
 }
 
 mm_u64 mm_mcxn947_cpu_hz(void)

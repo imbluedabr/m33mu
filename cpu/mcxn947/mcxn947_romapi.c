@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "mcxn947/mcxn947_romapi.h"
+#include "mcxn947/mcxn947_secure.h"
 
 #define ROMAPI_BASE 0x1303fc00u
 #define ROMAPI_SIZE 0x200u
@@ -246,6 +247,14 @@ static void romapi_build_table(void)
 static mm_bool romapi_write_mem32(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr, mm_u32 value)
 {
     return mm_memmap_write(map, sec, addr, 4u, value);
+}
+
+static mm_u32 romapi_read32le_buf(const mm_u8 *buf)
+{
+    return ((mm_u32)buf[0]) |
+           ((mm_u32)buf[1] << 8u) |
+           ((mm_u32)buf[2] << 16u) |
+           ((mm_u32)buf[3] << 24u);
 }
 
 static mm_bool romapi_flash_offset(const struct mm_memmap *map, mm_u32 addr, mm_u32 len, mm_u32 *offset_out)
@@ -518,10 +527,99 @@ static void romapi_nboot_set_true(struct mm_memmap *map, enum mm_sec_state sec, 
 static void romapi_rng_fill(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr, mm_u32 len)
 {
     mm_u32 i;
+    mm_u8 buf[32];
+    mm_u32 chunk;
+    mm_u32 j;
     if (map == 0) return;
-    for (i = 0; i < len; ++i) {
-        (void)romapi_write_mem8(map, sec, addr + i, (mm_u8)(0xa5u ^ (i & 0xffu)));
+    i = 0u;
+    while (i < len) {
+        chunk = len - i;
+        if (chunk > sizeof(buf)) chunk = sizeof(buf);
+        mm_mcxn947_secure_rng_fill(buf, chunk);
+        for (j = 0u; j < chunk; ++j) {
+            (void)romapi_write_mem8(map, sec, addr + i + j, buf[j]);
+        }
+        i += chunk;
     }
+}
+
+static mm_u32 romapi_secure_violation_status(mm_u32 pc)
+{
+    switch (pc) {
+    case ROMAPI_STUB_NBOOT_RNG:
+    case ROMAPI_STUB_NBOOT_CONTEXT_INIT:
+    case ROMAPI_STUB_NBOOT_CONTEXT_DEINIT:
+    case ROMAPI_STUB_NBOOT_SB3_LOAD_MANIFEST:
+    case ROMAPI_STUB_NBOOT_SB3_LOAD_BLOCK:
+    case ROMAPI_STUB_NBOOT_AUTH_ECDSA:
+    case ROMAPI_STUB_NBOOT_AUTH_CMAC:
+        return 1u;
+    case ROMAPI_STUB_IAP_API_INIT:
+    case ROMAPI_STUB_IAP_API_DEINIT:
+    case ROMAPI_STUB_IAP_MEM_INIT:
+    case ROMAPI_STUB_IAP_MEM_READ:
+    case ROMAPI_STUB_IAP_MEM_WRITE:
+    case ROMAPI_STUB_IAP_MEM_FILL:
+    case ROMAPI_STUB_IAP_MEM_FLUSH:
+    case ROMAPI_STUB_IAP_MEM_ERASE:
+    case ROMAPI_STUB_IAP_MEM_CONFIG:
+    case ROMAPI_STUB_IAP_MEM_ERASE_ALL:
+    case ROMAPI_STUB_IAP_SBLOADER_INIT:
+    case ROMAPI_STUB_IAP_SBLOADER_PUMP:
+    case ROMAPI_STUB_IAP_SBLOADER_FINALIZE:
+        return ROMAPI_STATUS_MEM_UNSUPPORTED;
+    default:
+        break;
+    }
+    return ROMAPI_STATUS_FLASH_ACCESS_ERROR;
+}
+
+static mm_u32 romapi_uuid_fill(struct mm_memmap *map, enum mm_sec_state sec, mm_u32 addr)
+{
+    struct mcxn947_attestation_blob blob;
+    if (addr == 0u || map == 0) return ROMAPI_STATUS_FLASH_INVALID_ARGUMENT;
+    if (!mm_mcxn947_secure_attest(&blob)) return ROMAPI_STATUS_FLASH_ACCESS_ERROR;
+    if (!romapi_write_mem32(map, sec, addr + 0u, romapi_read32le_buf(blob.pubkey + 0u))) return ROMAPI_STATUS_FLASH_ACCESS_ERROR;
+    if (!romapi_write_mem32(map, sec, addr + 4u, romapi_read32le_buf(blob.pubkey + 4u))) return ROMAPI_STATUS_FLASH_ACCESS_ERROR;
+    if (!romapi_write_mem32(map, sec, addr + 8u, romapi_read32le_buf(blob.pubkey + 8u))) return ROMAPI_STATUS_FLASH_ACCESS_ERROR;
+    if (!romapi_write_mem32(map, sec, addr + 12u, romapi_read32le_buf(blob.pubkey + 12u))) return ROMAPI_STATUS_FLASH_ACCESS_ERROR;
+    return ROMAPI_STATUS_FLASH_SUCCESS;
+}
+
+static mm_u32 romapi_efuse_read(struct mm_cpu *cpu, struct mm_memmap *map)
+{
+    mm_u32 value;
+    if (cpu == 0 || map == 0) return ROMAPI_STATUS_FLASH_INVALID_ARGUMENT;
+    if (!mm_mcxn947_secure_otp_read(cpu->r[0], &value)) {
+        return ROMAPI_STATUS_FLASH_INVALID_ARGUMENT;
+    }
+    if (cpu->r[1] != 0u && !romapi_write_mem32(map, cpu->sec_state, cpu->r[1], value)) {
+        return ROMAPI_STATUS_FLASH_ACCESS_ERROR;
+    }
+    return ROMAPI_STATUS_FLASH_SUCCESS;
+}
+
+static mm_u32 romapi_efuse_program(struct mm_cpu *cpu)
+{
+    if (cpu == 0) return ROMAPI_STATUS_FLASH_INVALID_ARGUMENT;
+    return mm_mcxn947_secure_otp_program(cpu->r[0], cpu->r[1]) ?
+           ROMAPI_STATUS_FLASH_SUCCESS : ROMAPI_STATUS_FLASH_INVALID_ARGUMENT;
+}
+
+static mm_u32 romapi_iap_gate_status(mm_u32 pc)
+{
+    switch (pc) {
+    case ROMAPI_STUB_IAP_API_INIT:
+    case ROMAPI_STUB_IAP_MEM_INIT:
+    case ROMAPI_STUB_IAP_SBLOADER_INIT:
+    case ROMAPI_STUB_IAP_SBLOADER_PUMP:
+    case ROMAPI_STUB_IAP_SBLOADER_FINALIZE:
+        if (!mm_mcxn947_secure_els_clock_ready()) return ROMAPI_STATUS_MEM_UNSUPPORTED;
+        break;
+    default:
+        break;
+    }
+    return ROMAPI_STATUS_MEM_SUCCESS;
 }
 
 static mm_u32 romapi_iap_mem_read(struct mm_cpu *cpu, struct mm_memmap *map)
@@ -735,6 +833,11 @@ mm_bool mm_mcxn947_romapi_handle(struct mm_cpu *cpu, struct mm_memmap *map)
                (unsigned long)cpu->r[2],
                (unsigned long)cpu->r[3]);
     }
+    if (!mm_mcxn947_secure_rom_call_allowed(cpu->sec_state)) {
+        cpu->r[0] = romapi_secure_violation_status(pc);
+        romapi_return(cpu);
+        return MM_TRUE;
+    }
     switch (pc) {
     case ROMAPI_STUB_RUN_BOOTLOADER:
         romapi_return(cpu);
@@ -786,8 +889,7 @@ mm_bool mm_mcxn947_romapi_handle(struct mm_cpu *cpu, struct mm_memmap *map)
         romapi_return(cpu);
         return MM_TRUE;
     case ROMAPI_STUB_FFR_GET_UUID:
-        romapi_rng_fill(map, cpu->sec_state, cpu->r[1], 16u);
-        cpu->r[0] = ROMAPI_STATUS_FLASH_SUCCESS;
+        cpu->r[0] = romapi_uuid_fill(map, cpu->sec_state, cpu->r[1]);
         romapi_return(cpu);
         return MM_TRUE;
     case ROMAPI_STUB_FLEXSPI_INIT:
@@ -812,14 +914,11 @@ mm_bool mm_mcxn947_romapi_handle(struct mm_cpu *cpu, struct mm_memmap *map)
         romapi_return(cpu);
         return MM_TRUE;
     case ROMAPI_STUB_EFUSE_READ:
-        if (cpu->r[1] != 0u) {
-            (void)romapi_write_mem32(map, cpu->sec_state, cpu->r[1], 0u);
-        }
-        cpu->r[0] = ROMAPI_STATUS_FLASH_SUCCESS;
+        cpu->r[0] = romapi_efuse_read(cpu, map);
         romapi_return(cpu);
         return MM_TRUE;
     case ROMAPI_STUB_EFUSE_PROGRAM:
-        cpu->r[0] = ROMAPI_STATUS_FLASH_SUCCESS;
+        cpu->r[0] = romapi_efuse_program(cpu);
         romapi_return(cpu);
         return MM_TRUE;
     case ROMAPI_STUB_IAP_API_INIT:
@@ -830,7 +929,7 @@ mm_bool mm_mcxn947_romapi_handle(struct mm_cpu *cpu, struct mm_memmap *map)
     case ROMAPI_STUB_IAP_SBLOADER_INIT:
     case ROMAPI_STUB_IAP_SBLOADER_PUMP:
     case ROMAPI_STUB_IAP_SBLOADER_FINALIZE:
-        cpu->r[0] = ROMAPI_STATUS_MEM_SUCCESS;
+        cpu->r[0] = romapi_iap_gate_status(pc);
         romapi_return(cpu);
         return MM_TRUE;
     case ROMAPI_STUB_IAP_MEM_READ:
@@ -860,17 +959,34 @@ mm_bool mm_mcxn947_romapi_handle(struct mm_cpu *cpu, struct mm_memmap *map)
         return MM_TRUE;
     case ROMAPI_STUB_NBOOT_CONTEXT_INIT:
     case ROMAPI_STUB_NBOOT_CONTEXT_DEINIT:
+        if (!mm_mcxn947_secure_els_clock_ready()) {
+            cpu->r[0] = 1u;
+            romapi_return(cpu);
+            return MM_TRUE;
+        }
         cpu->r[0] = ROMAPI_NBOOT_SUCCESS;
         romapi_return(cpu);
         return MM_TRUE;
     case ROMAPI_STUB_NBOOT_SB3_LOAD_MANIFEST:
     case ROMAPI_STUB_NBOOT_SB3_LOAD_BLOCK:
+        if (!mm_mcxn947_secure_els_clock_ready()) {
+            cpu->r[0] = 1u;
+            cpu->r[1] = 1u;
+            romapi_return(cpu);
+            return MM_TRUE;
+        }
         cpu->r[0] = ROMAPI_NBOOT_SUCCESS;
         cpu->r[1] = 0u;
         romapi_return(cpu);
         return MM_TRUE;
     case ROMAPI_STUB_NBOOT_AUTH_ECDSA:
     case ROMAPI_STUB_NBOOT_AUTH_CMAC:
+        if (!mm_mcxn947_secure_els_clock_ready()) {
+            cpu->r[0] = 1u;
+            cpu->r[1] = 1u;
+            romapi_return(cpu);
+            return MM_TRUE;
+        }
         romapi_nboot_set_true(map, cpu->sec_state, cpu->r[2]);
         cpu->r[0] = ROMAPI_NBOOT_SUCCESS;
         cpu->r[1] = 0u;

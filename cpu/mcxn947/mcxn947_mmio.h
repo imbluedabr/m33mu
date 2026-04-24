@@ -20,6 +20,8 @@ mm_bool mm_mcxn947_mpcbb_block_secure(int bank, mm_u32 block_index);
 
 mm_bool mm_mcxn947_syscon_clock_on(mm_u32 offset);
 mm_bool mm_mcxn947_syscon_reset_released(mm_u32 offset);
+mm_bool mm_mcxn947_syscon_clock_bit_on(mm_u32 offset, mm_u32 bit);
+mm_bool mm_mcxn947_syscon_reset_bit_released(mm_u32 offset, mm_u32 bit);
 void mm_mcxn947_gpio_set_nvic(struct mm_nvic *nvic);
 
 /* SYSCON clock and reset control offsets */
