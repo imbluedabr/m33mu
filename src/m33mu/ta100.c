@@ -1782,9 +1782,15 @@ static void ta100_op_aes(struct mm_ta100 *ta, const mm_u8 *cmd, mm_u32 cmd_len)
             return;
         }
 
-        if (aad_len + msg_len > TA_AES_GCM_MAX_DATA_SIZE) {
-            ta100_build_response(ta, TA100_STATUS_PARSE_ERROR, 0, 0);
-            return;
+        {
+            mm_u32 total = (mm_u32)aad_len + (mm_u32)msg_len;
+            mm_u32 rsp_max = (mm_u32)msg_len + TA_AES_GCM_TAG_LENGTH +
+                             (((mode & TA_AES_RAND_IV) != 0) ? (mm_u32)TA_AES_GCM_IV_LENGTH : 0u);
+            if (total > TA_AES_GCM_MAX_DATA_SIZE ||
+                rsp_max > (mm_u32)(TA_AES_GCM_MAX_DATA_SIZE + TA_AES_GCM_TAG_LENGTH + TA_AES_GCM_IV_LENGTH)) {
+                ta100_build_response(ta, TA100_STATUS_PARSE_ERROR, 0, 0);
+                return;
+            }
         }
 
         if (cmd_len < TA100_PKT_DATA_OFFSET + 2) {

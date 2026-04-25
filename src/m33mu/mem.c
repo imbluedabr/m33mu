@@ -33,7 +33,11 @@
 mm_bool mem_read16(const struct mm_mem *m, mm_u32 addr, mm_u32 *value_out) {
     size_t off;
 
-    if (m == 0 || value_out == 0) {
+    if (value_out == 0) {
+        return MM_FALSE;
+    }
+    *value_out = 0u;
+    if (m == 0 || m->buffer == 0) {
         return MM_FALSE;
     }
     if (addr < m->base) {
@@ -52,7 +56,11 @@ mm_bool mem_read16(const struct mm_mem *m, mm_u32 addr, mm_u32 *value_out) {
 mm_bool mem_read32(const struct mm_mem *m, mm_u32 addr, mm_u32 *value_out) {
     size_t off;
 
-    if (m == 0 || value_out == 0) {
+    if (value_out == 0) {
+        return MM_FALSE;
+    }
+    *value_out = 0u;
+    if (m == 0 || m->buffer == 0) {
         return MM_FALSE;
     }
     if (addr < m->base) {
@@ -73,7 +81,7 @@ mm_bool mem_read(const struct mm_mem *m, mm_u32 addr, mm_u8 *dst, size_t len)
 {
     size_t off;
 
-    if (m == 0 || dst == 0) {
+    if (m == 0 || m->buffer == 0 || dst == 0) {
         return MM_FALSE;
     }
     if (addr < m->base) {

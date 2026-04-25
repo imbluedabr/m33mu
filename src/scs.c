@@ -239,11 +239,12 @@ static mm_u32 scs_read_scb_reg(const struct mm_scs_mmio *ctx, struct mm_scs *scs
     const mm_u32 *cfsr = mm_scs_cfsr_ptr_const(scs, eff_sec);
     const mm_u32 *mmfar = mm_scs_mmfar_ptr_const(scs, eff_sec);
     const mm_u32 *bfar = mm_scs_bfar_ptr_const(scs, eff_sec);
+    (void)ctx;
 
     switch (reg_off) {
     case 0x0: val = scs->cpuid; break;
     case 0x4:
-        val = (ctx->sec == MM_NONSECURE) ? scs->icsr_ns : scs->icsr_s;
+        val = (eff_sec == MM_NONSECURE) ? scs->icsr_ns : scs->icsr_s;
         if (scs->pend_sv) val |= (1u << 28);
         if (scs->pend_st) val |= (1u << 26);
         break;
@@ -471,15 +472,17 @@ static mm_bool scs_write_scb(struct mm_scs_mmio *ctx, struct mm_scs *scs, enum m
     mm_u32 *cfsr = mm_scs_cfsr_ptr(scs, eff_sec);
     mm_u32 *mmfar = mm_scs_mmfar_ptr(scs, eff_sec);
     mm_u32 *bfar = mm_scs_bfar_ptr(scs, eff_sec);
+    (void)ctx;
 
     switch (reg_off) {
+    /* TODO: gate on privilege */
     case 0x4: {
         mm_u32 v = value;
         if (v & (1u << 28)) scs->pend_sv = MM_TRUE;
         if (v & (1u << 27)) scs->pend_sv = MM_FALSE;
         if (v & (1u << 26)) scs->pend_st = MM_TRUE;
         if (v & (1u << 25)) scs->pend_st = MM_FALSE;
-        if (ctx->sec == MM_NONSECURE) scs->icsr_ns = v & ~(0xFu << 25);
+        if (eff_sec == MM_NONSECURE) scs->icsr_ns = v & ~(0xFu << 25);
         else scs->icsr_s = v & ~(0xFu << 25);
         return MM_TRUE;
     }
@@ -494,7 +497,7 @@ static mm_bool scs_write_scb(struct mm_scs_mmio *ctx, struct mm_scs *scs, enum m
         return MM_TRUE;
     case 0xC:
         if (((value >> 16) & 0xFFFFu) == 0x05FAu) {
-            if (ctx->sec == MM_NONSECURE) scs->aircr_ns = value;
+            if (eff_sec == MM_NONSECURE) scs->aircr_ns = value;
             else scs->aircr_s = value;
             if (value & (1u << 2)) {
                 mm_system_request_reset();
@@ -999,7 +1002,7 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
         if (eff_sec == MM_SECURE) {
             if ((value & ~0x7u) == 0u) {
                 scs->sau_rnr = value & 0x7u;
-                sau_set_layout(2);
+                if (value != 0u) sau_set_layout(2);
                 if (g_meminfo_enabled) {
                     printf("[MEMINFO] SAU_RNR=%lu\n",
                            (unsigned long)(value & 0x7u));
@@ -1024,7 +1027,7 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
             if ((value & 0x1Fu) == 0u) {
                 mm_u32 idx = scs->sau_rnr & 0x7u;
                 scs->sau_rbar[idx] = value;
-                sau_set_layout(2);
+                if (value != 0u) sau_set_layout(2);
                 if (g_meminfo_enabled) {
                     printf("[MEMINFO] SAU_RBAR[%lu]=0x%08lx (BASE=0x%08lx)\n",
                            (unsigned long)idx,

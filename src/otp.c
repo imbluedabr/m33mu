@@ -2,6 +2,7 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
+#define _POSIX_C_SOURCE 200809L
 #include "m33mu/otp.h"
 
 #include <errno.h>
@@ -57,7 +58,7 @@ static mm_bool otp_flush(struct mm_otp *otp)
     int fd;
     struct mm_otp_trailer trailer;
     if (otp == 0 || otp->data == 0 || otp->size == 0) return MM_FALSE;
-    fd = open(otp->path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+    fd = open(otp->path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
     if (fd < 0) {
         fprintf(stderr, "otp: failed to open %s: %s\n", otp->path, strerror(errno));
         return MM_FALSE;
@@ -97,7 +98,7 @@ static mm_bool otp_load(struct mm_otp *otp)
     if (otp->data == 0) return MM_FALSE;
     memset(otp->data, 0xff, otp->size);
 
-    fd = open(otp->path, O_RDWR | O_CREAT, 0666);
+    fd = open(otp->path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
     if (fd < 0) {
         fprintf(stderr, "otp: failed to open %s: %s\n", otp->path, strerror(errno));
         free(otp->data);

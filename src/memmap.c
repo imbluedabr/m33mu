@@ -74,6 +74,9 @@ static mm_bool read_buf_le(const mm_u8 *buf, mm_u32 offset, mm_u32 size, mm_u32 
 
 static mm_bool ram_offset_for_addr(const struct mm_memmap *map, mm_u32 addr, mm_u32 size, mm_u32 *offset_out);
 
+static const struct mm_memmap *s_last_hit_map;
+static mm_u32 s_last_hit_idx;
+
 static mm_bool read_buf_bytes(const mm_u8 *buf, mm_u32 offset, mm_u32 size, mm_u8 *out)
 {
     if (buf == 0 || out == 0 || size == 0u) {
@@ -179,20 +182,23 @@ static mm_bool ram_region_offset_for_addr(const struct mm_memmap *map,
 static mm_bool ram_offset_for_addr(const struct mm_memmap *map, mm_u32 addr, mm_u32 size, mm_u32 *offset_out)
 {
     mm_u32 i;
+    mm_u32 last_hit;
     if (map == 0 || offset_out == 0) {
         return MM_FALSE;
     }
     if (map->ram_region_count > 0u) {
-        if (map->ram_region_last_hit < map->ram_region_count &&
-            ram_region_offset_for_addr(map, map->ram_region_last_hit, addr, size, offset_out)) {
+        last_hit = (s_last_hit_map == map) ? s_last_hit_idx : 0u;
+        if (last_hit < map->ram_region_count &&
+            ram_region_offset_for_addr(map, last_hit, addr, size, offset_out)) {
             return MM_TRUE;
         }
         for (i = 0; i < map->ram_region_count; ++i) {
-            if (i == map->ram_region_last_hit) {
+            if (i == last_hit) {
                 continue;
             }
             if (ram_region_offset_for_addr(map, i, addr, size, offset_out)) {
-                ((struct mm_memmap *)map)->ram_region_last_hit = i;
+                s_last_hit_map = map;
+                s_last_hit_idx = i;
                 return MM_TRUE;
             }
         }

@@ -2,6 +2,7 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
+#define _GNU_SOURCE 1
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -450,6 +451,18 @@ static void usbdev_parse_endpoints(void)
     g_usb.ep_count = count;
 }
 
+static int valid_ep_name(const char *name)
+{
+    size_t i;
+    if (name[0] == '\0' || name[0] == '.') return 0;
+    for (i = 0; name[i] != '\0'; ++i) {
+        char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z') || c == '_' || c == '-')) return 0;
+    }
+    return 1;
+}
+
 static void usbdev_open_endpoints(void)
 {
     size_t i;
@@ -486,18 +499,18 @@ static void usbdev_open_endpoints(void)
         default: break;
         }
         snprintf(path, sizeof(path), "%s/ep%d%s%s", g_usb.gadget_root, ep_num, dir, type_suffix);
-        fd = open(path, O_RDWR | O_NONBLOCK);
+        fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0 && type_suffix[0] != '\0') {
             snprintf(path, sizeof(path), "%s/ep%d%s", g_usb.gadget_root, ep_num, dir);
-            fd = open(path, O_RDWR | O_NONBLOCK);
+            fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
         }
         if (fd < 0) {
             if (alt_root_ok && (errno == ENOENT || errno == ENOTDIR)) {
                 snprintf(path, sizeof(path), "%s/ep%d%s%s", alt_root, ep_num, dir, type_suffix);
-                fd = open(path, O_RDWR | O_NONBLOCK);
+                fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
                 if (fd < 0 && type_suffix[0] != '\0') {
                     snprintf(path, sizeof(path), "%s/ep%d%s", alt_root, ep_num, dir);
-                    fd = open(path, O_RDWR | O_NONBLOCK);
+                    fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
                 }
             }
         }
@@ -511,6 +524,7 @@ static void usbdev_open_endpoints(void)
                     int found_in = -1;
                     const char *suffix = 0;
                     const char *p;
+                    if (!valid_ep_name(name)) continue;
                     if (strncmp(name, "ep", 2) != 0) continue;
                     p = name + 2;
                     if (*p == '-') p++;
@@ -537,14 +551,14 @@ static void usbdev_open_endpoints(void)
                             /* keep looking for exact type match */
                         } else {
                             if (snprintf(path, sizeof(path), "%s/%s", g_usb.gadget_root, name) < (int)sizeof(path)) {
-                                fd = open(path, O_RDWR | O_NONBLOCK);
+                                fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
                             }
                             break;
                         }
                     }
                     if (fd < 0) {
                         if (snprintf(path, sizeof(path), "%s/%s", g_usb.gadget_root, name) < (int)sizeof(path)) {
-                            fd = open(path, O_RDWR | O_NONBLOCK);
+                            fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
                         }
                         if (fd >= 0) break;
                     }

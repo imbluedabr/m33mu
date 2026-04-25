@@ -79,7 +79,7 @@ static mm_bool eth_backend_open_tap(const char *name)
     struct ifreq ifr;
     int fd;
     size_t name_len;
-    fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK);
+    fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         perror("tap open");
         return MM_FALSE;
@@ -176,7 +176,7 @@ mm_bool mm_eth_backend_link_up(void)
         struct ifreq ifr;
         int sock;
         if (g_backend.fd < 0) return MM_FALSE;
-        sock = socket(AF_INET, SOCK_DGRAM, 0);
+        sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (sock < 0) return MM_FALSE;
         memset(&ifr, 0, sizeof(ifr));
         {

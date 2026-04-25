@@ -60,6 +60,8 @@ static void sort_indices(mm_u32 *idx, const mm_u32 *offsets, int count)
     }
 }
 
+static mm_bool persist_write_all(int fd, const mm_u8 *buf, mm_u32 size);
+
 void mm_flash_persist_build(struct mm_flash_persist *persist,
                             mm_u8 *flash,
                             mm_u32 flash_size,
@@ -104,7 +106,7 @@ void mm_flash_persist_build(struct mm_flash_persist *persist,
         if (persist->ranges[i].path != 0) {
             struct stat st;
             mm_u32 cur_size = 0u;
-            fd = open(persist->ranges[i].path, O_RDWR | O_CREAT, 0666);
+            fd = open(persist->ranges[i].path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
             if (fd < 0) {
                 fprintf(stderr, "persist: failed to open %s: %s\n",
                         persist->ranges[i].path, strerror(errno));
@@ -134,7 +136,7 @@ void mm_flash_persist_build(struct mm_flash_persist *persist,
                 } else {
                     while (remaining > 0u) {
                         chunk = (remaining > (mm_u32)sizeof(ff)) ? (mm_u32)sizeof(ff) : remaining;
-                        if (write(fd, ff, (size_t)chunk) != (ssize_t)chunk) {
+                        if (!persist_write_all(fd, ff, chunk)) {
                             fprintf(stderr, "persist: short extend write for %s\n",
                                     persist->ranges[i].path);
                             break;
@@ -173,10 +175,15 @@ void mm_flash_persist_flush(struct mm_flash_persist *persist, mm_u32 addr, mm_u3
     for (i = 0; i < persist->count; ++i) {
         mm_u32 start = persist->ranges[i].offset;
         mm_u32 end = start + persist->ranges[i].length;
+        mm_u32 eff_size = size;
         mm_u32 a0 = addr;
-        mm_u32 a1 = addr + size;
+        mm_u32 a1;
         mm_u32 w_start;
         mm_u32 w_end;
+        if (eff_size > 0xFFFFFFFFu - addr) {
+            eff_size = 0xFFFFFFFFu - addr;
+        }
+        a1 = addr + eff_size;
         if (a1 <= start || a0 >= end) {
             continue;
         }

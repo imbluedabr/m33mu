@@ -220,15 +220,16 @@ static void prot_trace_req(const struct mm_prot_ctx *ctx,
                            enum mm_sec_state addr_sec,
                            mm_bool ignore_addr_sec)
 {
-    int lvl;
-    int sau_idx = -1;
-    mm_u32 rbar = 0;
-    mm_u32 rlar = 0;
-    if (ctx == 0 || ctx->scs == 0) {
+    int sau_idx;
+    mm_u32 rbar;
+    mm_u32 rlar;
+    if (prot_trace_level() < 2) {
         return;
     }
-    lvl = prot_trace_level();
-    if (lvl < 2) {
+    sau_idx = -1;
+    rbar = 0;
+    rlar = 0;
+    if (ctx == 0 || ctx->scs == 0) {
         return;
     }
     sau_idx = sau_match_index(ctx->scs, addr, &rbar, &rlar);
@@ -258,13 +259,11 @@ static void prot_trace_region_scan(const struct mm_prot_ctx *ctx,
                                    mm_bool ignore_addr_sec,
                                    mm_u32 needed)
 {
-    int lvl;
     size_t i;
-    if (ctx == 0) {
+    if (prot_trace_level() < 3) {
         return;
     }
-    lvl = prot_trace_level();
-    if (lvl < 3) {
+    if (ctx == 0) {
         return;
     }
     printf("[PROT_SCAN] need=0x%lx sec=%s addr=0x%08lx size=%lu addr_sec=%s ignore_addr_sec=%d regions=%lu\n",

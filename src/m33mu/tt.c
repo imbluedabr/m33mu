@@ -34,6 +34,24 @@
 #define TT_RESP_NSRW     (1u << 19)
 #define TT_RESP_IRVALID  (1u << 23)
 
+/* Decode MPU AP[2:1] bits into read/read-write permissions.
+ * AP[2:1]: 00=priv-RW/unpriv-none, 01=RW/RW, 10=priv-RO/unpriv-none, 11=RO/RO */
+static void tt_decode_perms(mm_u32 ap, mm_bool unpriv, mm_bool *r, mm_bool *rw)
+{
+    mm_bool priv_write = (ap == 0x0u) || (ap == 0x1u);
+    mm_bool priv_read = MM_TRUE;
+    mm_bool unpriv_write = (ap == 0x1u);
+    mm_bool unpriv_read = (ap == 0x1u) || (ap == 0x3u);
+
+    if (unpriv) {
+        *r  = unpriv_read;
+        *rw = unpriv_write;
+    } else {
+        *r  = priv_read;
+        *rw = priv_write;
+    }
+}
+
 mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 addr,
                    mm_bool alt, mm_bool forceunpriv)
 {
@@ -41,8 +59,9 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
     enum mm_sec_state query_sec;
     mm_u32 rbar, rlar;
     mm_bool mpu_match;
+    mm_bool sau_says_secure = MM_FALSE;
     const struct mm_target_cfg *cfg = mm_target_current_cfg();
-    
+
     /* Determine security state for query:
      * - If alt=1 and we're in Secure state, query Non-secure MPU
      * - Otherwise query current security state's MPU */
@@ -51,75 +70,67 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
     } else {
         query_sec = cpu->sec_state;
     }
-    
+
     /* Query SAU attribution (only valid when executed from Secure state) */
     if (cpu->sec_state != MM_NONSECURE) {  /* Secure state */
         enum mm_sau_attr sau_attr = MM_SAU_SECURE;
         mm_u32 sau_region = 0u;
         mm_bool sau_valid = mm_sau_attr_region_for_addr(scs, addr, &sau_attr, &sau_region);
-        
-        /* Set S bit based on SAU attribution */
-        if (sau_attr == MM_SAU_SECURE || sau_attr == MM_SAU_NSC) {
-            result |= TT_RESP_S;  /* S bit = 1 (Secure) */
+
+        sau_says_secure = (sau_attr == MM_SAU_SECURE || sau_attr == MM_SAU_NSC);
+
+        /* Tentatively set S bit from SAU; IDAU may override below. */
+        if (sau_says_secure) {
+            result |= TT_RESP_S;
         }
-        
+
         if (sau_valid) {
             result |= TT_RESP_SRVALID;
             result |= ((sau_region & 0xFFu) << 8);
         }
-    } else {
-        /* When executed from Non-secure state, S bit is always 0 */
-        result |= 0u;
     }
-    
+
     /* Query MPU for region match and permissions */
     mpu_match = mm_mpu_region_lookup(scs, query_sec, addr, &rbar, &rlar);
-    
+
     if (mpu_match) {
         mm_u32 ap = (rbar >> 1) & 0x3u;  /* AP[2:1] bits from RBAR */
-        
-        /* Decode AP bits to R/RW permissions:
-         * AP[2:1]:
-         *   00 = Privileged RW, Unprivileged no access
-         *   01 = Privileged RW, Unprivileged RW
-         *   10 = Privileged RO, Unprivileged no access
-         *   11 = Privileged RO, Unprivileged RO
-         */
-        mm_bool priv_write = (ap == 0x0u) || (ap == 0x1u);
-        mm_bool priv_read = MM_TRUE;  /* Privileged always has read if region matches */
-        mm_bool unpriv_write = (ap == 0x1u);
-        mm_bool unpriv_read = (ap == 0x1u) || (ap == 0x3u);
-        
-        /* Determine effective permissions based on forceunpriv flag. */
-        if (forceunpriv || !mm_cpu_get_privileged(cpu)) {
-            result |= (unpriv_read ? TT_RESP_R : 0u);
-            result |= (unpriv_write ? TT_RESP_RW : 0u);
-        } else {  /* Privileged */
-            result |= (priv_read ? TT_RESP_R : 0u);
-            result |= (priv_write ? TT_RESP_RW : 0u);
+        mm_bool unpriv = forceunpriv || !mm_cpu_get_privileged(cpu);
+        mm_bool r, rw;
+
+        tt_decode_perms(ap, unpriv, &r, &rw);
+        result |= (r  ? TT_RESP_R  : 0u);
+        result |= (rw ? TT_RESP_RW : 0u);
+
+        /* NSR/NSRW: Non-secure permission view, available from Secure state. */
+        if (cpu->sec_state != MM_NONSECURE) {
+            mm_u32 ns_rbar, ns_rlar;
+            mm_bool ns_match = mm_mpu_region_lookup(scs, MM_NONSECURE, addr, &ns_rbar, &ns_rlar);
+            if (ns_match) {
+                mm_u32 ns_ap = (ns_rbar >> 1) & 0x3u;
+                mm_bool ns_r, ns_rw;
+                tt_decode_perms(ns_ap, unpriv, &ns_r, &ns_rw);
+                result |= (ns_r  ? TT_RESP_NSR  : 0u);
+                result |= (ns_rw ? TT_RESP_NSRW : 0u);
+            }
         }
-        
-        /* NSR/NSRW bits (only when in Secure state querying Non-secure) */
-        if (cpu->sec_state != MM_NONSECURE && alt) {  /* Secure state */
-            /* These would reflect Non-secure view - for now match R/RW */
-            result |= ((result & TT_RESP_R) ? TT_RESP_NSR : 0u);
-            result |= ((result & TT_RESP_RW) ? TT_RESP_NSRW : 0u);
-        }
-        
+
         /* MREGION/MRVALID combined in bit 0 for simplicity */
         result |= TT_RESP_MRVALID;
     }
-    
+
     if (cfg != 0 && cfg->tz_attr_for_addr != 0) {
         enum mm_sau_attr idau_attr = MM_SAU_SECURE;
         mm_u32 idau_region = 0u;
         if (cfg->tz_attr_for_addr(addr, &idau_attr, &idau_region)) {
+            mm_bool idau_says_secure = (idau_attr != MM_SAU_NONSECURE);
             result |= TT_RESP_IRVALID;
             result |= ((idau_region & 0xFFu) << 24);
-            if (idau_attr == MM_SAU_NONSECURE) {
-                result &= ~TT_RESP_S;
-            } else {
+            /* DDI0553 B6.2: Secure if SAU OR IDAU says Secure; NS only if both say NS. */
+            if (sau_says_secure || idau_says_secure) {
                 result |= TT_RESP_S;
+            } else {
+                result &= ~TT_RESP_S;
             }
         }
     }

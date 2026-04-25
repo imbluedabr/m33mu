@@ -371,7 +371,7 @@ void mm_gdb_stub_notify_stop(struct mm_gdb_stub *stub, int sig)
 {
     if (stub->client_fd >= 0) {
         char msg[8];
-        sprintf(msg, "S%02x", sig & 0xff);
+        snprintf(msg, sizeof(msg), "S%02x", sig & 0xff);
         gdb_send_packet(stub->client_fd, msg);
         printf("[GDB] Stop signal %d\n", sig);
     }
@@ -402,7 +402,7 @@ static void gdb_send_ok(struct mm_gdb_stub *stub)
 static void gdb_send_error(struct mm_gdb_stub *stub, int code)
 {
     char buf[8];
-    sprintf(buf, "E%02x", code & 0xff);
+    snprintf(buf, sizeof(buf), "E%02x", code & 0xff);
     gdb_send_packet(stub->client_fd, buf);
 }
 
@@ -977,12 +977,22 @@ static mm_bool gdb_recv_packet(struct mm_gdb_stub *stub, char *out, size_t out_c
         mm_gdb_stub_close(stub);
         return MM_FALSE;
     }
-    expect = (unsigned char)(hex_to_nibble(ch) << 4);
-    if (read(stub->client_fd, &ch, 1) <= 0) {
-        mm_gdb_stub_close(stub);
-        return MM_FALSE;
+    {
+        int n1;
+        int n2;
+        n1 = hex_to_nibble(ch);
+        if (read(stub->client_fd, &ch, 1) <= 0) {
+            mm_gdb_stub_close(stub);
+            return MM_FALSE;
+        }
+        n2 = hex_to_nibble(ch);
+        if (n1 < 0 || n2 < 0) {
+            r = write(stub->client_fd, "-", 1);
+            (void)r;
+            return MM_FALSE;
+        }
+        expect = (unsigned char)((n1 << 4) | n2);
     }
-    expect |= (unsigned char)hex_to_nibble(ch);
     if (sum != expect) {
         r = write(stub->client_fd, "-", 1);
         (void)r;

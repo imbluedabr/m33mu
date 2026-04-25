@@ -17,6 +17,7 @@
 #define TPM_TIS_MAX 4
 #define TPM_CMD_MAX 4096u
 #define TPM_RSP_MAX 4096u
+#define TPM_NV_MAX_FILE_SIZE (64u * 1024u)
 
 #define TPM_ACCESS         0x0000u
 #define TPM_STS            0x0018u
@@ -292,12 +293,30 @@ static TPM_RESULT tpm_nvram_loaddata(unsigned char **data,
             if (f == 0) {
                 return TPM_RETRY;
             }
-            fseek(f, 0, SEEK_END);
-            n = (size_t)ftell(f);
-            fseek(f, 0, SEEK_SET);
+            {
+                long sz;
+                if (fseek(f, 0, SEEK_END) != 0) {
+                    fclose(f);
+                    return TPM_FAIL;
+                }
+                sz = ftell(f);
+                if (sz < 0) {
+                    fclose(f);
+                    return TPM_FAIL;
+                }
+                if (fseek(f, 0, SEEK_SET) != 0) {
+                    fclose(f);
+                    return TPM_FAIL;
+                }
+                n = (size_t)sz;
+            }
             if (n == 0) {
                 fclose(f);
                 return TPM_RETRY;
+            }
+            if (n > TPM_NV_MAX_FILE_SIZE) {
+                fclose(f);
+                return TPM_FAIL;
             }
             *data = (unsigned char *)malloc(n);
             if (*data == 0) {
@@ -333,6 +352,7 @@ static TPM_RESULT tpm_nvram_storedata(const unsigned char *data,
     char path[320];
     (void)tpm_number;
     if (nv == 0 || name == 0) return TPM_FAIL;
+    if (length > TPM_NV_MAX_FILE_SIZE) return TPM_FAIL;
     e = tpm_nv_find(nv, name);
     if (e == 0) {
         e = tpm_nv_alloc(nv, name);

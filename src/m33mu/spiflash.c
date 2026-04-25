@@ -339,6 +339,14 @@ mm_u8 mm_spiflash_xfer(struct mm_spiflash *flash, mm_u8 out)
             }
             flash->state = SPIFLASH_ADDR;
             return 0xFFu;
+        case 0xB7: /* Enter 4-byte address mode */
+        case 0xE9: /* Exit 4-byte address mode */
+        case 0x12: /* PP4 */
+        case 0x13: /* READ4 */
+        case 0xDC: /* Sector erase 4-byte */
+            if (spiflash_trace_enabled()) printf("[SPI] 4-byte mode command 0x%02x not supported, ignoring\n", out);
+            flash->state = SPIFLASH_IDLE;
+            return 0xFFu;
         default:
             return 0xFFu;
         }
@@ -582,6 +590,11 @@ mm_bool mm_spiflash_register_cfg(const struct mm_spiflash_cfg *cfg)
     memset(flash, 0, sizeof(*flash));
     flash->bus = cfg->bus;
     flash->size = cfg->size;
+    if (flash->size == 0u || (flash->size & (flash->size - 1u)) != 0u) {
+        fprintf(stderr, "spiflash: size 0x%x is not a power of two; rejecting\n", flash->size);
+        g_spiflash_count--;
+        return MM_FALSE;
+    }
     flash->mmap = cfg->mmap;
     flash->mmap_base = cfg->mmap_base;
     flash->cs_valid = cfg->cs_valid;

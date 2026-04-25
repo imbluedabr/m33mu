@@ -338,6 +338,20 @@ static mm_bool basepri_blocks_target(const struct mm_cpu *cpu,
            preempt_priority_value(basepri, prigroup) ? MM_TRUE : MM_FALSE;
 }
 
+static mm_u32 ctz32(mm_u32 v)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return (mm_u32)__builtin_ctz(v);
+#else
+    static const mm_u32 debruijn = 0x077CB531u;
+    static const mm_u32 tbl[32] = {
+         0,  1, 28,  2, 29, 14, 24,  3, 30, 22, 20, 15, 25, 17,  4,  8,
+        31, 27, 13, 23, 21, 19, 16,  7, 26, 12, 18,  6, 11,  5, 10,  9
+    };
+    return tbl[((v & (0u - v)) * debruijn) >> 27];
+#endif
+}
+
 static mm_bool usb_trace_enabled(void)
 {
     static int cached = -1;
@@ -386,44 +400,41 @@ int mm_nvic_select_routed_ex(const struct mm_nvic *nvic,
 {
     mm_u32 best_irq = 0xffffffffu;
     mm_u8 best_prio = 0xffu;
-    mm_u32 irq;
+    mm_u32 word;
 
-    for (irq = 0; irq < MM_MAX_IRQ; ++irq) {
-        mm_u32 word = irq / 32u;
-        mm_u32 bit = irq % 32u;
-        mm_u32 mask = 1u << bit;
-        enum mm_sec_state tsec;
-        if ((nvic->enable_mask[word] & mask) == 0u) {
-            continue;
-        }
-        if ((nvic->pending_mask[word] & mask) == 0u) {
-            continue;
-        }
-        if ((nvic->active_mask[word] & mask) != 0u) {
-            continue;
-        }
-        tsec = mm_nvic_irq_target_sec(nvic, irq);
-        if (primask_blocks_target(cpu, tsec)) {
-            if (irq == 14u) {
-                usb_trace_irq14_mask(MM_TRUE, tsec, cpu);
+    for (word = 0; word < (MM_MAX_IRQ + 31u) / 32u; ++word) {
+        mm_u32 candidates = nvic->pending_mask[word]
+                          & nvic->enable_mask[word]
+                          & ~nvic->active_mask[word];
+        while (candidates != 0u) {
+            mm_u32 bit_idx = ctz32(candidates);
+            mm_u32 mask = 1u << bit_idx;
+            mm_u32 irq = word * 32u + bit_idx;
+            enum mm_sec_state tsec;
+            candidates &= ~mask;
+            tsec = mm_nvic_irq_target_sec(nvic, irq);
+            if (primask_blocks_target(cpu, tsec)) {
+                if (irq == 14u) {
+                    usb_trace_irq14_mask(MM_TRUE, tsec, cpu);
+                }
+                continue;
             }
-            continue;
-        }
-        if (faultmask_blocks_target(cpu, tsec)) {
-            continue;
-        }
-        if (basepri_blocks_target(cpu, tsec, scs, nvic->priority[irq])) {
-            continue;
-        }
-        if (!irq_can_preempt_current(nvic, cpu, scs, irq)) {
-            continue;
-        }
-        if (irq == 14u) {
-            usb_trace_irq14_mask(MM_FALSE, tsec, cpu);
-        }
-        if (best_irq == 0xffffffffu || nvic->priority[irq] < best_prio) {
-            best_prio = nvic->priority[irq];
-            best_irq = irq;
+            if (faultmask_blocks_target(cpu, tsec)) {
+                continue;
+            }
+            if (basepri_blocks_target(cpu, tsec, scs, nvic->priority[irq])) {
+                continue;
+            }
+            if (!irq_can_preempt_current(nvic, cpu, scs, irq)) {
+                continue;
+            }
+            if (irq == 14u) {
+                usb_trace_irq14_mask(MM_FALSE, tsec, cpu);
+            }
+            if (best_irq == 0xffffffffu || nvic->priority[irq] < best_prio) {
+                best_prio = nvic->priority[irq];
+                best_irq = irq;
+            }
         }
     }
     if (best_irq == 0xffffffffu) {
