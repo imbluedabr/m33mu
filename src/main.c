@@ -195,6 +195,69 @@ static mm_bool parse_hex_u32(const char *s, mm_u32 *out)
     return MM_TRUE;
 }
 
+static mm_bool parse_hex_u64(const char *s, mm_u64 *out)
+{
+    char *endp = 0;
+    unsigned long long v;
+    if (s == 0 || out == 0) {
+        return MM_FALSE;
+    }
+    v = strtoull(s, &endp, 0);
+    if (endp == s) {
+        return MM_FALSE;
+    }
+    *out = (mm_u64)v;
+    return MM_TRUE;
+}
+
+static mm_u64 splitmix64_next(mm_u64 *state)
+{
+    mm_u64 z;
+    *state += 0x9e3779b97f4a7c15ull;
+    z = *state;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    return z ^ (z >> 31);
+}
+
+static void flip_buffer_bit(mm_u8 *buf, size_t bit_index)
+{
+    size_t byte_index = bit_index >> 3;
+    unsigned bit_in_byte = (unsigned)(bit_index & 7u);
+    buf[byte_index] ^= (mm_u8)(1u << bit_in_byte);
+}
+
+static void apply_puf_noise(mm_u8 *ram, size_t ram_size, mm_u64 puf_seed,
+                            mm_u64 cold_boot_count, mm_u32 flips_per_codeword)
+{
+    static const mm_u64 noise_seed_salt = 0x5055464e4f495345ull;
+    mm_u64 noise_state = puf_seed ^ noise_seed_salt ^ (cold_boot_count * 0x9e3779b97f4a7c15ull);
+    size_t total_bits = ram_size * 8u;
+    size_t block_count = total_bits / 127u;
+    size_t block;
+
+    if (ram == 0 || flips_per_codeword == 0u) {
+        return;
+    }
+
+    for (block = 0; block < block_count; ++block) {
+        mm_u8 chosen[127];
+        mm_u32 flipped = 0;
+        size_t base_bit = block * 127u;
+
+        memset(chosen, 0, sizeof(chosen));
+        while (flipped < flips_per_codeword) {
+            mm_u32 pos = (mm_u32)(splitmix64_next(&noise_state) % 127u);
+            if (chosen[pos]) {
+                continue;
+            }
+            chosen[pos] = 1u;
+            flip_buffer_bit(ram, base_bit + pos);
+            flipped++;
+        }
+    }
+}
+
 static mm_bool t32_is_32bit_prefix_local(mm_u16 prefix)
 {
     return (prefix & 0xF800u) >= 0xE800u;
@@ -4480,6 +4543,10 @@ int main(int argc, char **argv)
     mm_u32 expect_bkpt = 0;
     mm_bool expect_bkpt_hit = MM_FALSE;
     mm_u32 opt_timeout = 0;
+    mm_bool opt_puf_seed_set = MM_FALSE;
+    mm_u64 opt_puf_seed = 0;
+    mm_u64 opt_puf_cold_boot_count = 0;
+    mm_u32 opt_puf_noise = 0;
     mm_u64 opt_fault_clocks[16];
     mm_u8 opt_fault_clock_count = 0;
     mm_u8 *spiflash_boot_data = 0;
@@ -4541,6 +4608,41 @@ int main(int argc, char **argv)
             i++;
         } else if (strcmp(argv[i], "--persist") == 0) {
             opt_persist = MM_TRUE;
+        } else if (strcmp(argv[i], "--puf-seed") == 0 && i + 1 < argc) {
+            if (!parse_hex_u64(argv[i + 1], &opt_puf_seed)) {
+                fprintf(stderr, "invalid puf seed value: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_puf_seed_set = MM_TRUE;
+            i++;
+        } else if (strncmp(argv[i], "--puf-seed=", 11) == 0) {
+            if (!parse_hex_u64(argv[i] + 11, &opt_puf_seed)) {
+                fprintf(stderr, "invalid puf seed value: %s\n", argv[i]);
+                return 1;
+            }
+            opt_puf_seed_set = MM_TRUE;
+        } else if (strcmp(argv[i], "--puf-cold-boot") == 0 && i + 1 < argc) {
+            if (!parse_hex_u64(argv[i + 1], &opt_puf_cold_boot_count)) {
+                fprintf(stderr, "invalid puf cold boot value: %s\n", argv[i + 1]);
+                return 1;
+            }
+            i++;
+        } else if (strncmp(argv[i], "--puf-cold-boot=", 16) == 0) {
+            if (!parse_hex_u64(argv[i] + 16, &opt_puf_cold_boot_count)) {
+                fprintf(stderr, "invalid puf cold boot value: %s\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--puf-noise") == 0 && i + 1 < argc) {
+            if (!parse_hex_u32(argv[i + 1], &opt_puf_noise) || opt_puf_noise > 127u) {
+                fprintf(stderr, "invalid puf noise value: %s\n", argv[i + 1]);
+                return 1;
+            }
+            i++;
+        } else if (strncmp(argv[i], "--puf-noise=", 12) == 0) {
+            if (!parse_hex_u32(argv[i] + 12, &opt_puf_noise) || opt_puf_noise > 127u) {
+                fprintf(stderr, "invalid puf noise value: %s\n", argv[i]);
+                return 1;
+            }
 #ifdef M33MU_USE_LIBCAPSTONE
         } else if (strcmp(argv[i], "--capstone") == 0) {
             opt_capstone = MM_TRUE;
@@ -4843,6 +4945,7 @@ int main(int argc, char **argv)
                         "[--tui] "
 #endif
                         "[--persist] "
+                        "[--puf-seed <value>] [--puf-cold-boot <n>] [--puf-noise <n>] "
 #ifdef M33MU_USE_LIBCAPSTONE
                         "[--capstone] [--capstone-verbose] "
 #endif
@@ -4894,6 +4997,10 @@ int main(int argc, char **argv)
         sigemptyset(&sa.sa_mask);
         (void)sigaction(SIGALRM, &sa, 0);
         alarm(opt_timeout);
+    }
+    if (opt_puf_noise > 0u && !opt_puf_seed_set) {
+        fprintf(stderr, "--puf-noise requires --puf-seed\n");
+        return 1;
     }
 
     if (cpu_name == 0) {
@@ -5069,11 +5176,23 @@ int main(int argc, char **argv)
     }
     {
         size_t i;
+        mm_u64 ram_seed_state = opt_puf_seed;
         for (i = 0; i < cfg.flash_size_s; ++i) {
             flash[i] = 0xFFu;
         }
         for (i = 0; i < cfg_total_ram(&cfg); ++i) {
-            ram[i] = (mm_u8)(rand() & 0xFF);
+            if (opt_puf_seed_set) {
+                if ((i & 7u) == 0u) {
+                    ram_seed_state = splitmix64_next(&ram_seed_state);
+                }
+                ram[i] = (mm_u8)(ram_seed_state >> ((i & 7u) * 8u));
+            } else {
+                ram[i] = (mm_u8)(rand() & 0xFF);
+            }
+        }
+        if (opt_puf_seed_set && opt_puf_noise > 0u) {
+            apply_puf_noise(ram, cfg_total_ram(&cfg), opt_puf_seed,
+                            opt_puf_cold_boot_count, opt_puf_noise);
         }
     }
 

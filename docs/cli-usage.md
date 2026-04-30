@@ -79,6 +79,9 @@ Only one Ethernet backend can be selected at a time.
 - `--no-tz`: run without TrustZone protections for the session
 - `--dualbank`: enable STM32 dual-bank flash behavior
 - `--persist`: write modified flash contents back to the original input BINs when supported
+- `--puf-seed <value>`: fill initial RAM deterministically from a fixed PRNG seed
+- `--puf-cold-boot <n>`: select the deterministic cold-boot index used for PUF noise derivation
+- `--puf-noise <n>`: with `--puf-seed`, flip exactly `n` pseudo-random bits per 127-bit block
 - `--meminfo`: print SAU/MPU layout and related logs
 - `--boot flash|ram|spiflash`
 - `--boot-offset=0x...`

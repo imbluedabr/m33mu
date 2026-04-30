@@ -82,6 +82,29 @@ Print per\-instruction decode output and selected execution details.
 
 This is mainly a debugging and bring\-up aid. It is useful when a firmware image is not behaving as expected and you want an immediate textual trace.
 .TP
+.BR --puf-seed " " <value>
+Fill initial RAM with a deterministic pseudo\-random byte stream derived from the given seed.
+
+Use this when firmware derives identity or keys from startup SRAM contents and you want those bytes to be reproducible across emulator runs.
+.TP
+.BR --puf-cold-boot " " <n>
+Select the deterministic cold\-boot count used to derive seeded PUF noise.
+
+Use this with
+.BR --puf-seed
+and
+.BR --puf-noise
+when you want different repeatable noise patterns for boot 0, boot 1, and so on.
+.TP
+.BR --puf-noise " " <n>
+With
+.BR --puf-seed ,
+flip exactly
+.I n
+deterministically chosen bits in each 127\-bit RAM block.
+
+Use this when you want seeded startup SRAM plus repeatable bit\-flip noise on top of the base pattern.
+.TP
 .BR --tui
 Start the interactive ncurses terminal UI.
 
