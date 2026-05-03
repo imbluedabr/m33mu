@@ -44,16 +44,15 @@
  * TT_RESP format (32-bit return value):
  *   [31:24] IREGION - IDAU region number (0 if IRVALID=0)
  *   [23]    IRVALID - IDAU region valid
- *   [22:20] Reserved (0)
- *   [19]    NSRW    - Non-secure read/write (Secure state only)
- *   [18]    NSR     - Non-secure read (Secure state only)
- *   [17]    RW      - Read/write permission
- *   [16]    R       - Read permission
- *   [15:8]  SREGION - SAU region number (0 if SRVALID=0)
- *   [7]     SRVALID - SAU region valid (Secure state only)
- *   [6]     S       - Secure attribution (0=Non-secure, 1=Secure)
- *   [5:1]   Reserved (0)
- *   [0]     MREGION_MRVALID combined (simplified)
+ *   [22]    S        - Secure attribution (0=Non-secure, 1=Secure)
+ *   [21]    NSRW     - Non-secure read/write (Secure state only)
+ *   [20]    NSR      - Non-secure read (Secure state only)
+ *   [19]    RW       - Read/write permission
+ *   [18]    R        - Read permission
+ *   [17]    SRVALID  - SAU region valid (Secure state only)
+ *   [16]    MRVALID  - MPU region valid
+ *   [15:8]  SREGION  - SAU region number (0 if SRVALID=0)
+ *   [7:0]   MREGION  - MPU region number (0 if MRVALID=0)
  */
 mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 addr, 
                    mm_bool alt, mm_bool forceunpriv);

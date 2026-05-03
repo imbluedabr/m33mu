@@ -10,6 +10,14 @@
 #include "m33mu/scs.h"
 #include "m33mu/tt.h"
 
+#define TT_MPU_REGION_VALID       (1u << 16)
+#define TT_SAU_REGION_VALID       (1u << 17)
+#define TT_READ_OK                (1u << 18)
+#define TT_READWRITE_OK           (1u << 19)
+#define TT_SECURE                 (1u << 22)
+#define TT_REGION_MASK            0xffu
+#define TT_SAU_REGION_SHIFT       8u
+
 static void setup_priv_only_region(struct mm_scs *scs, mm_u32 base, mm_u32 limit)
 {
     mm_scs_init(scs, 0);
@@ -33,7 +41,9 @@ static int test_tt_uses_privileged_thread_state_not_xpsr_bit0(void)
     setup_priv_only_region(&scs, 0x00001000u, 0x00001fe0u);
     resp = mm_tt_resp(&cpu, &scs, 0x00001010u, MM_FALSE, MM_FALSE);
 
-    if ((resp & (1u << 16)) == 0u || (resp & (1u << 17)) == 0u) {
+    if ((resp & TT_MPU_REGION_VALID) == 0u ||
+        (resp & TT_READ_OK) == 0u ||
+        (resp & TT_READWRITE_OK) == 0u) {
         printf("tt_test: privileged thread got resp=0x%08lx expected R/RW set\n",
                (unsigned long)resp);
         return 1;
@@ -56,7 +66,9 @@ static int test_tt_handler_mode_stays_privileged_with_even_ipsr(void)
     setup_priv_only_region(&scs, 0x00001000u, 0x00001fe0u);
     resp = mm_tt_resp(&cpu, &scs, 0x00001010u, MM_FALSE, MM_FALSE);
 
-    if ((resp & (1u << 16)) == 0u || (resp & (1u << 17)) == 0u) {
+    if ((resp & TT_MPU_REGION_VALID) == 0u ||
+        (resp & TT_READ_OK) == 0u ||
+        (resp & TT_READWRITE_OK) == 0u) {
         printf("tt_test: handler mode got resp=0x%08lx expected R/RW set\n",
                (unsigned long)resp);
         return 1;
@@ -64,7 +76,7 @@ static int test_tt_handler_mode_stays_privileged_with_even_ipsr(void)
     return 0;
 }
 
-static int test_tt_reports_sau_region_number_when_secure(void)
+static int test_tt_reports_sau_region_number_from_secure_state(void)
 {
     struct mm_cpu cpu;
     struct mm_scs scs;
@@ -79,12 +91,17 @@ static int test_tt_reports_sau_region_number_when_secure(void)
     scs.sau_rlar[3] = 0x000020E0u | 0x1u; /* region 3, enabled */
 
     resp = mm_tt_resp(&cpu, &scs, 0x00002010u, MM_FALSE, MM_FALSE);
-    if ((resp & (1u << 7)) == 0u) {
+    if ((resp & TT_SAU_REGION_VALID) == 0u) {
         printf("tt_test: secure TT missing SRVALID resp=0x%08lx\n", (unsigned long)resp);
         return 1;
     }
-    if (((resp >> 8) & 0xFFu) != 3u) {
+    if (((resp >> TT_SAU_REGION_SHIFT) & TT_REGION_MASK) != 3u) {
         printf("tt_test: secure TT wrong SREGION resp=0x%08lx\n", (unsigned long)resp);
+        return 1;
+    }
+    if ((resp & TT_SECURE) != 0u) {
+        printf("tt_test: non-secure SAU region should clear secure bit resp=0x%08lx\n",
+               (unsigned long)resp);
         return 1;
     }
     return 0;
@@ -103,8 +120,14 @@ static int test_tt_leaves_srvalid_clear_without_matching_sau_region(void)
     scs.sau_ctrl = 0x1u; /* ENABLE */
 
     resp = mm_tt_resp(&cpu, &scs, 0x00003010u, MM_FALSE, MM_FALSE);
-    if ((resp & (1u << 7)) != 0u || ((resp >> 8) & 0xFFu) != 0u) {
+    if ((resp & TT_SAU_REGION_VALID) != 0u ||
+        ((resp >> TT_SAU_REGION_SHIFT) & TT_REGION_MASK) != 0u) {
         printf("tt_test: unmatched SAU region should clear SRVALID/SREGION resp=0x%08lx\n",
+               (unsigned long)resp);
+        return 1;
+    }
+    if ((resp & TT_SECURE) == 0u) {
+        printf("tt_test: unmatched SAU region should remain secure resp=0x%08lx\n",
                (unsigned long)resp);
         return 1;
     }
@@ -116,7 +139,7 @@ int main(void)
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "privileged_thread_state", test_tt_uses_privileged_thread_state_not_xpsr_bit0 },
         { "handler_mode_even_ipsr", test_tt_handler_mode_stays_privileged_with_even_ipsr },
-        { "secure_sau_region", test_tt_reports_sau_region_number_when_secure },
+        { "sau_region_from_secure_state", test_tt_reports_sau_region_number_from_secure_state },
         { "no_sau_region", test_tt_leaves_srvalid_clear_without_matching_sau_region },
     };
     int failures = 0;

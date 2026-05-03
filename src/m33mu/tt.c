@@ -25,13 +25,13 @@
 #include "m33mu/mem_prot.h"
 #include "m33mu/target_hal.h"
 
-#define TT_RESP_MRVALID  (1u << 0)
-#define TT_RESP_S        (1u << 6)
-#define TT_RESP_SRVALID  (1u << 7)
-#define TT_RESP_R        (1u << 16)
-#define TT_RESP_RW       (1u << 17)
-#define TT_RESP_NSR      (1u << 18)
-#define TT_RESP_NSRW     (1u << 19)
+#define TT_RESP_MRVALID  (1u << 16)
+#define TT_RESP_SRVALID  (1u << 17)
+#define TT_RESP_R        (1u << 18)
+#define TT_RESP_RW       (1u << 19)
+#define TT_RESP_NSR      (1u << 20)
+#define TT_RESP_NSRW     (1u << 21)
+#define TT_RESP_S        (1u << 22)
 #define TT_RESP_IRVALID  (1u << 23)
 
 /* Decode MPU AP[2:1] bits into read/read-write permissions.
@@ -60,6 +60,7 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
     mm_u32 rbar, rlar;
     mm_bool mpu_match;
     mm_bool sau_says_secure = MM_FALSE;
+    mm_bool unpriv;
     const struct mm_target_cfg *cfg = mm_target_current_cfg();
 
     /* Determine security state for query:
@@ -70,6 +71,7 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
     } else {
         query_sec = cpu->sec_state;
     }
+    unpriv = forceunpriv || !mm_cpu_get_privileged(cpu);
 
     /* Query SAU attribution (only valid when executed from Secure state) */
     if (cpu->sec_state != MM_NONSECURE) {  /* Secure state */
@@ -92,21 +94,17 @@ mm_u32 mm_tt_resp(const struct mm_cpu *cpu, const struct mm_scs *scs, mm_u32 add
 
     /* Query MPU for region match and permissions */
     mpu_match = mm_mpu_region_lookup(scs, query_sec, addr, &rbar, &rlar);
+    result |= mm_mpu_allows_access(scs, query_sec, addr, !unpriv, MM_MPU_ACCESS_READ) ?
+              TT_RESP_R : 0u;
+    result |= mm_mpu_allows_access(scs, query_sec, addr, !unpriv, MM_MPU_ACCESS_WRITE) ?
+              TT_RESP_RW : 0u;
 
     if (mpu_match) {
-        mm_u32 ap = (rbar >> 1) & 0x3u;  /* AP[2:1] bits from RBAR */
-        mm_bool unpriv = forceunpriv || !mm_cpu_get_privileged(cpu);
-        mm_bool r, rw;
-
-        tt_decode_perms(ap, unpriv, &r, &rw);
-        result |= (r  ? TT_RESP_R  : 0u);
-        result |= (rw ? TT_RESP_RW : 0u);
-
         /* NSR/NSRW: Non-secure permission view, available from Secure state. */
         if (cpu->sec_state != MM_NONSECURE) {
             mm_u32 ns_rbar, ns_rlar;
-            mm_bool ns_match = mm_mpu_region_lookup(scs, MM_NONSECURE, addr, &ns_rbar, &ns_rlar);
-            if (ns_match) {
+            mm_bool ns_mpu_match = mm_mpu_region_lookup(scs, MM_NONSECURE, addr, &ns_rbar, &ns_rlar);
+            if (ns_mpu_match) {
                 mm_u32 ns_ap = (ns_rbar >> 1) & 0x3u;
                 mm_bool ns_r, ns_rw;
                 tt_decode_perms(ns_ap, unpriv, &ns_r, &ns_rw);
