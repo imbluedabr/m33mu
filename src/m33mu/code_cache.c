@@ -557,7 +557,13 @@ struct mm_tb *mm_tb_run(struct mm_tb *tb,
                     return 0;
                 }
                 ops_executed++;
-                mm_it_advance(exec_ctx->cpu, &tb->ops[i].d, it_pattern, it_remaining, it_cond);
+                /* Only advance IT state when PC stepped sequentially. A taken
+                 * branch (incl. EXC_RETURN that just resynced ITSTATE from the
+                 * saved frame) leaves cpu->r[15] != next_pc; advancing then
+                 * would consume one slot of the resumed IT block. */
+                if (exec_ctx->cpu->r[15] == next_pc) {
+                    mm_it_advance(exec_ctx->cpu, &tb->ops[i].d, it_pattern, it_remaining, it_cond);
+                }
                 if (exec_ctx->cpu->sleeping || exec_ctx->cpu->r[15] != next_pc) {
                     if (bkpt_hit_out != 0) {
                         *bkpt_hit_out = bkpt_hit;
@@ -582,7 +588,9 @@ struct mm_tb *mm_tb_run(struct mm_tb *tb,
                 *done_out = MM_TRUE;
             }
         }
-        mm_it_advance(exec_ctx->cpu, &tb->ops[i].d, it_pattern, it_remaining, it_cond);
+        if (exec_ctx->cpu->r[15] == next_pc) {
+            mm_it_advance(exec_ctx->cpu, &tb->ops[i].d, it_pattern, it_remaining, it_cond);
+        }
         ops_executed++;
         if (exec_ctx->cpu->sleeping) {
             break;

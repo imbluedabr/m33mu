@@ -6613,7 +6613,14 @@ check_irq_pending:
                                 }
                             }
                             if (exec_res == MM_EXEC_CONTINUE) {
-                                if (execute_it && d.kind != MM_OP_IT) {
+                                /* Skip IT-state advance when the instruction
+                                 * changed PC non-sequentially (taken branch
+                                 * or EXC_RETURN). For EXC_RETURN, ITSTATE was
+                                 * just restored from the saved exception
+                                 * frame and represents the resumed context. */
+                                mm_u32 expected_next = (f.pc_fetch + f.len) | 1u;
+                                if (execute_it && d.kind != MM_OP_IT &&
+                                    cpu.r[15] == expected_next) {
                                     mm_it_advance(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
                                 }
                                 if (trace_started) {
@@ -6649,7 +6656,12 @@ check_irq_pending:
                         }
                     }
 
-                    mm_it_advance(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
+                    {
+                        mm_u32 expected_next = (f.pc_fetch + f.len) | 1u;
+                        if (cpu.r[15] == expected_next) {
+                            mm_it_advance(&cpu, &d, &it_pattern, &it_remaining, &it_cond);
+                        }
+                    }
                 }
 
                 if (cycles_since_poll >= poll_granularity) {
