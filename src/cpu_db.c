@@ -72,6 +72,10 @@
 #include "pic32ck/pic32ck_sercom.h"
 #include "pic32ck/pic32ck_timers.h"
 #include "pic32ck/cpu_config.h"
+#include "rw612/rw612_mmio.h"
+#include "rw612/rw612_flexcomm.h"
+#include "rw612/rw612_timers.h"
+#include "rw612/cpu_config.h"
 
 struct mm_cpu_entry {
     const char *name;
@@ -473,6 +477,42 @@ static const struct mm_cpu_entry cpu_table[] = {
             PIC32CK_TIMER_RESET,
             PIC32CK_TIMER_TICK,
             PIC32CK_TZ_ATTR
+        }
+    },
+    {
+        "rw612",
+        {
+            RW612_FLASH_BASE_S,
+            RW612_FLASH_SIZE,
+            RW612_FLASH_BASE_NS,
+            RW612_FLASH_SIZE,
+            RW612_RAM_BASE_S,
+            RW612_RAM_SIZE,
+            RW612_RAM_BASE_NS,
+            RW612_RAM_SIZE,
+            1,
+            RW612_RAM_REGIONS,
+            RW612_RAM_REGION_COUNT,
+            RW612_MPCBB_BLOCK_SIZE,
+            0,
+            RW612_FLAGS,
+            RW612_SOC_RESET,
+            RW612_SOC_REGISTER,
+            RW612_FLASH_BIND,
+            RW612_CLOCK_GET_HZ,
+            RW612_USART_INIT,
+            RW612_USART_RESET,
+            RW612_USART_POLL,
+            RW612_SPI_INIT,
+            RW612_SPI_RESET,
+            RW612_SPI_POLL,
+            0,
+            0,
+            0,
+            RW612_TIMER_INIT,
+            RW612_TIMER_RESET,
+            RW612_TIMER_TICK,
+            0
         }
     }
 };

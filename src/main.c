@@ -41,6 +41,7 @@
 #include "m33mu/trace.h"
 #include "mcxn947/mcxn947_romapi.h"
 #include "lpc55s69/lpc55s69_romapi.h"
+#include "rw612/rw612_romapi.h"
 #include "rp2350/rp2350_mmio.h"
 #include "stm32h533/stm32h533_mmio.h"
 #include "stm32h563/stm32h563_mmio.h"
@@ -427,6 +428,9 @@ static mm_bool mm_bootapi_handle(struct mm_cpu *cpu, struct mm_memmap *map)
         return MM_TRUE;
     }
     if (mm_lpc55s69_romapi_handle(cpu, map)) {
+        return MM_TRUE;
+    }
+    if (mm_rw612_romapi_handle(cpu, map)) {
         return MM_TRUE;
     }
     return MM_FALSE;
@@ -5493,6 +5497,22 @@ int main(int argc, char **argv)
                 mm_prot_add_region(&prot, 0x03000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
                 mm_prot_add_region(&prot, 0x13000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
                 mm_prot_add_region(&prot, 0x13000000u, 0x00020000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+            }
+            if (cpu_name != 0 && strcmp(cpu_name, "rw612") == 0) {
+                /* RW612 ROM stub region (S + NS aliases) and ROM API tree. */
+                mm_prot_add_region(&prot, 0x03001000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
+                mm_prot_add_region(&prot, 0x03001000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                mm_prot_add_region(&prot, 0x13001000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_SECURE);
+                mm_prot_add_region(&prot, 0x13001000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_EXEC, MM_NONSECURE);
+                mm_prot_add_region(&prot, 0x0301F000u, 0x00000100u, MM_PROT_PERM_READ, MM_SECURE);
+                mm_prot_add_region(&prot, 0x0301F000u, 0x00000100u, MM_PROT_PERM_READ, MM_NONSECURE);
+                mm_prot_add_region(&prot, 0x1301F000u, 0x00000100u, MM_PROT_PERM_READ, MM_SECURE);
+                mm_prot_add_region(&prot, 0x1301F000u, 0x00000100u, MM_PROT_PERM_READ, MM_NONSECURE);
+                /* PKA scratch RAM at 0x22040000 (also 0x32040000 secure alias). */
+                mm_prot_add_region(&prot, 0x22040000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                mm_prot_add_region(&prot, 0x22040000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+                mm_prot_add_region(&prot, 0x32040000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+                mm_prot_add_region(&prot, 0x32040000u, 0x00001000u, MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
             }
             if (cpu_name != 0 && strcmp(cpu_name, "pic32ck") == 0) {
                 /* PIC32CK Boot ROM: 0x08000000, 128 KB */

@@ -9,6 +9,7 @@ These values are accepted by `--cpu`:
 - `lpc55s69`
 - `mcxw71c`
 - `mcxn947`
+- `rw612` — NXP RW612 (Cortex-M33 + ELS / PKA crypto offload)
 - `nrf5340`
 - `nrf54lm20`
 - `rp2350`
