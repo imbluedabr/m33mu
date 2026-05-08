@@ -26,6 +26,7 @@ option(M33MU_ENABLE_CAPSTONE    "Enable capstone integration if found"  ON)
 option(M33MU_ENABLE_TPM_LIBTPMS "Enable libtpms integration if found"   ON)
 option(M33MU_ENABLE_WOLFSSL     "Enable wolfSSL integration if found"   ON)
 option(M33MU_ENABLE_LIBDW       "Enable libdw/libdwfl symbolization if found" ON)
+option(M33MU_ENABLE_RUST_PLUGINS "Enable Rust simulator plugins (ATECC608/SE050/STSAFE) if cargo is found" ON)
 
 # -----------------------------------------------------------------------------
 # Compiler flags (match Makefile)
@@ -332,6 +333,37 @@ else()
 endif()
 
 # -----------------------------------------------------------------------------
+# 9) Optional Rust simulator plugins (ATECC608/SE050/STSAFE-A120)
+# -----------------------------------------------------------------------------
+set(M33MU_HAS_RUST_PLUGINS FALSE)
+
+set(MM_RUST_PLUGIN_SRCS
+  "${CMAKE_SOURCE_DIR}/src/m33mu/atecc608.c"
+  "${CMAKE_SOURCE_DIR}/src/m33mu/se050.c"
+  "${CMAKE_SOURCE_DIR}/src/m33mu/stsafe.c"
+)
+
+if(M33MU_ENABLE_RUST_PLUGINS)
+  find_program(CARGO_EXECUTABLE cargo)
+  if(CARGO_EXECUTABLE)
+    set(M33MU_HAS_RUST_PLUGINS TRUE)
+    include(cmake/RustPlugin.cmake)
+    mm_rust_plugins_build()
+  else()
+    foreach(_f IN LISTS MM_RUST_PLUGIN_SRCS)
+      list(REMOVE_ITEM M33MU_SOURCES "${_f}")
+    endforeach()
+    list(APPEND M33MU_CONFIG_WARNINGS
+      "cargo not found: Rust simulator plugins (ATECC608, SE050, STSAFE-A120) disabled."
+    )
+  endif()
+else()
+  foreach(_f IN LISTS MM_RUST_PLUGIN_SRCS)
+    list(REMOVE_ITEM M33MU_SOURCES "${_f}")
+  endforeach()
+endif()
+
+# -----------------------------------------------------------------------------
 # Core library (everything except main)
 # -----------------------------------------------------------------------------
 add_library(m33mu_lib STATIC ${M33MU_SOURCES})
@@ -455,6 +487,13 @@ endif()
 if(M33MU_HAS_LIBDW)
   target_compile_definitions(m33mu_lib PUBLIC M33MU_HAS_LIBDW=1)
   target_link_libraries(m33mu_lib PUBLIC libdw::libdw libelf::libelf)
+endif()
+
+if(M33MU_HAS_RUST_PLUGINS)
+  target_compile_definitions(m33mu_lib PUBLIC M33MU_HAS_RUST_PLUGINS=1)
+  target_link_libraries(m33mu_lib PUBLIC atecc608_sim se050_sim stsafe_a120_sim)
+  # Rust stdlib runtime requirements on Linux (m must follow Rust .a files)
+  target_link_libraries(m33mu_lib PUBLIC pthread dl m)
 endif()
 
 # -----------------------------------------------------------------------------

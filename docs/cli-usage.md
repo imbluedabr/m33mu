@@ -72,6 +72,25 @@ These let you capture a bounded execution window, dump machine state around a sp
 - `--tpm:SPIx:cs=GPIONAME[:file=<path>]`
 - `--ta100:SPIx:cs=GPIONAME[:file=<path>][:profile=<name>][:serial=<hex>]`
 
+### Rust Plugin Secure Elements
+
+The following devices are compiled in only when `cargo` is found at build time
+(`M33MU_HAS_RUST_PLUGINS`). The simulator logic is provided by the
+[wolfssl/simulators](https://github.com/wolfssl/simulators) Rust crates vendored
+under `third_party/wolfssl-simulators/`.
+
+- `--atecc608:SPIx:cs=GPIONAME[:file=<path>]`  
+  Microchip ATECC608A secure element over SPI. Chip-select is a GPIO (e.g. `PA4`).
+  Optional `file=` path enables NV persistence.
+
+- `--se050:I2Cx[:addr=<hex>][:file=<path>]`  
+  NXP SE050 secure element over I2C. Default address `0x48`.
+  Optional `file=` path enables NV persistence.
+
+- `--stsafe:I2Cx[:addr=<hex>][:file=<path>]`  
+  STMicro STSAFE-A120 secure element over I2C. Default address `0x20`.
+  Optional `file=` path enables NV persistence.
+
 Only one Ethernet backend can be selected at a time.
 
 ## TrustZone / Memory / Flash Options

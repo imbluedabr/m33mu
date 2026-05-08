@@ -29,5 +29,9 @@ mm_bool mm_i2c_bus_write(int bus, mm_u8 addr, const mm_u8 *data, size_t len);
 mm_bool mm_i2c_bus_read(int bus, mm_u8 addr, mm_u8 *data, size_t len);
 void mm_i2c_bus_reset_all(void);
 void mm_i2c_bus_shutdown_all(void);
+/* Probe: returns MM_TRUE (ACK) if any device responds at this address. */
+mm_bool mm_i2c_bus_probe(int bus, mm_u8 addr);
+/* Reset all devices on one specific bus only. */
+void mm_i2c_bus_reset(int bus);
 
 #endif /* M33MU_I2C_BUS_H */

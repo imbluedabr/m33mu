@@ -76,3 +76,18 @@ void mm_i2c_bus_shutdown_all(void)
     }
     g_i2c_device_count = 0;
 }
+
+mm_bool mm_i2c_bus_probe(int bus, mm_u8 addr)
+{
+    return i2c_bus_find(bus, addr) != 0 ? MM_TRUE : MM_FALSE;
+}
+
+void mm_i2c_bus_reset(int bus)
+{
+    size_t i;
+    for (i = 0; i < g_i2c_device_count; ++i) {
+        if (g_i2c_devices[i].bus == bus && g_i2c_devices[i].reset != 0) {
+            g_i2c_devices[i].reset(g_i2c_devices[i].opaque);
+        }
+    }
+}

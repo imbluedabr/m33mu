@@ -62,6 +62,10 @@
 #endif
 #include "m33mu/ta100.h"
 #include "m33mu/se050.h"
+#ifdef M33MU_HAS_RUST_PLUGINS
+#include "m33mu/atecc608.h"
+#include "m33mu/stsafe.h"
+#endif
 #include "tui.h"
 #include <string.h>
 #include <time.h>
@@ -4531,6 +4535,12 @@ int main(int argc, char **argv)
     int ta100_count = 0;
     struct mm_se050_cfg se050_cfgs[4];
     int se050_count = 0;
+#ifdef M33MU_HAS_RUST_PLUGINS
+    struct mm_atecc608_cfg atecc608_cfgs[4];
+    int atecc608_count = 0;
+    struct mm_stsafe_cfg stsafe_cfgs[4];
+    int stsafe_count = 0;
+#endif
     mm_bool opt_no_tz = MM_FALSE;
     const char *memwatch_env = getenv("M33MU_MEMWATCH");
     const char *capstone_pc_env = getenv("CAPSTONE_PC");
@@ -4921,6 +4931,28 @@ int main(int argc, char **argv)
                 return 1;
             }
             se050_count++;
+#ifdef M33MU_HAS_RUST_PLUGINS
+        } else if (strncmp(argv[i], "--atecc608:", 11) == 0) {
+            if (atecc608_count >= (int)(sizeof(atecc608_cfgs) / sizeof(atecc608_cfgs[0]))) {
+                fprintf(stderr, "too many atecc608 configs\n");
+                return 1;
+            }
+            if (!mm_atecc608_parse_spec(argv[i] + 11, &atecc608_cfgs[atecc608_count])) {
+                fprintf(stderr, "invalid atecc608 spec: %s\n", argv[i]);
+                return 1;
+            }
+            atecc608_count++;
+        } else if (strncmp(argv[i], "--stsafe:", 9) == 0) {
+            if (stsafe_count >= (int)(sizeof(stsafe_cfgs) / sizeof(stsafe_cfgs[0]))) {
+                fprintf(stderr, "too many stsafe configs\n");
+                return 1;
+            }
+            if (!mm_stsafe_parse_spec(argv[i] + 9, &stsafe_cfgs[stsafe_count])) {
+                fprintf(stderr, "invalid stsafe spec: %s\n", argv[i]);
+                return 1;
+            }
+            stsafe_count++;
+#endif
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "unknown option: %s\n", argv[i]);
             return 1;
@@ -4964,7 +4996,11 @@ int main(int argc, char **argv)
                         "[--tpm:SPIx:cs=GPIONAME[:file=<path>]] "
 #endif
                         "[--ta100:SPIx:cs=GPIONAME[:file=<path>][:profile=<name>][:serial=<hex>]] "
-                        "[--se050:I2Cx[:host[:port]]] "
+                        "[--se050:I2Cx[:addr=<hex>][:file=<path>]] "
+#ifdef M33MU_HAS_RUST_PLUGINS
+                        "[--atecc608:SPIx:cs=GPIONAME[:file=<path>]] "
+                        "[--stsafe:I2Cx[:addr=<hex>][:file=<path>]] "
+#endif
                         "<image.bin[:offset]|image.elf|image.hex|image.uf2> [more images...]\n",
                 argv[0]);
         fprintf(stderr, "supported CPUs:");
@@ -5087,6 +5123,20 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+#ifdef M33MU_HAS_RUST_PLUGINS
+    for (i = 0; i < atecc608_count; ++i) {
+        if (!mm_atecc608_register_cfg(&atecc608_cfgs[i])) {
+            fprintf(stderr, "failed to register atecc608\n");
+            return 1;
+        }
+    }
+    for (i = 0; i < stsafe_count; ++i) {
+        if (!mm_stsafe_register_cfg(&stsafe_cfgs[i])) {
+            fprintf(stderr, "failed to register stsafe\n");
+            return 1;
+        }
+    }
+#endif
 
     {
         mm_u8 *spiflash_data = 0;
@@ -5356,6 +5406,10 @@ int main(int argc, char **argv)
 #endif
             mm_ta100_reset_all();
             mm_se050_reset_all();
+#ifdef M33MU_HAS_RUST_PLUGINS
+            mm_atecc608_reset_all();
+            mm_stsafe_reset_all();
+#endif
             mm_memmap_configure_flash(&map, &cfg, flash, MM_TRUE);
             mm_memmap_configure_flash(&map, &cfg, flash, MM_FALSE);
             mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE);
@@ -6751,6 +6805,10 @@ cleanup:
 #endif
     mm_ta100_shutdown_all();
     mm_se050_shutdown_all();
+#ifdef M33MU_HAS_RUST_PLUGINS
+    mm_atecc608_shutdown_all();
+    mm_stsafe_shutdown_all();
+#endif
     mm_usbdev_stop();
     mm_eth_backend_stop();
     if (opt_capstone) {

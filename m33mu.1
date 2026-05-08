@@ -334,21 +334,35 @@ The emulated device provides 4KB of NV storage and supports a subset of common c
 
 Use this when firmware expects a TA\-100 peripheral and should run without physical hardware.
 .TP
-.BR --se050:I2Cx[:host[:port]]
+.BR --atecc608:SPIx:cs=GPIONAME[:file=PATH]
+Attach a Microchip ATECC608A secure element simulator to the selected SPI bus.
+Requires Rust plugin support (cargo must be available at build time).
+
+The optional backing file is used for NV storage persistence across runs.
+The device is connected as a standard SPI slave; chip-select is driven by the GPIO named
+.B GPIONAME
+(e.g.\& PA4).
+.TP
+.BR --se050:I2Cx[:addr=HEX][:file=PATH]
 Attach an NXP SE050 secure element simulator to the selected I2C bus.
+Requires Rust plugin support (cargo must be available at build time).
 
-The device connects as a TCP client to LinuxJedi's SE050 simulator
-.B tcp_server
-and forwards I2C T=1 frames over that socket. The default host is
-.B 127.0.0.1
-and the default port is
-.BR 8050 .
+The device answers at the 7\-bit I2C address specified by
+.B addr
+(default
+.BR 0x48 ).
+The optional backing file is used for NV storage persistence.
+The T=1 protocol state is preserved across bus resets; the host driver handles protocol-level soft reset.
+.TP
+.BR --stsafe:I2Cx[:addr=HEX][:file=PATH]
+Attach an STMicro STSAFE\-A120 secure element simulator to the selected I2C bus.
+Requires Rust plugin support (cargo must be available at build time).
 
-Use human hardware bus names. For STM32H563, use
-.B I2C1
-or another implemented STM32 I2C instance; invalid names such as
-.B I2C0
-are rejected rather than remapped.
+The device answers at the 7\-bit I2C address specified by
+.B addr
+(default
+.BR 0x20 ).
+The optional backing file is used for NV storage persistence.
 .SH ENVIRONMENT
 .TP
 .B CAPSTONE_PC
@@ -391,8 +405,14 @@ Run a firmware test suitable for CI: log UART to stdout, fail if the expected BK
 .B m33mu --boot spiflash --spiflash:SPI1:file=flash.img:size=0x200000:mmap=0x90000000 firmware.bin
 Attach memory\-mapped SPI flash and boot from it.
 .TP
-.B m33mu --se050:I2C1:127.0.0.1:8050 firmware.bin
-Attach an SE050 simulator running on localhost port 8050 to STM32H563 I2C1.
+.B m33mu --se050:I2C1:addr=48:file=/tmp/se050.bin firmware.bin
+Attach an SE050 simulator on STM32H563 I2C1 with NV persistence.
+.TP
+.B m33mu --atecc608:SPI1:cs=PA4:file=/tmp/atecc608.bin firmware.bin
+Attach an ATECC608A simulator on SPI1, chip-select on PA4, with NV persistence.
+.TP
+.B m33mu --stsafe:I2C1:addr=20 firmware.bin
+Attach an STSAFE-A120 simulator on I2C1 at address 0x20 (volatile only).
 .TP
 .B m33mu --tap firmware.bin
 Run with the TAP Ethernet backend using the default interface name.
