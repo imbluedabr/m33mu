@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "m33mu/pka.h"
+#include "m33mu/otfdec.h"
+#include "m33mu/spiflash.h"
 #ifdef M33MU_HAS_WOLFSSL
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/settings.h>
@@ -445,6 +447,7 @@ static struct hash_state hash_accel;
 static struct aes_state aes_accel;
 static struct aes_state saes_accel;
 static struct pka_state pka_accel;
+static struct mm_otfdec *otfdec_state = 0;
 static struct exti_state exti;
 static struct iwdg_state iwdg;
 static struct wwdg_state wwdg;
@@ -701,6 +704,15 @@ void mm_stm32h533_mmio_reset(void)
     rng.regs[RNG_HTCR_OFFSET / 4] = 0x000072acu;
     hash_reset_state(&hash_accel, MM_TRUE);
     mm_pka_reset(&pka_accel);
+
+    /* OTFDEC reset */
+    if (otfdec_state == 0) {
+        otfdec_state = mm_otfdec_new();
+    }
+    if (otfdec_state != 0) {
+        mm_otfdec_reset(otfdec_state);
+    }
+    mm_spiflash_set_decrypt_hook(mm_otfdec_decrypt_block, otfdec_state);
 
     /* FLASH reset values */
     flash_ctl.regs[FLASH_ACR / 4] = 0x00000013u;
@@ -2219,6 +2231,22 @@ mm_bool mm_stm32h533_register_mmio(struct mmio_bus *bus)
     reg.base = PKA_SEC_BASE;
     reg.opaque = &pka_ctx[1];
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    /* OTFDEC (non-secure and secure aliases) */
+    if (otfdec_state == 0) {
+        otfdec_state = mm_otfdec_new();
+    }
+    if (otfdec_state != 0) {
+        reg.base  = 0x420C5000u;
+        reg.size  = 0x400u;
+        reg.opaque = otfdec_state;
+        reg.read  = mm_otfdec_read;
+        reg.write = mm_otfdec_write;
+        if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+        reg.base  = 0x520C5000u;
+        if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+        mm_spiflash_set_decrypt_hook(mm_otfdec_decrypt_block, otfdec_state);
+    }
 
     /* SAES (non-secure and secure aliases) */
     reg.base = SAES_BASE;

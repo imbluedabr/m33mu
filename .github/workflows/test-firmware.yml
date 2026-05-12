@@ -74,3 +74,17 @@ jobs:
             --quit-on-faults \
             tests/firmware/test-lpc55s69-hashcrypt/app.bin | tee /tmp/m33mu-hashcrypt.log
           grep -q "HASHCRYPT TEST SUCCESSFUL" /tmp/m33mu-hashcrypt.log
+      - name: Run STM32U585 OTFDEC firmware test
+        run: |
+          set -euo pipefail
+          python3 tests/firmware/test-stm32u585-otfdec/gen_blob.py \
+            tests/firmware/test-stm32u585-otfdec/spi_flash.bin
+          build/m33mu \
+            --cpu stm32u585 \
+            --uart-stdout \
+            --expect-bkpt 0x42 \
+            --timeout 30 \
+            --quit-on-faults \
+            --spiflash:SPI1:file=tests/firmware/test-stm32u585-otfdec/spi_flash.bin:size=4096:mmap=0x60000000:cs=PB0 \
+            tests/firmware/test-stm32u585-otfdec/app.bin | tee /tmp/m33mu-otfdec.log
+          grep -q "OTFDEC TEST SUCCESSFUL" /tmp/m33mu-otfdec.log

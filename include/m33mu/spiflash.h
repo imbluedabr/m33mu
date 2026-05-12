@@ -49,4 +49,17 @@ void mm_spiflash_cs_deassert(struct mm_spiflash *flash);
 void mm_spiflash_set_cs(struct mm_spiflash *flash, mm_u8 level);
 mm_bool mm_spiflash_is_locked(const struct mm_spiflash *flash);
 
+/*
+ * Optional decrypt hook for OTFDEC / XIP decryption.
+ * When registered, spiflash_mmio_read calls fn(opaque, byte_addr, block16)
+ * for each 16-byte aligned block before serving bytes.  fn must:
+ *   - fill block16[0..15] with decrypted bytes if the address is covered
+ *     by an enabled region, returning MM_TRUE.
+ *   - return MM_FALSE if the address is not covered (raw bytes are served).
+ * Only one hook may be registered at a time (last write wins).
+ */
+typedef mm_bool (*mm_spiflash_decrypt_fn)(void *opaque, mm_u32 addr,
+                                          mm_u8 *block16);
+mm_bool mm_spiflash_set_decrypt_hook(mm_spiflash_decrypt_fn fn, void *opaque);
+
 #endif /* M33MU_SPIFLASH_H */

@@ -52,6 +52,17 @@ struct mm_spiflash {
 static struct mm_spiflash g_spiflash[SPIFLASH_MAX];
 static size_t g_spiflash_count = 0;
 
+/* Optional decrypt hook registered by OTFDEC (or similar peripheral) */
+static mm_spiflash_decrypt_fn g_decrypt_fn = 0;
+static void *g_decrypt_opaque = 0;
+
+mm_bool mm_spiflash_set_decrypt_hook(mm_spiflash_decrypt_fn fn, void *opaque)
+{
+    g_decrypt_fn = fn;
+    g_decrypt_opaque = opaque;
+    return MM_TRUE;
+}
+
 static mm_bool spiflash_trace_enabled(void)
 {
     static mm_bool init = MM_FALSE;
@@ -456,6 +467,43 @@ mm_bool mm_spiflash_is_locked(const struct mm_spiflash *flash)
     return flash->locked;
 }
 
+/*
+ * Read a byte from the flash, applying the decrypt hook if registered.
+ * The hook is called once per 16-byte aligned block; subsequent bytes in the
+ * same block are served from the decrypted copy without another AES call.
+ */
+static mm_u8 spiflash_read_byte_decrypt(const struct mm_spiflash *flash,
+                                        mm_u32 offset)
+{
+    mm_u8 block[16];
+    mm_u32 block_off;
+    mm_u32 byte_addr;
+    mm_u32 i;
+
+    if (g_decrypt_fn == 0) {
+        return spiflash_read_byte(flash, offset);
+    }
+
+    /* Build the absolute mmap address for the decrypt hook */
+    byte_addr = flash->mmap_base + offset;
+
+    /* Fetch aligned 16-byte block from flash */
+    block_off = offset & ~0xFu;
+    for (i = 0u; i < 16u; i++) {
+        if (block_off + i < flash->size) {
+            block[i] = spiflash_read_byte(flash, block_off + i);
+        } else {
+            block[i] = 0xFFu;
+        }
+    }
+
+    /* Try decrypt; hook returns MM_FALSE if address not covered */
+    if (g_decrypt_fn(g_decrypt_opaque, byte_addr & ~0xFu, block)) {
+        return block[offset & 0xFu];
+    }
+    return spiflash_read_byte(flash, offset);
+}
+
 static mm_bool spiflash_mmio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
     struct mm_spiflash *flash = (struct mm_spiflash *)opaque;
@@ -470,15 +518,15 @@ static mm_bool spiflash_mmio_read(void *opaque, mm_u32 offset, mm_u32 size_bytes
         return MM_FALSE;
     }
     if (size_bytes == 1u) {
-        v = spiflash_read_byte(flash, offset);
+        v = spiflash_read_byte_decrypt(flash, offset);
     } else if (size_bytes == 2u) {
-        v = (mm_u32)spiflash_read_byte(flash, offset) |
-            ((mm_u32)spiflash_read_byte(flash, offset + 1u) << 8);
+        v = (mm_u32)spiflash_read_byte_decrypt(flash, offset) |
+            ((mm_u32)spiflash_read_byte_decrypt(flash, offset + 1u) << 8);
     } else if (size_bytes == 4u) {
-        v = (mm_u32)spiflash_read_byte(flash, offset) |
-            ((mm_u32)spiflash_read_byte(flash, offset + 1u) << 8) |
-            ((mm_u32)spiflash_read_byte(flash, offset + 2u) << 16) |
-            ((mm_u32)spiflash_read_byte(flash, offset + 3u) << 24);
+        v = (mm_u32)spiflash_read_byte_decrypt(flash, offset) |
+            ((mm_u32)spiflash_read_byte_decrypt(flash, offset + 1u) << 8) |
+            ((mm_u32)spiflash_read_byte_decrypt(flash, offset + 2u) << 16) |
+            ((mm_u32)spiflash_read_byte_decrypt(flash, offset + 3u) << 24);
     } else {
         return MM_FALSE;
     }
