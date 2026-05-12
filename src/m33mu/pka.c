@@ -197,18 +197,23 @@ static mm_u32 pka_ram_index(mm_u32 offset)
     return (offset - M33MU_PKA_RAM_OFFSET) / 4u;
 }
 
+#ifdef M33MU_HAS_WOLFSSL
 static mm_u32 pka_read_u32(const struct pka_state *pka, mm_u32 offset)
 {
     return pka->ram[pka_ram_index(offset)];
 }
+#endif
 
+#ifdef M33MU_HAS_WOLFSSL
 static void pka_write_u64(struct pka_state *pka, mm_u32 offset, mm_u64 value)
 {
     mm_u32 idx = pka_ram_index(offset);
     pka->ram[idx] = (mm_u32)(value & 0xffffffffu);
     pka->ram[idx + 1u] = (mm_u32)((value >> 32) & 0xffffffffu);
 }
+#endif
 
+#ifdef M33MU_HAS_WOLFSSL
 static void pka_read_bytes_be(const struct pka_state *pka, mm_u32 offset, mm_u8 *dst, mm_u32 size)
 {
     mm_u32 idx = pka_ram_index(offset);
@@ -258,6 +263,7 @@ static void pka_write_bytes_be(struct pka_state *pka, mm_u32 offset, const mm_u8
         }
     }
 }
+#endif /* M33MU_HAS_WOLFSSL — pka_read_bytes_be / pka_write_bytes_be */
 
 #ifdef M33MU_HAS_WOLFSSL
 static mm_bool pka_read_mp(const struct pka_state *pka, mm_u32 offset, mm_u32 size_bytes, mp_int *out)
@@ -527,10 +533,12 @@ static void pka_clear_flag(struct pka_state *pka, mm_u32 flag)
     pka->sr &= ~flag;
 }
 
+#ifdef M33MU_HAS_WOLFSSL
 static void pka_write_status_code(struct pka_state *pka, mm_u32 offset, mm_u32 code)
 {
     pka_write_u64(pka, offset, (mm_u64)code);
 }
+#endif
 
 static void pka_execute(struct pka_state *pka, mm_u32 mode)
 {
