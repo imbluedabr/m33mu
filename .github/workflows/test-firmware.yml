@@ -113,3 +113,18 @@ jobs:
             --quit-on-faults \
             tests/firmware/test-nrf5340-cryptocell/app.bin | tee /tmp/m33mu-cc312.log
           grep -q "CRYPTOCELL TEST SUCCESSFUL" /tmp/m33mu-cc312.log
+      - name: Run STM32U585 wolfSSL PKA ECDSA firmware test
+        # Drives wolfSSL's WOLFSSL_STM32_PKA backend through ECDSA P-256
+        # sign + verify; the host-side PKA peripheral uses only public
+        # wolfSSL APIs (wc_ecc_mulmod, mp_*) so distro libwolfssl-dev is
+        # sufficient — no custom wolfssl build required.
+        run: |
+          set -euo pipefail
+          build/m33mu \
+            --cpu stm32u585 \
+            --uart-stdout \
+            --expect-bkpt 0x42 \
+            --timeout 60 \
+            --quit-on-faults \
+            tests/firmware/test-stm32u585-wolfssl-pka/app.bin | tee /tmp/m33mu-pka.log
+          grep -q "PKA TEST SUCCESSFUL" /tmp/m33mu-pka.log

@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "m33mu/types.h"
+#include "m33mu/pka.h"
 #include "stm32_crypto.h"
 #include "stm32_crypto_priv.h"
 
@@ -1508,20 +1509,28 @@ mm_bool aes_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 
 mm_bool pka_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
-    (void)opaque;
-    (void)offset;
-    (void)value;
+    struct pka_ctx *ctx = (struct pka_ctx *)opaque;
+    if (ctx == 0 || ctx->state == 0) return MM_FALSE;
     if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    /* PKA emulation disabled. */
-    return MM_TRUE;
+    if (ctx->clock_enabled != 0 && !ctx->clock_enabled(ctx->rcc)) return MM_TRUE;
+    if (!ctx->secure_alias && ctx->requires_secure != 0 &&
+        ctx->requires_secure(ctx->tzsc)) return MM_TRUE;
+    return mm_pka_write(ctx->state, offset, size_bytes, value);
 }
 
 mm_bool pka_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
-    (void)opaque;
-    (void)offset;
-    if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    /* PKA emulation disabled. */
-    *value_out = 0u;
-    return MM_TRUE;
+    struct pka_ctx *ctx = (struct pka_ctx *)opaque;
+    if (ctx == 0 || ctx->state == 0 || value_out == 0) return MM_FALSE;
+    if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    if (ctx->clock_enabled != 0 && !ctx->clock_enabled(ctx->rcc)) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+    if (!ctx->secure_alias && ctx->requires_secure != 0 &&
+        ctx->requires_secure(ctx->tzsc)) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+    return mm_pka_read(ctx->state, offset, size_bytes, value_out);
 }

@@ -182,8 +182,6 @@
 #define PKA_STATUS_POINT_OFF 0xA3B7ul
 #define PKA_STATUS_SIG_S_ZERO 0xF946ul
 
-#define M33MU_PKA_DISABLED 1
-
 #if !defined(M33MU_PKA_DISABLED)
 static mm_bool pka_ram_in_range(mm_u32 offset, mm_u32 size_bytes)
 {
@@ -391,6 +389,101 @@ static void pka_ecc_point_to_ram(const ecc_point *pt, struct pka_state *pka,
     if (z_off != 0u) {
         pka_write_mp(pka, z_off, size_bytes, pt->z);
     }
+}
+
+/* Convert a Jacobian point (X, Y, Z) to affine (X/Z^2, Y/Z^3, 1) in place,
+ * using only public mp_* operations (no wolfssl-internal ecc_map). */
+static int pka_point_to_affine(ecc_point *P, mp_int *p)
+{
+    mp_int zinv, zinv2, zinv3, tmp;
+    int ret;
+    if (mp_iszero(P->z) == MP_YES) {
+        return -1; /* point at infinity */
+    }
+    mp_init(&zinv);
+    mp_init(&zinv2);
+    mp_init(&zinv3);
+    mp_init(&tmp);
+    ret = mp_invmod(P->z, p, &zinv);
+    if (ret == 0) ret = mp_mulmod(&zinv, &zinv, p, &zinv2);
+    if (ret == 0) ret = mp_mulmod(&zinv2, &zinv, p, &zinv3);
+    if (ret == 0) ret = mp_mulmod(P->x, &zinv2, p, &tmp);
+    if (ret == 0) ret = mp_copy(&tmp, P->x);
+    if (ret == 0) ret = mp_mulmod(P->y, &zinv3, p, &tmp);
+    if (ret == 0) ret = mp_copy(&tmp, P->y);
+    if (ret == 0) ret = mp_set(P->z, 1);
+    mp_clear(&zinv);
+    mp_clear(&zinv2);
+    mp_clear(&zinv3);
+    mp_clear(&tmp);
+    return ret;
+}
+
+/* Affine point addition R = P + Q on y^2 = x^3 + a*x + b mod p.
+ * Inputs/output assume z = 1. Handles P == Q (double), P == -Q (infinity).
+ * Uses distinct mp_int buffers everywhere to avoid any aliasing surprises
+ * in mp_*mod() under SP-int / fastmath / wolfMath backends.
+ * Returns 0 on success. */
+static int pka_affine_add(const ecc_point *P, const ecc_point *Q,
+                          ecc_point *R, mp_int *a, mp_int *p)
+{
+    mp_int lambda, num, den, denInv;
+    mp_int t1, t2, t3, newX;
+    int ret;
+    int same_x;
+    int same_y;
+    mp_init(&lambda);
+    mp_init(&num);
+    mp_init(&den);
+    mp_init(&denInv);
+    mp_init(&t1);
+    mp_init(&t2);
+    mp_init(&t3);
+    mp_init(&newX);
+    same_x = (mp_cmp(P->x, Q->x) == MP_EQ);
+    same_y = (mp_cmp(P->y, Q->y) == MP_EQ);
+    if (same_x && !same_y) {
+        /* P == -Q -> infinity. Mark via z=0; caller treats as error. */
+        mp_zero(R->x);
+        mp_zero(R->y);
+        mp_zero(R->z);
+        ret = 0;
+        goto out;
+    }
+    if (same_x && same_y) {
+        /* Doubling: lambda = (3*x^2 + a) / (2*y) */
+        ret = mp_mulmod(P->x, P->x, p, &t1);              /* t1 = x^2 */
+        if (ret == 0) ret = mp_addmod(&t1, &t1, p, &t2); /* t2 = 2*x^2 */
+        if (ret == 0) ret = mp_addmod(&t2, &t1, p, &t3); /* t3 = 3*x^2 */
+        if (ret == 0) ret = mp_addmod(&t3, a, p, &num);  /* num = 3*x^2 + a */
+        if (ret == 0) ret = mp_addmod(P->y, P->y, p, &den); /* den = 2*y */
+    } else {
+        /* General add: lambda = (y2 - y1) / (x2 - x1) */
+        ret = mp_submod(Q->y, P->y, p, &num);
+        if (ret == 0) ret = mp_submod(Q->x, P->x, p, &den);
+    }
+    if (ret == 0) ret = mp_invmod(&den, p, &denInv);
+    if (ret == 0) ret = mp_mulmod(&num, &denInv, p, &lambda);
+    /* newX = lambda^2 - x1 - x2 mod p */
+    if (ret == 0) ret = mp_mulmod(&lambda, &lambda, p, &t1);
+    if (ret == 0) ret = mp_submod(&t1, P->x, p, &t2);
+    if (ret == 0) ret = mp_submod(&t2, Q->x, p, &newX);
+    /* y3 = lambda * (x1 - newX) - y1 mod p */
+    if (ret == 0) ret = mp_submod(P->x, &newX, p, &t1);
+    if (ret == 0) ret = mp_mulmod(&lambda, &t1, p, &t2);
+    if (ret == 0) ret = mp_submod(&t2, P->y, p, R->y);
+    if (ret == 0) ret = mp_copy(&newX, R->x);
+    if (ret == 0) ret = mp_set(R->z, 1);
+out:
+    mp_clear(&lambda);
+    mp_clear(&num);
+    mp_clear(&den);
+    mp_clear(&denInv);
+    mp_clear(&t1);
+    mp_clear(&t2);
+    mp_clear(&t3);
+    mp_clear(&newX);
+    return ret;
 }
 #endif
 
@@ -697,8 +790,17 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         pka_read_mp(pka, PKA_RAM_ECC_N, (mm_u32)((pka_read_u32(pka, PKA_RAM_ECC_N_LEN) + 7u) / 8u), &nn);
         pka_read_mp(pka, PKA_RAM_ECC_K, bytes, &kk);
         if (a_sign != 0u) {
-            mp_sub(&pp, &aa, &aa);
-            mp_mod(&aa, &pp, &aa);
+            /* a_sign=1 means "actual a is negative" (e.g. P-256 has a = -3).
+             * The ST HAL convention is: coefA = |a| (small), coefSign = 1,
+             * and the engine internally uses p - |a|. wolfSSL 5.9.1 without
+             * WOLFSSL_SP_INT_NEGATIVE breaks that convention: it sends
+             * coefA = bytes-of-(p-3) AND coefSign = 1. To accept both:
+             * if coefA is already in (p - |a|) form (bit-length close to p's),
+             * skip the negation; otherwise apply it. */
+            if (mp_count_bits(&aa) < mp_count_bits(&pp) - 1) {
+                mp_sub(&pp, &aa, &aa);
+                mp_mod(&aa, &pp, &aa);
+            }
         }
         if (!pka_ecc_curve_supported(&pp, &aa, &bb, &nn)) {
             pka_write_status_code(pka, PKA_RAM_ECC_ERR, PKA_STATUS_FAIL);
@@ -716,7 +818,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
             break;
         }
         pka_ecc_point_from_ram(P, pka, PKA_RAM_ECC_X, PKA_RAM_ECC_Y, 0u, bytes);
-        ret = wc_ecc_mulmod_ex(&kk, P, R, &aa, &pp, 1, NULL);
+        ret = wc_ecc_mulmod(&kk, P, R, &aa, &pp, 1);
         if (ret == 0) {
             pka_ecc_point_to_ram(R, pka, PKA_RAM_ECC_RES_X, PKA_RAM_ECC_RES_Y, 0u, bytes);
             pka_write_status_code(pka, PKA_RAM_ECC_ERR, PKA_STATUS_OK);
@@ -745,7 +847,6 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         mp_int rr;
         mp_int ss;
         mp_int kinv;
-        mp_digit mp;
         mm_u32 a_sign;
         mm_u32 n_bits;
         bits64 = pka_read_u32(pka, PKA_RAM_ECC_P_LEN);
@@ -769,8 +870,17 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         pka_read_mp(pka, PKA_RAM_SIGN_D, (n_bits + 7u) / 8u, &dd);
         pka_read_mp(pka, PKA_RAM_SIGN_HASH, (n_bits + 7u) / 8u, &zz);
         if (a_sign != 0u) {
-            mp_sub(&pp, &aa, &aa);
-            mp_mod(&aa, &pp, &aa);
+            /* a_sign=1 means "actual a is negative" (e.g. P-256 has a = -3).
+             * The ST HAL convention is: coefA = |a| (small), coefSign = 1,
+             * and the engine internally uses p - |a|. wolfSSL 5.9.1 without
+             * WOLFSSL_SP_INT_NEGATIVE breaks that convention: it sends
+             * coefA = bytes-of-(p-3) AND coefSign = 1. To accept both:
+             * if coefA is already in (p - |a|) form (bit-length close to p's),
+             * skip the negation; otherwise apply it. */
+            if (mp_count_bits(&aa) < mp_count_bits(&pp) - 1) {
+                mp_sub(&pp, &aa, &aa);
+                mp_mod(&aa, &pp, &aa);
+            }
         }
         G = wc_ecc_new_point();
         R = wc_ecc_new_point();
@@ -779,8 +889,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
             break;
         }
         pka_ecc_point_from_ram(G, pka, PKA_RAM_SIGN_GX, PKA_RAM_SIGN_GY, 0u, bytes);
-        mp_montgomery_setup(&pp, &mp);
-        ret = wc_ecc_mulmod_ex2(&kk, G, R, &aa, &pp, &nn, NULL, 1, NULL);
+        ret = wc_ecc_mulmod(&kk, G, R, &aa, &pp, 1);
         if (ret != 0) {
             pka_write_status_code(pka, PKA_RAM_SIGN_ERR, PKA_STATUS_FAIL);
         } else {
@@ -855,8 +964,17 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         pka_read_mp(pka, PKA_RAM_VERIF_S, (n_bits + 7u) / 8u, &ss);
         pka_read_mp(pka, PKA_RAM_VERIF_HASH, (n_bits + 7u) / 8u, &zz);
         if (a_sign != 0u) {
-            mp_sub(&pp, &aa, &aa);
-            mp_mod(&aa, &pp, &aa);
+            /* a_sign=1 means "actual a is negative" (e.g. P-256 has a = -3).
+             * The ST HAL convention is: coefA = |a| (small), coefSign = 1,
+             * and the engine internally uses p - |a|. wolfSSL 5.9.1 without
+             * WOLFSSL_SP_INT_NEGATIVE breaks that convention: it sends
+             * coefA = bytes-of-(p-3) AND coefSign = 1. To accept both:
+             * if coefA is already in (p - |a|) form (bit-length close to p's),
+             * skip the negation; otherwise apply it. */
+            if (mp_count_bits(&aa) < mp_count_bits(&pp) - 1) {
+                mp_sub(&pp, &aa, &aa);
+                mp_mod(&aa, &pp, &aa);
+            }
         }
         G = wc_ecc_new_point();
         Q = wc_ecc_new_point();
@@ -870,7 +988,22 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         mp_invmod(&ss, &nn, &w);
         mp_mulmod(&zz, &w, &nn, &u1);
         mp_mulmod(&rr, &w, &nn, &u2);
-        ret = ecc_mul2add(G, &u1, Q, &u2, R, &aa, &pp, NULL);
+        {
+            /* Manual Shamir's-trick replacement using only the public
+             * wc_ecc_mulmod API + an affine point-add helper:
+             *   R = u1*G + u2*Q  (all affine, z=1) */
+            ecc_point *RG = wc_ecc_new_point();
+            ecc_point *RQ = wc_ecc_new_point();
+            if (RG == 0 || RQ == 0) {
+                ret = -1;
+            } else {
+                ret = wc_ecc_mulmod(&u1, G, RG, &aa, &pp, 1);
+                if (ret == 0) ret = wc_ecc_mulmod(&u2, Q, RQ, &aa, &pp, 1);
+                if (ret == 0) ret = pka_affine_add(RG, RQ, R, &aa, &pp);
+            }
+            if (RG != 0) wc_ecc_del_point(RG);
+            if (RQ != 0) wc_ecc_del_point(RQ);
+        }
         if (ret == 0) {
             mp_mod(R->x, &nn, &v);
             pka_write_mp(pka, PKA_RAM_VERIF_RCALC, (n_bits + 31u) / 32u * 4u, &v);
@@ -914,8 +1047,17 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         pka_read_mp(pka, PKA_RAM_A_COEFF, bytes, &aa);
         pka_read_mp(pka, PKA_RAM_ADD_P, bytes, &pp);
         if (a_sign != 0u) {
-            mp_sub(&pp, &aa, &aa);
-            mp_mod(&aa, &pp, &aa);
+            /* a_sign=1 means "actual a is negative" (e.g. P-256 has a = -3).
+             * The ST HAL convention is: coefA = |a| (small), coefSign = 1,
+             * and the engine internally uses p - |a|. wolfSSL 5.9.1 without
+             * WOLFSSL_SP_INT_NEGATIVE breaks that convention: it sends
+             * coefA = bytes-of-(p-3) AND coefSign = 1. To accept both:
+             * if coefA is already in (p - |a|) form (bit-length close to p's),
+             * skip the negation; otherwise apply it. */
+            if (mp_count_bits(&aa) < mp_count_bits(&pp) - 1) {
+                mp_sub(&pp, &aa, &aa);
+                mp_mod(&aa, &pp, &aa);
+            }
         }
         P = wc_ecc_new_point();
         Q = wc_ecc_new_point();
@@ -925,7 +1067,11 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         }
         pka_ecc_point_from_ram(P, pka, PKA_RAM_ADD_P1X, PKA_RAM_ADD_P1Y, PKA_RAM_ADD_P1Z, bytes);
         pka_ecc_point_from_ram(Q, pka, PKA_RAM_ADD_P2X, PKA_RAM_ADD_P2Y, PKA_RAM_ADD_P2Z, bytes);
-        ret = ecc_projective_add_point(P, Q, R, &aa, &pp, 0);
+        /* Convert inputs from Jacobian to affine, then do affine add; result
+         * is affine (z=1). Equivalent to ecc_projective_add_point + ecc_map. */
+        ret = pka_point_to_affine(P, &pp);
+        if (ret == 0) ret = pka_point_to_affine(Q, &pp);
+        if (ret == 0) ret = pka_affine_add(P, Q, R, &aa, &pp);
         if (ret == 0) {
             pka_ecc_point_to_ram(R, pka, PKA_RAM_ADD_RX, PKA_RAM_ADD_RY, PKA_RAM_ADD_RZ, bytes);
         }
@@ -959,8 +1105,17 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         pka_read_mp(pka, PKA_RAM_DBL_K, bytes, &kk);
         pka_read_mp(pka, PKA_RAM_DBL_M, bytes, &mm);
         if (a_sign != 0u) {
-            mp_sub(&pp, &aa, &aa);
-            mp_mod(&aa, &pp, &aa);
+            /* a_sign=1 means "actual a is negative" (e.g. P-256 has a = -3).
+             * The ST HAL convention is: coefA = |a| (small), coefSign = 1,
+             * and the engine internally uses p - |a|. wolfSSL 5.9.1 without
+             * WOLFSSL_SP_INT_NEGATIVE breaks that convention: it sends
+             * coefA = bytes-of-(p-3) AND coefSign = 1. To accept both:
+             * if coefA is already in (p - |a|) form (bit-length close to p's),
+             * skip the negation; otherwise apply it. */
+            if (mp_count_bits(&aa) < mp_count_bits(&pp) - 1) {
+                mp_sub(&pp, &aa, &aa);
+                mp_mod(&aa, &pp, &aa);
+            }
         }
         P = wc_ecc_new_point();
         Q = wc_ecc_new_point();
@@ -971,9 +1126,23 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
         }
         pka_ecc_point_from_ram(P, pka, PKA_RAM_DBL_P1X, PKA_RAM_DBL_P1Y, PKA_RAM_DBL_P1Z, bytes);
         pka_ecc_point_from_ram(Q, pka, PKA_RAM_DBL_P2X, PKA_RAM_DBL_P2Y, PKA_RAM_DBL_P2Z, bytes);
-        ret = ecc_mul2add(P, &kk, Q, &mm, R, &aa, &pp, NULL);
+        /* PKA mode 0x27 inputs P, Q are accepted in projective form. Normalise
+         * to affine, then compute kk*P + mm*Q via two wc_ecc_mulmod calls
+         * (both producing affine results) + affine add. Result is affine. */
+        ret = pka_point_to_affine(P, &pp);
+        if (ret == 0) ret = pka_point_to_affine(Q, &pp);
         if (ret == 0) {
-            ret = ecc_map(R, &pp, 0);
+            ecc_point *RP = wc_ecc_new_point();
+            ecc_point *RQ = wc_ecc_new_point();
+            if (RP == 0 || RQ == 0) {
+                ret = -1;
+            } else {
+                ret = wc_ecc_mulmod(&kk, P, RP, &aa, &pp, 1);
+                if (ret == 0) ret = wc_ecc_mulmod(&mm, Q, RQ, &aa, &pp, 1);
+                if (ret == 0) ret = pka_affine_add(RP, RQ, R, &aa, &pp);
+            }
+            if (RP != 0) wc_ecc_del_point(RP);
+            if (RQ != 0) wc_ecc_del_point(RQ);
         }
         if (ret == 0) {
             pka_ecc_point_to_ram(R, pka, PKA_RAM_DBL_RX, PKA_RAM_DBL_RY, 0u, bytes);
@@ -994,7 +1163,6 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
     {
         ecc_point *P;
         mp_int pp;
-        mp_digit mp;
         bits64 = pka_read_u32(pka, PKA_RAM_OP_LEN);
         bits = (mm_u32)bits64;
         bytes = (bits + 7u) / 8u;
@@ -1006,8 +1174,7 @@ static void pka_execute(struct pka_state *pka, mm_u32 mode)
             break;
         }
         pka_ecc_point_from_ram(P, pka, PKA_RAM_PROJ_X, PKA_RAM_PROJ_Y, PKA_RAM_PROJ_Z, bytes);
-        mp_montgomery_setup(&pp, &mp);
-        ret = ecc_map(P, &pp, mp);
+        ret = pka_point_to_affine(P, &pp);
         if (ret == 0) {
             pka_ecc_point_to_ram(P, pka, PKA_RAM_PROJ_RX, PKA_RAM_PROJ_RY, 0u, bytes);
             pka_write_status_code(pka, PKA_RAM_PROJ_ERR, PKA_STATUS_OK);
@@ -1044,21 +1211,52 @@ void mm_pka_reset(struct pka_state *pka)
 
 mm_bool mm_pka_read(struct pka_state *pka, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_out)
 {
-    (void)pka;
-    (void)offset;
-    if (value_out == 0) return MM_FALSE;
+    mm_u32 v = 0u;
+    if (pka == 0 || value_out == 0) return MM_FALSE;
     if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    /* PKA emulation disabled. */
-    *value_out = 0u;
+    if (offset == PKA_CR_OFFSET) {
+        v = pka->cr;
+    } else if (offset == PKA_SR_OFFSET) {
+        v = pka->sr | PKA_SR_INITOK;
+    } else if (offset == PKA_CLRFR_OFFSET) {
+        v = 0u;
+    } else if (pka_ram_in_range(offset, 4u)) {
+        v = pka->ram[pka_ram_index(offset)];
+    }
+    *value_out = v;
     return MM_TRUE;
 }
 
 mm_bool mm_pka_write(struct pka_state *pka, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
 {
-    (void)pka;
-    (void)offset;
-    (void)value;
+    if (pka == 0) return MM_FALSE;
     if (size_bytes == 0 || size_bytes > 4) return MM_FALSE;
-    /* PKA emulation disabled. */
+    if (offset == PKA_CR_OFFSET) {
+        pka->cr = value;
+        if ((value & PKA_CR_START) != 0u) {
+            mm_u32 mode = (value & PKA_CR_MODE_MASK) >> PKA_CR_MODE_SHIFT;
+            pka_clear_flag(pka, PKA_SR_PROCENDF);
+            if (pka_mode_supported(mode)) {
+                pka_execute(pka, mode);
+            }
+            pka->cr &= ~PKA_CR_START;
+            pka_set_flag(pka, PKA_SR_PROCENDF);
+        }
+    } else if (offset == PKA_CLRFR_OFFSET) {
+        if ((value & PKA_CLRFR_PROCENDFC) != 0u) {
+            pka_clear_flag(pka, PKA_SR_PROCENDF);
+        }
+        if ((value & PKA_CLRFR_RAMERRFC) != 0u) {
+            pka_clear_flag(pka, PKA_SR_RAMERRF);
+        }
+        if ((value & PKA_CLRFR_ADDRERRFC) != 0u) {
+            pka_clear_flag(pka, PKA_SR_ADDRERRF);
+        }
+        if ((value & PKA_CLRFR_OPERRFC) != 0u) {
+            pka_clear_flag(pka, PKA_SR_OPERRF);
+        }
+    } else if (pka_ram_in_range(offset, 4u)) {
+        pka->ram[pka_ram_index(offset)] = value;
+    }
     return MM_TRUE;
 }
