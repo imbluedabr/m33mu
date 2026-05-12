@@ -36,8 +36,9 @@ jobs:
         run: build/m33mu tests/firmware/test-stm32h563-dualbank/app.bin --dualbank --expect-bkpt 0x7f --timeout 60 --uart-stdout --quit-on-faults
       - name: Run STM32H5 wolfSSL IoTSAFE mTLS firmware test
         # The firmware runs a full TLS 1.2 handshake on emulated Cortex-M33
-        # with software P-256/AES-GCM crypto, which is heavy on shared CI
-        # runners. 60s matches the other firmware tests.
+        # with software P-256/AES-GCM crypto. On the shared ubuntu-latest
+        # CI runner this consistently runs in 30-60s; local fast machines
+        # finish in ~1s. 120s leaves headroom for slow CI cycles.
         run: |
           set -euo pipefail
           rm -f /tmp/m33mu-iotsafe-sim.bin
@@ -45,7 +46,7 @@ jobs:
             --cpu stm32h563 \
             --uart-stdout \
             --expect-bkpt 0x42 \
-            --timeout 60 \
+            --timeout 120 \
             --quit-on-faults \
             --iotsafe-uart:0x40004800:file=/tmp/m33mu-iotsafe-sim.bin \
             tests/firmware/test-stm32h563-wolfssl-iotsafe/app.bin | tee /tmp/m33mu-iotsafe.log
