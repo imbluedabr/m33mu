@@ -495,6 +495,15 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
             if (dec->kind == MM_OP_MOVW || dec->kind == MM_OP_MOVT) {
                 return MM_TRUE;
             }
+            /* Capstone 4.x reports `MOV rd, rm` for the Thumb LSLS rd, rm, #0
+             * encoding (e.g. raw `0x0000` = movs r0, r0). Per ARMv7-M ARM
+             * A8.6.97/A8.6.99, LSL rd, rm, #0 IS MOV rd, rm — they share the
+             * same encoding family. Accept LSL_IMM with imm==0 as a MOV
+             * alias to keep the cross-check working under both capstone 4
+             * (id=ARM_INS_MOV) and capstone 5 (id=ARM_INS_MOVS). */
+            if (dec->kind == MM_OP_LSL_IMM && dec->imm == 0u) {
+                return MM_TRUE;
+            }
             return (dec->kind == MM_OP_MOV_IMM || dec->kind == MM_OP_MOV_REG);
         case ARM_INS_MOVW: return dec->kind == MM_OP_MOVW;
         case ARM_INS_MOVT: return dec->kind == MM_OP_MOVT;
