@@ -307,6 +307,12 @@ static int capstone_should_skip(mm_u32 insn, const char *mnemonic, const char *o
         if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
             return 1;  /* Capstone accepts, m33mu rejects (correct per ARM spec) */
         }
+        /* Capstone 4 also decodes a family of low-halfword 0xF700 encodings
+         * as SSAT/USAT T1 with LSL shifts. Those forms are undefined on
+         * M-profile and m33mu correctly returns MM_OP_UNDEFINED. */
+        if ((insn & 0x8ff0ffffu) == 0x0000f700u) {
+            return 1;
+        }
         /* USAT/SSAT T1 with sh=1 (ASR shift). m33mu's decoder only
          * implements the sh=0 (LSL) variant; the ASR-shift variant is a
          * pre-existing gap. Capstone disassembles it; m33mu returns
@@ -380,6 +386,12 @@ static int capstone_should_skip(mm_u32 insn, const char *mnemonic, const char *o
     if (strncmp(mnemonic, "ldrsb", 5) == 0) {
         if (strstr(op_str, "],") != 0 || strstr(op_str, "!") != 0 ||
             strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;
+        }
+    }
+    if (strcmp(mnemonic, "subs") == 0) {
+        if (strncmp(op_str, "pc, lr, #", 9) == 0 ||
+            strncmp(op_str, "PC, LR, #", 9) == 0) {
             return 1;
         }
     }

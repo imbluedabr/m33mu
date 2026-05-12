@@ -148,25 +148,28 @@ void console_putc(char c)
 static int modem_rx(char *buf, int len)
 {
     int i = 0;
-    unsigned idle = 0;
     uint32_t start = systick_ms;
+    uint32_t last_rx;
 
     memset(buf, 0, (size_t)len);
     while ((USART_ISR(MODEM_USART_BASE) & USART_ISR_RXNE) == 0u) {
-        if ((systick_ms - start) >= 2u) {
+        if ((systick_ms - start) >= 10u) {
             return 0;
         }
     }
-    while (i < len && idle < 4096u) {
+    last_rx = systick_ms;
+    while (i < len) {
         if ((USART_ISR(MODEM_USART_BASE) & USART_ISR_RXNE) != 0u) {
             char c = (char)(USART_RDR(MODEM_USART_BASE) & 0xffu);
             buf[i++] = c;
-            idle = 0;
+            last_rx = systick_ms;
             if (c == '\n') {
                 break;
             }
-        } else {
-            idle++;
+            continue;
+        }
+        if ((systick_ms - last_rx) >= 2u) {
+            break;
         }
     }
     return i;
