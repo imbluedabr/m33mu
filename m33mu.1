@@ -334,6 +334,20 @@ The emulated device provides 4KB of NV storage and supports a subset of common c
 
 Use this when firmware expects a TA\-100 peripheral and should run without physical hardware.
 .TP
+.BR --iotsafe-uart:UARTBASE[:file=PATH]
+Attach a GSMA IoTSAFE modem + SIM simulator to the selected UART base address.
+
+The modem exposes an AT command dispatcher and currently implements
+.B AT+CSIM
+for IoTSAFE applet traffic.
+The SIM side supports 16\-bit slot and file identifiers, certificate file reads, RNG,
+ECC P\-256 key generation, public key import/export, ECDSA sign/verify, ECDH,
+and HKDF extract so that wolfSSL's IoTSAFE and IoTSAFE
+.B _ex
+APIs can be exercised without hardware.
+
+The optional backing file is used for NV persistence of file slots and key slots.
+.TP
 .BR --atecc608:SPIx:cs=GPIONAME[:file=PATH]
 Attach a Microchip ATECC608A secure element simulator to the selected SPI bus.
 Requires Rust plugin support (cargo must be available at build time).
@@ -407,6 +421,9 @@ Attach memory\-mapped SPI flash and boot from it.
 .TP
 .B m33mu --se050:I2C1:addr=48:file=/tmp/se050.bin firmware.bin
 Attach an SE050 simulator on STM32H563 I2C1 with NV persistence.
+.TP
+.B m33mu --iotsafe-uart:0x40004800:file=/tmp/iotsafe.bin firmware.bin
+Attach an IoTSAFE modem + SIM simulator to the UART at base address 0x40004800 with NV persistence.
 .TP
 .B m33mu --atecc608:SPI1:cs=PA4:file=/tmp/atecc608.bin firmware.bin
 Attach an ATECC608A simulator on SPI1, chip-select on PA4, with NV persistence.

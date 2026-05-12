@@ -71,6 +71,7 @@ These let you capture a bounded execution window, dump machine state around a sp
 - `--vde[:/path/to/vde.ctl]`
 - `--tpm:SPIx:cs=GPIONAME[:file=<path>]`
 - `--ta100:SPIx:cs=GPIONAME[:file=<path>][:profile=<name>][:serial=<hex>]`
+- `--iotsafe-uart:<uart-base-hex>[:file=<path>]`
 
 ### Rust Plugin Secure Elements
 
@@ -86,6 +87,14 @@ under `third_party/wolfssl-simulators/`.
 - `--se050:I2Cx[:addr=<hex>][:file=<path>]`  
   NXP SE050 secure element over I2C. Default address `0x48`.
   Optional `file=` path enables NV persistence.
+
+- `--iotsafe-uart:<uart-base-hex>[:file=<path>]`  
+  GSMA IoTSAFE modem+SIM simulator over an emulated UART. The modem currently
+  implements an extensible AT dispatcher and `AT+CSIM` transport with IoTSAFE
+  applet support for certificate files, RNG, ECC P-256 key generation, public
+  key import/export, ECDSA sign/verify, ECDH, and HKDF extract. Slot and file
+  identifiers are 16-bit so wolfSSL's `_ex` IoTSAFE APIs can be exercised.
+  Optional `file=` path enables NV persistence for SIM files and key slots.
 
 - `--stsafe:I2Cx[:addr=<hex>][:file=<path>]`  
   STMicro STSAFE-A120 secure element over I2C. Default address `0x20`.

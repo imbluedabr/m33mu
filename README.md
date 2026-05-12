@@ -17,7 +17,7 @@ It can run as:
 - Runs firmware images directly from your host machine
 - Supports debugging through a built-in GDB remote server
 - Can load multiple images, including Secure and Non-secure firmware combinations
-- Exposes UART, SPI flash, TPM, TA-100, ATECC608A, SE050, STSAFE-A120 secure elements, USB, Ethernet, and other target-specific peripherals
+- Exposes UART, SPI flash, TPM, TA-100, ATECC608A, SE050, STSAFE-A120, and IoTSAFE modem+SIM secure-element paths, plus USB, Ethernet, and other target-specific peripherals
 - Ships SoC profiles for STM32H5/U5/L5, NXP LPC55S69, MCXW71C, MCXN947, RW612 (with ELS/PKA crypto offload), Nordic nRF5340 / nRF54LM20, RP2350, and Microchip PIC32CK — see [supported CPUs](docs/supported-cpus.md) for the full list
 
 > **Note:** ATECC608A, SE050, and STSAFE-A120 simulation requires `cargo` (Rust toolchain) at build time.
@@ -29,7 +29,27 @@ It can run as:
 - [Supported CPUs](docs/supported-cpus.md)
 - [Loading images](docs/loading-images.md)
 - [Command-line usage](docs/cli-usage.md)
+- [Supported HSE simulators](docs/supported-HSEs.md)
 - [CI and automated testing](docs/ci-testing.md)
+
+## Example
+
+Run the STM32H563 wolfSSL IoTSAFE mutual-TLS demo against the built-in modem+SIM
+emulator on `USART3`:
+
+```sh
+build/m33mu \
+  --cpu stm32h563 \
+  --uart-stdout \
+  --expect-bkpt 0x42 \
+  --timeout 20 \
+  --iotsafe-uart:0x40004800:file=/tmp/m33mu-iotsafe-sim.bin \
+  tests/firmware/test-stm32h563-wolfssl-iotsafe/app.bin
+```
+
+This exercises wolfSSL's 16-bit IoTSAFE `_ex` API path for SIM-backed
+certificate reads, RNG, ECC sign/verify, ECDH, and an end-to-end mTLS
+handshake.
 
 ## Screenshots for TUI mode
 

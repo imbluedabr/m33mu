@@ -36,6 +36,18 @@ static mm_bool g_uart_stdout = MM_FALSE;
 static int g_uart_rx_trace = -1;
 static const struct mm_target_cfg *g_target_cfg = 0;
 
+#define MM_UART_BACKEND_MAX 8
+
+struct mm_uart_backend_binding {
+    mm_bool used;
+    mm_u32 base;
+    char name[64];
+    const struct mm_uart_backend_ops *ops;
+    void *opaque;
+};
+
+static struct mm_uart_backend_binding g_uart_backends[MM_UART_BACKEND_MAX];
+
 #define MM_TARGET_CALL0(field) \
     do { \
         if (cfg == 0 || cfg->field == 0) { \
@@ -91,18 +103,42 @@ static int uart_open_pty(char *out, size_t outlen)
     return fd;
 }
 
+static const struct mm_uart_backend_binding *uart_find_backend(mm_u32 base)
+{
+    size_t i;
+    for (i = 0; i < MM_UART_BACKEND_MAX; ++i) {
+        if (g_uart_backends[i].used && g_uart_backends[i].base == base) {
+            return &g_uart_backends[i];
+        }
+    }
+    return 0;
+}
+
 void mm_uart_io_init(struct mm_uart_io *io)
 {
     if (io == 0) return;
     memset(io, 0, sizeof(*io));
     io->fd = -1;
     io->rx_fd = -1;
+    io->backend_ops = 0;
+    io->backend_opaque = 0;
     io->stdout_only = MM_FALSE;
 }
 
 mm_bool mm_uart_io_open(struct mm_uart_io *io, mm_u32 base)
 {
+    const struct mm_uart_backend_binding *binding;
     if (io == 0) return MM_FALSE;
+    binding = uart_find_backend(base);
+    if (binding != 0) {
+        io->fd = -2;
+        io->backend_ops = binding->ops;
+        io->backend_opaque = binding->opaque;
+        io->stdout_only = MM_FALSE;
+        snprintf(io->name, sizeof(io->name), "%s", binding->name);
+        printf("[UART] %08lx attached to %s\n", (unsigned long)base, io->name);
+        return MM_TRUE;
+    }
     if (g_uart_stdout && !mm_tui_is_active()) {
         int rx;
         struct termios tio;
@@ -137,6 +173,9 @@ mm_bool mm_uart_io_open(struct mm_uart_io *io, mm_u32 base)
 void mm_uart_io_close(struct mm_uart_io *io)
 {
     if (io == 0) return;
+    if (io->backend_ops != 0 && io->backend_ops->close != 0) {
+        io->backend_ops->close(io->backend_opaque);
+    }
     if (io->fd >= 0 && !io->stdout_only) {
         close(io->fd);
         io->fd = -1;
@@ -147,6 +186,9 @@ void mm_uart_io_close(struct mm_uart_io *io)
     io->rx_fd = -1;
     io->rx_pending = MM_FALSE;
     io->tx_head = io->tx_tail = 0;
+    io->backend_ops = 0;
+    io->backend_opaque = 0;
+    io->stdout_only = MM_FALSE;
 }
 
 void mm_uart_io_queue_tx(struct mm_uart_io *io, mm_u8 byte)
@@ -163,7 +205,32 @@ void mm_uart_io_queue_tx(struct mm_uart_io *io, mm_u8 byte)
 
 mm_bool mm_uart_io_flush(struct mm_uart_io *io)
 {
-    if (io == 0 || io->fd < 0) return MM_FALSE;
+    if (io == 0) return MM_FALSE;
+    if (io->backend_ops != 0) {
+        while (io->tx_head != io->tx_tail) {
+            size_t first_chunk;
+            size_t consumed;
+            if (io->backend_ops->write_tx == 0) {
+                io->tx_head = io->tx_tail = 0;
+                return MM_FALSE;
+            }
+            first_chunk = (io->tx_tail > io->tx_head)
+                ? (io->tx_tail - io->tx_head)
+                : (sizeof(io->tx_buf) - io->tx_head);
+            consumed = io->backend_ops->write_tx(io->backend_opaque,
+                                                 &io->tx_buf[io->tx_head],
+                                                 first_chunk);
+            if (consumed == 0) {
+                return MM_FALSE;
+            }
+            if (consumed > first_chunk) {
+                consumed = first_chunk;
+            }
+            io->tx_head = (io->tx_head + consumed) % sizeof(io->tx_buf);
+        }
+        return MM_TRUE;
+    }
+    if (io->fd < 0) return MM_FALSE;
     while (io->tx_head != io->tx_tail) {
         size_t first_chunk;
         size_t to_write;
@@ -188,20 +255,33 @@ mm_bool mm_uart_io_flush(struct mm_uart_io *io)
 mm_bool mm_uart_io_poll(struct mm_uart_io *io)
 {
     mm_bool new_rx = MM_FALSE;
-    if (io == 0 || io->fd < 0) return MM_FALSE;
+    if (io == 0) return MM_FALSE;
     (void)mm_uart_io_flush(io);
     if (!io->rx_pending) {
         mm_u8 b;
-        int rx_fd = io->stdout_only ? io->rx_fd : io->fd;
-        ssize_t n;
-        if (rx_fd < 0) return MM_FALSE;
-        n = read(rx_fd, &b, 1);
-        if (n == 1) {
+        if (io->backend_ops != 0) {
+            if (io->backend_ops->read_rx == 0 ||
+                !io->backend_ops->read_rx(io->backend_opaque, &b)) {
+                return MM_FALSE;
+            }
             io->rx_byte = b;
             io->rx_pending = MM_TRUE;
             new_rx = MM_TRUE;
             if (uart_rx_trace_enabled()) {
                 printf("[UART_RX_POLL] fd=%d byte=0x%02x\n", io->fd, (unsigned)b);
+            }
+        } else {
+            int rx_fd = io->stdout_only ? io->rx_fd : io->fd;
+            ssize_t n;
+            if (rx_fd < 0) return MM_FALSE;
+            n = read(rx_fd, &b, 1);
+            if (n == 1) {
+                io->rx_byte = b;
+                io->rx_pending = MM_TRUE;
+                new_rx = MM_TRUE;
+                if (uart_rx_trace_enabled()) {
+                    printf("[UART_RX_POLL] fd=%d byte=0x%02x\n", io->fd, (unsigned)b);
+                }
             }
         }
     }
@@ -244,6 +324,50 @@ mm_u8 mm_uart_io_read(struct mm_uart_io *io)
 void mm_uart_io_set_stdout(mm_bool enable)
 {
     g_uart_stdout = enable ? MM_TRUE : MM_FALSE;
+}
+
+mm_bool mm_uart_backend_attach(mm_u32 base, const char *name,
+                               const struct mm_uart_backend_ops *ops,
+                               void *opaque)
+{
+    size_t i;
+    if (ops == 0 || ops->write_tx == 0 || ops->read_rx == 0) {
+        return MM_FALSE;
+    }
+    for (i = 0; i < MM_UART_BACKEND_MAX; ++i) {
+        if (g_uart_backends[i].used && g_uart_backends[i].base == base) {
+            return MM_FALSE;
+        }
+    }
+    for (i = 0; i < MM_UART_BACKEND_MAX; ++i) {
+        if (!g_uart_backends[i].used) {
+            memset(&g_uart_backends[i], 0, sizeof(g_uart_backends[i]));
+            g_uart_backends[i].used = MM_TRUE;
+            g_uart_backends[i].base = base;
+            g_uart_backends[i].ops = ops;
+            g_uart_backends[i].opaque = opaque;
+            if (name != 0 && name[0] != '\0') {
+                snprintf(g_uart_backends[i].name, sizeof(g_uart_backends[i].name),
+                         "%s", name);
+            } else {
+                snprintf(g_uart_backends[i].name, sizeof(g_uart_backends[i].name),
+                         "uart-backend");
+            }
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
+void mm_uart_backend_detach(mm_u32 base)
+{
+    size_t i;
+    for (i = 0; i < MM_UART_BACKEND_MAX; ++i) {
+        if (g_uart_backends[i].used && g_uart_backends[i].base == base) {
+            memset(&g_uart_backends[i], 0, sizeof(g_uart_backends[i]));
+            return;
+        }
+    }
 }
 
 static mm_bool g_uart_break_on_macro = MM_FALSE;

@@ -11,3 +11,4 @@ tpm_nv.permall
 AGENTS.md
 *.pdf
 *.svd
+*.log

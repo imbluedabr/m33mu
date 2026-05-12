@@ -29,12 +29,20 @@ struct mm_uart_io {
     int fd;
     int rx_fd;
     char name[64];
+    const struct mm_uart_backend_ops *backend_ops;
+    void *backend_opaque;
     mm_u8 tx_buf[1024];
     size_t tx_head;
     size_t tx_tail;
     mm_bool rx_pending;
     mm_u8 rx_byte;
     mm_bool stdout_only;
+};
+
+struct mm_uart_backend_ops {
+    size_t (*write_tx)(void *opaque, const mm_u8 *data, size_t len);
+    mm_bool (*read_rx)(void *opaque, mm_u8 *byte_out);
+    void (*close)(void *opaque);
 };
 
 void mm_uart_io_init(struct mm_uart_io *io);
@@ -48,6 +56,10 @@ mm_bool mm_uart_io_has_rx(const struct mm_uart_io *io);
 mm_u8 mm_uart_io_peek(const struct mm_uart_io *io);
 mm_u8 mm_uart_io_read(struct mm_uart_io *io);
 void mm_uart_io_set_stdout(mm_bool enable);
+mm_bool mm_uart_backend_attach(mm_u32 base, const char *name,
+                               const struct mm_uart_backend_ops *ops,
+                               void *opaque);
+void mm_uart_backend_detach(mm_u32 base);
 void mm_uart_break_on_macro_set(void);
 mm_bool mm_uart_break_on_macro_take(void);
 
