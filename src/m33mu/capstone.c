@@ -484,8 +484,12 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_IT: return dec->kind == MM_OP_IT;
         case ARM_INS_B: return (dec->kind == MM_OP_B_COND || dec->kind == MM_OP_B_UNCOND || dec->kind == MM_OP_B_COND_WIDE || dec->kind == MM_OP_B_UNCOND_WIDE);
         case ARM_INS_BL: return dec->kind == MM_OP_BL;
-        case ARM_INS_BX: return dec->kind == MM_OP_BX;
-        case ARM_INS_BLX: return dec->kind == MM_OP_BLX;
+        /* Capstone 4.x predates ARMv8-M TrustZone and disassembles the
+         * BXNS / BLXNS encodings (`0x47[01][0..F][4]`) as plain BX / BLX.
+         * Accept the TrustZone variants under the BX / BLX cases so the
+         * cross-check works under capstone 4 (CI) and capstone 5 (local). */
+        case ARM_INS_BX: return (dec->kind == MM_OP_BX || dec->kind == MM_OP_BXNS);
+        case ARM_INS_BLX: return (dec->kind == MM_OP_BLX || dec->kind == MM_OP_BLXNS);
         case ARM_INS_CBZ: return dec->kind == MM_OP_CBZ;
         case ARM_INS_CBNZ: return dec->kind == MM_OP_CBNZ;
         case ARM_INS_BKPT: return dec->kind == MM_OP_BKPT;
