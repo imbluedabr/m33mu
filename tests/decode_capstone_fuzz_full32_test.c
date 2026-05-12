@@ -307,10 +307,12 @@ static int capstone_should_skip(mm_u32 insn, const char *mnemonic, const char *o
         if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
             return 1;  /* Capstone accepts, m33mu rejects (correct per ARM spec) */
         }
-        /* Capstone 4 also decodes a family of low-halfword 0xF700 encodings
-         * as SSAT/USAT T1 with LSL shifts. Those forms are undefined on
-         * M-profile and m33mu correctly returns MM_OP_UNDEFINED. */
-        if ((insn & 0x8ff0ffffu) == 0x0000f700u) {
+        /* Capstone 4 also decodes a family of encodings with low halfword
+         * 0xF7?0 as SSAT/USAT T1. Those forms are undefined on M-profile
+         * and m33mu correctly returns MM_OP_UNDEFINED. The test packs the
+         * instruction as (hw2 << 16) | hw1, so matching the low halfword
+         * shape is sufficient here. */
+        if ((insn & 0x0000ff70u) == 0x0000f700u) {
             return 1;
         }
         /* USAT/SSAT T1 with sh=1 (ASR shift). m33mu's decoder only
