@@ -1465,7 +1465,6 @@ static void rp2350_usb_sync_vector_ready(const struct mm_scs *scs, const struct 
     mm_u32 slot1 = 0u;
     mm_u32 slot1_addr;
     mm_u32 slot_handler = 0u;
-    static mm_bool slot_logged = MM_FALSE;
     static mm_u32 last_entry = 0;
     static mm_bool last_valid = MM_FALSE;
     if (scs == 0 || map == 0) return;
@@ -1483,24 +1482,15 @@ static void rp2350_usb_sync_vector_ready(const struct mm_scs *scs, const struct 
                     slot_handler != 0u && addr_exec_ok(map, slot_handler & ~1u)) {
                     valid = MM_TRUE;
                 }
-                if (!slot_logged) {
-                    fprintf(stderr, "[USB] IRQ slot handler=0x%08x\n", slot_handler);
-                    slot_logged = MM_TRUE;
-                }
             }
         }
         if (entry != last_entry || valid != last_valid) {
-            fprintf(stderr, "[USB] IRQ vector entry=0x%08x ready=%s\n",
-                    entry, valid ? "yes" : "no");
             last_entry = entry;
             last_valid = valid;
         }
         mm_rp2350_usb_set_irq_vector_ready(valid);
     } else {
         mm_rp2350_usb_set_irq_vector_ready(MM_FALSE);
-        if (last_valid) {
-            fprintf(stderr, "[USB] IRQ vector entry unavailable\n");
-        }
         last_valid = MM_FALSE;
     }
 }
@@ -5866,7 +5856,7 @@ int main(int argc, char **argv)
                     s_en ? "Enabled" : "Disabled",
                     ns_en ? "Enabled" : "Disabled",
                     nsacr_en ? "Enabled" : "Disabled");
-        }
+            }
 
         {
             enum mm_sec_state boot_sec = force_ns_boot ? MM_NONSECURE : MM_SECURE;
@@ -5945,6 +5935,11 @@ int main(int argc, char **argv)
                 }
                 if (g_fault_pending) {
                     done = MM_TRUE;
+                    break;
+                }
+                if (mm_system_reset_pending() && allow_system_reset(&cfg, cpu_name)) {
+                    reset_again = MM_TRUE;
+                    mm_system_clear_reset();
                     break;
                 }
                 if (cfg.core_count > 1u && cpu_name != 0 && strcmp(cpu_name, "rp2350") == 0) {
