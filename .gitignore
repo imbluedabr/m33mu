@@ -12,3 +12,5 @@ AGENTS.md
 *.pdf
 *.svd
 *.log
+__pycache__/
+*.pyc
