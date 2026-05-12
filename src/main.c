@@ -55,6 +55,7 @@
 #include "m33mu/spiflash.h"
 #include "m33mu/usbdev.h"
 #include "m33mu/eth_backend.h"
+#include "stm32_crypto.h"
 #include "rp2350/rp2350_bootrom.h"
 #include "rp2350/rp2350_usb.h"
 #ifdef M33MU_HAS_LIBTPMS
@@ -66,6 +67,7 @@
 #ifdef M33MU_HAS_RUST_PLUGINS
 #include "m33mu/atecc608.h"
 #include "m33mu/stsafe.h"
+#include "m33mu/tropic01.h"
 #endif
 #include "tui.h"
 #include <string.h>
@@ -213,6 +215,48 @@ static mm_bool parse_hex_u64(const char *s, mm_u64 *out)
         return MM_FALSE;
     }
     *out = (mm_u64)v;
+    return MM_TRUE;
+}
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+static mm_bool parse_hex_blob(const char *s, mm_u8 *out, mm_u32 out_cap, mm_u32 *out_len)
+{
+    const char *hex = s;
+    mm_u32 len = 0u;
+    mm_u32 digits = 0u;
+    if (s == 0 || out == 0 || out_len == 0) {
+        return MM_FALSE;
+    }
+    if (hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) {
+        hex += 2;
+    }
+    while (hex[digits] != '\0') {
+        if (hex_nibble(hex[digits]) < 0) {
+            return MM_FALSE;
+        }
+        digits++;
+    }
+    if ((digits == 0u) || ((digits & 1u) != 0u)) {
+        return MM_FALSE;
+    }
+    len = digits / 2u;
+    if (len > out_cap) {
+        return MM_FALSE;
+    }
+    while (*hex != '\0') {
+        int hi = hex_nibble(hex[0]);
+        int lo = hex_nibble(hex[1]);
+        out[*out_len] = (mm_u8)((hi << 4) | lo);
+        (*out_len)++;
+        hex += 2;
+    }
     return MM_TRUE;
 }
 
@@ -4543,6 +4587,8 @@ int main(int argc, char **argv)
     int atecc608_count = 0;
     struct mm_stsafe_cfg stsafe_cfgs[4];
     int stsafe_count = 0;
+    struct mm_tropic01_cfg tropic01_cfgs[4];
+    int tropic01_count = 0;
 #endif
     mm_bool opt_no_tz = MM_FALSE;
     const char *memwatch_env = getenv("M33MU_MEMWATCH");
@@ -4564,6 +4610,8 @@ int main(int argc, char **argv)
     mm_u64 opt_puf_seed = 0;
     mm_u64 opt_puf_cold_boot_count = 0;
     mm_u32 opt_puf_noise = 0;
+    mm_u8 opt_sbkload_key[32];
+    mm_u32 opt_sbkload_key_len = 0u;
     mm_u64 opt_fault_clocks[16];
     mm_u8 opt_fault_clock_count = 0;
     mm_u8 *spiflash_boot_data = 0;
@@ -4658,6 +4706,23 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "--puf-noise=", 12) == 0) {
             if (!parse_hex_u32(argv[i] + 12, &opt_puf_noise) || opt_puf_noise > 127u) {
                 fprintf(stderr, "invalid puf noise value: %s\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--sbkload-key") == 0 && i + 1 < argc) {
+            opt_sbkload_key_len = 0u;
+            if (!parse_hex_blob(argv[i + 1], opt_sbkload_key, sizeof(opt_sbkload_key),
+                                &opt_sbkload_key_len) ||
+                (opt_sbkload_key_len != 16u && opt_sbkload_key_len != 32u)) {
+                fprintf(stderr, "invalid sbkload key value: %s\n", argv[i + 1]);
+                return 1;
+            }
+            i++;
+        } else if (strncmp(argv[i], "--sbkload-key=", 14) == 0) {
+            opt_sbkload_key_len = 0u;
+            if (!parse_hex_blob(argv[i] + 14, opt_sbkload_key, sizeof(opt_sbkload_key),
+                                &opt_sbkload_key_len) ||
+                (opt_sbkload_key_len != 16u && opt_sbkload_key_len != 32u)) {
+                fprintf(stderr, "invalid sbkload key value: %s\n", argv[i]);
                 return 1;
             }
 #ifdef M33MU_USE_LIBCAPSTONE
@@ -4967,6 +5032,16 @@ int main(int argc, char **argv)
                 return 1;
             }
             stsafe_count++;
+        } else if (strncmp(argv[i], "--tropic01:", 11) == 0) {
+            if (tropic01_count >= (int)(sizeof(tropic01_cfgs) / sizeof(tropic01_cfgs[0]))) {
+                fprintf(stderr, "too many tropic01 configs\n");
+                return 1;
+            }
+            if (!mm_tropic01_parse_spec(argv[i] + 11, &tropic01_cfgs[tropic01_count])) {
+                fprintf(stderr, "invalid tropic01 spec: %s\n", argv[i]);
+                return 1;
+            }
+            tropic01_count++;
 #endif
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "unknown option: %s\n", argv[i]);
@@ -4997,6 +5072,7 @@ int main(int argc, char **argv)
 #endif
                         "[--persist] "
                         "[--puf-seed <value>] [--puf-cold-boot <n>] [--puf-noise <n>] "
+                        "[--sbkload-key <hex>] "
 #ifdef M33MU_USE_LIBCAPSTONE
                         "[--capstone] [--capstone-verbose] "
 #endif
@@ -5016,6 +5092,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_HAS_RUST_PLUGINS
                         "[--atecc608:SPIx:cs=GPIONAME[:file=<path>]] "
                         "[--stsafe:I2Cx[:addr=<hex>][:file=<path>]] "
+                        "[--tropic01:SPIx:cs=GPIONAME[:file=<path>]] "
 #endif
                         "<image.bin[:offset]|image.elf|image.hex|image.uf2> [more images...]\n",
                 argv[0]);
@@ -5062,6 +5139,9 @@ int main(int argc, char **argv)
     if (cpu_name == 0) {
         cpu_name = mm_cpu_default_name();
     }
+    mm_stm32_saes_set_key_material(opt_puf_seed_set, opt_puf_seed,
+                                   (opt_sbkload_key_len != 0u) ? opt_sbkload_key : 0,
+                                   opt_sbkload_key_len);
     if (!mm_cpu_lookup(cpu_name, &cfg)) {
         size_t ci;
         fprintf(stderr, "unknown cpu: %s\n", cpu_name);
@@ -5155,6 +5235,12 @@ int main(int argc, char **argv)
     for (i = 0; i < stsafe_count; ++i) {
         if (!mm_stsafe_register_cfg(&stsafe_cfgs[i])) {
             fprintf(stderr, "failed to register stsafe\n");
+            return 1;
+        }
+    }
+    for (i = 0; i < tropic01_count; ++i) {
+        if (!mm_tropic01_register_cfg(&tropic01_cfgs[i])) {
+            fprintf(stderr, "failed to register tropic01\n");
             return 1;
         }
     }
@@ -5432,6 +5518,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_HAS_RUST_PLUGINS
             mm_atecc608_reset_all();
             mm_stsafe_reset_all();
+            mm_tropic01_reset_all();
 #endif
             mm_memmap_configure_flash(&map, &cfg, flash, MM_TRUE);
             mm_memmap_configure_flash(&map, &cfg, flash, MM_FALSE);
@@ -6832,6 +6919,7 @@ cleanup:
 #ifdef M33MU_HAS_RUST_PLUGINS
     mm_atecc608_shutdown_all();
     mm_stsafe_shutdown_all();
+    mm_tropic01_shutdown_all();
 #endif
     mm_usbdev_stop();
     mm_eth_backend_stop();

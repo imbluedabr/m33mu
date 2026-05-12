@@ -21,6 +21,7 @@ cryptographic operations are supported, and the relevant limitations.
 - [SE050](#se050) — NXP, I2C
 - [ATECC608A](#atecc608a) — Microchip, SPI
 - [TA-100](#ta-100) — Microchip Trust Anchor, SPI
+- [TROPIC01](#tropic01) — Tropic Square, SPI
 - [TPM 2.0 (TIS)](#tpm-20-tis) — TCG TIS over SPI
 - [IoT SAFE modem + SIM](#iot-safe-modem--sim) — GSMA IoT SAFE over UART
 - [Troubleshooting / tracing](#troubleshooting--tracing)
@@ -34,6 +35,7 @@ cryptographic operations are supported, and the relevant limitations.
 | SE050           | I2C  | `addr=0x48`                      | `file=<path>`  | Rust crate (FFI)    | `M33MU_HAS_RUST_PLUGINS` (cargo at build) |
 | ATECC608A       | SPI  | `cs=GPIONAME` (e.g. `PA4`)       | `file=<path>`  | Rust crate (FFI)    | `M33MU_HAS_RUST_PLUGINS` (cargo at build) |
 | TA-100          | SPI  | `cs=GPIONAME` (e.g. `PB5`)       | `file=<path>`  | C-native + wolfSSL  | `M33MU_HAS_WOLFSSL`                       |
+| TROPIC01        | SPI  | `cs=GPIONAME` (e.g. `PA4`)       | `file=<path>` (JSON) | Rust crate (FFI) | `M33MU_HAS_RUST_PLUGINS` (cargo at build) |
 | TPM 2.0 (TIS)   | SPI  | `cs=GPIONAME`                    | `file=<path>`  | C-native + libtpms  | `M33MU_HAS_LIBTPMS`                       |
 | IoT SAFE        | UART | `<uart-base-hex>` (e.g. `0x40004800`) | `file=<path>` | C-native + wolfSSL | `M33MU_HAS_WOLFSSL`                       |
 
@@ -376,6 +378,118 @@ The simulator implements a meaningful subset of the TA-100 command set:
 - RSA key generation falls back to a fixed embedded test keypair to keep
   emulation deterministic; if you need a fresh keypair, generate it on the
   host and provision it into the simulator's NV file directly.
+
+---
+
+## TROPIC01
+
+Tropic Square's TROPIC01 is an open-architecture secure element with a
+SPI host interface and an encrypted-channel handshake. It is the only
+HSE in this catalogue covering **Ed25519** and **X25519** in addition to
+P-256 / AES-GCM / SHA-256, and the only one that pins the wire protocol
+to a public reference implementation
+([libtropic](https://github.com/tropicsquare/libtropic)).
+
+### CLI
+
+```
+--tropic01:SPIx:cs=GPIONAME[:file=PATH]
+```
+
+- `cs=` is **mandatory** — the TROPIC01 SPI L1 protocol is delimited by
+  chip-select edges (the host issues multiple `SPI_SEND` calls within a
+  single CS-asserted span).
+- `file=PATH` is a **JSON** file (the simulator uses `serde_json`); the
+  device serialises chip ID, X25519 static keys, pairing slots, R-memory
+  fixtures, and the cert store there.
+- Maximum simultaneous instances: 4.
+
+### Example
+
+```sh
+build/m33mu --tropic01:SPI1:cs=PA4:file=/tmp/tropic01.json firmware.bin
+```
+
+### Protocol surface
+
+The simulator (wolfssl/simulators
+[`TROPIC01Sim`](https://github.com/wolfssl/simulators), vendored as
+`tropic01-sim`) implements the **libtropic L1 SPI** framing:
+
+| Direction                | Frame                                           |
+|--------------------------|-------------------------------------------------|
+| Host → chip (write)      | `[REQ_ID] [REQ_LEN] [DATA…] [CRC_HI CRC_LO]`    |
+| Host → chip (poll)       | `0xAA`  (`GET_RESPONSE_REQ_ID`)                 |
+| Chip → host (poll reply) | `[CHIP_STATUS=READY] [STATUS] [RSP_LEN] [DATA…] [CRC]` |
+
+The first MOSI byte after CSN-low disambiguates the transaction: `0xAA`
+starts a polled-read; any other byte starts an L2 write. The simulator
+preserves staged responses across CSN-high / CSN-low cycles so the host
+can write then poll in two consecutive transactions, exactly as
+`libtropic/src/lt_l1.c` does it.
+
+L2 REQ_IDs implemented:
+
+| REQ_ID  | Name                       | Notes                                          |
+|---------|----------------------------|------------------------------------------------|
+| `0x01`  | `GET_INFO`                  | Chip ID, X.509 cert store (4-cert blob, 768B) |
+| `0x02`  | `HANDSHAKE`                 | X25519 + SHA-256 + AES-GCM session setup       |
+| `0x04`  | `ENCRYPTED_CMD`             | L3 payload wrapped in AES-GCM                  |
+| `0x08`  | `ENCRYPTED_SESSION_ABT`     | Tear down the L3 session                       |
+| `0x10`  | `RESEND`                    | Acked (libtropic main flow does not exercise)  |
+| `0x20`  | `SLEEP`                     | Aborts session, acks                           |
+| `0xB3`  | `STARTUP`                   | Aborts session, acks                           |
+| `0xAA`  | `GET_RESPONSE`              | Drain a staged response                        |
+
+L3 (encrypted) crypto layer covers:
+
+- **ECC P-256**: keypair generation, ECDSA sign, public-key export.
+- **Ed25519**: sign/verify with `default_ed25519_*` fixtures in
+  R-memory slots 2 (pub) and 3 (priv).
+- **X25519**: static keypair (`STPRIV`/`STPUB`) and host-side ECDH for
+  the handshake.
+- **AES-GCM**: session encryption for L3.
+- **SHA-256 + HMAC**: HKDF as used by libtropic's session derivation.
+
+### Default provisioning
+
+A freshly initialised TROPIC01 device is set up so an unmodified
+libtropic / wolfSSL host client can authenticate against it with no
+extra setup:
+
+| Slot                                       | Content                                                       |
+|--------------------------------------------|---------------------------------------------------------------|
+| Chip ID                                    | 12 random bytes                                               |
+| `STPRIV` / `STPUB`                         | X25519 static keypair (random)                                |
+| X.509 cert store (slot index 0)            | DER blob embedding `STPUB` at the libtropic-expected offset   |
+| Pairing slot 0                             | `sh0pub_eng_sample` (the libtropic engineering-sample host pubkey) |
+| R-mem slot 0                               | 32 B AES key fixture                                          |
+| R-mem slot 1                               | 32 B AES IV fixture                                           |
+| R-mem slot 2                               | Ed25519 public key (derived)                                  |
+| R-mem slot 3                               | Ed25519 private key (deterministic fixture)                   |
+| ECC slot 1                                 | Empty (wolfSSL's keygen test populates on demand)             |
+
+The matching host pairing private key is exported as
+`DEFAULT_HOST_PAIRING_PRIV` from the simulator (and equals
+`sh0priv_eng_sample` from libtropic's default-keys table); the wolfSSL
+test app feeds it via `Tropic01_SetPairingKeys`.
+
+### NV format
+
+When `file=PATH` is given, the entire `Device` struct (chip ID, X25519
+keypair, cert store, pairing slots, ECC slots, R-memory slots) is
+serialised to JSON pretty-printed via `serde_json`. The file is
+rewritten on every L2 request that mutates state.
+
+### Limitations
+
+- L3 secure-channel covers the libtropic main flow; less-common helper
+  commands return `UNKNOWN_ERR` rather than full responses.
+- The chip never enters `ALARM` or `STARTUP` chip-status modes — the
+  poll byte is always `READY`. Firmware that depends on those transient
+  modes (e.g. for fault testing) will see a happy chip.
+- `RESEND` is acknowledged but does not replay the prior response;
+  libtropic's main flow does not exercise it.
 
 ---
 

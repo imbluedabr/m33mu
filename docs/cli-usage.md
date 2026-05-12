@@ -100,6 +100,12 @@ under `third_party/wolfssl-simulators/`.
   STMicro STSAFE-A120 secure element over I2C. Default address `0x20`.
   Optional `file=` path enables NV persistence.
 
+- `--tropic01:SPIx:cs=GPIONAME[:file=<path>]`  
+  Tropic Square TROPIC01 secure element over SPI (libtropic L1/L2/L3
+  protocol: REQ_ID framing, X25519 handshake, AES-GCM encrypted channel).
+  Chip-select is a GPIO (e.g. `PA4`). Optional `file=` path is a JSON
+  NV file.
+
 Only one Ethernet backend can be selected at a time.
 
 ## TrustZone / Memory / Flash Options

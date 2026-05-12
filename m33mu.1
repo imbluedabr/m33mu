@@ -377,6 +377,23 @@ The device answers at the 7\-bit I2C address specified by
 (default
 .BR 0x20 ).
 The optional backing file is used for NV storage persistence.
+.TP
+.BR --tropic01:SPIx:cs=GPIONAME[:file=PATH]
+Attach a Tropic Square TROPIC01 secure element simulator to the selected SPI bus.
+Requires Rust plugin support (cargo must be available at build time).
+
+The simulator implements the libtropic L1 SPI framing
+(REQ_ID / REQ_LEN / DATA / CRC with the
+.B 0xAA
+poll-for-response opcode), the L2 router (GET_INFO, HANDSHAKE, ENCRYPTED_CMD,
+SLEEP, STARTUP), and the L3 encrypted-channel handshake using X25519 +
+AES\-GCM. Crypto primitives covered by the L3 layer include ECC P\-256,
+Ed25519, X25519 ECDH, AES\-GCM, SHA\-256, and HMAC.
+
+Chip-select is driven by the GPIO named
+.B GPIONAME
+(e.g.\& PA4). The optional backing file is a JSON-formatted persistence file
+(chip ID, X25519 static keypair, pairing slots, R-memory fixtures).
 .SH ENVIRONMENT
 .TP
 .B CAPSTONE_PC

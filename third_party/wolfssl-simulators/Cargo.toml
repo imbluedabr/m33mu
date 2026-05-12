@@ -3,5 +3,6 @@ members = [
     "atecc608-sim",
     "se050-sim",
     "stsafe-a120-sim",
+    "tropic01-sim",
 ]
 resolver = "2"

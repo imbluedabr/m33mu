@@ -48,6 +48,8 @@ struct aes_state {
     mm_u32 regs[AES_SIZE / 4];
     mm_u32 key_words[8];
     mm_u32 key_written;
+    mm_u8 key_bytes[32];
+    mm_u32 key_len_bytes;
     mm_u32 iv_words[4];
     mm_u8 in_block[16];
     mm_u32 in_raw[4];
@@ -57,6 +59,10 @@ struct aes_state {
     mm_u8 out_word;
     mm_bool out_ready;
     mm_bool key_valid;
+    mm_u8 saes_keysel;
+    mm_bool saes_keyprot;
+    mm_bool saes_hidden_key;
+    mm_bool saes_key_owner_secure;
     mm_bool tag_ready;
     mm_u32 npblb;
     mm_u32 algo_mode;

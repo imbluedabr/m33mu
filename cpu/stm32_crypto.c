@@ -37,8 +37,11 @@
 #define AES_CR_DMAOUTEN (1u << 12)
 #define AES_CR_CHMOD2   (1u << 16)
 #define AES_CR_KEYSIZE  (1u << 18)
+#define AES_CR_KEYPROT  (1u << 19)
 #define AES_CR_GCMPH_SHIFT 13u
 #define AES_CR_NPBLB_SHIFT 20u
+#define AES_CR_KEYSEL_SHIFT 28u
+#define AES_CR_KEYSEL_MASK (0x7u << AES_CR_KEYSEL_SHIFT)
 #define AES_CR_IPRST    (1u << 31)
 
 #define AES_SR_CCF      (1u << 0)
@@ -74,6 +77,214 @@
 #define HASH_SR_NBWP_SHIFT 9u
 #define HASH_SR_DINNE (1u << 15)
 #define HASH_SR_NBWE_SHIFT 16u
+
+#define SAES_KEYSEL_SOFTWARE 0x0u
+#define SAES_KEYSEL_DHUK     0x1u
+#define SAES_KEYSEL_SBK      0x2u
+#define SAES_KEYSEL_DHUK_XOR_SBK 0x4u
+
+struct saes_key_config {
+    mm_bool puf_seed_set;
+    mm_u64 puf_seed;
+    mm_u8 sbkload_key[32];
+    mm_u32 sbkload_key_len;
+};
+
+static struct saes_key_config g_saes_key_config;
+
+static mm_u32 aes_key_len_from_cr(mm_u32 cr)
+{
+    return (cr & AES_CR_KEYSIZE) ? 32u : 16u;
+}
+
+#ifndef M33MU_HAS_WOLFSSL
+static mm_u64 saes_splitmix64_next(mm_u64 *state)
+{
+    mm_u64 z;
+    *state += 0x9e3779b97f4a7c15ull;
+    z = *state;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    return z ^ (z >> 31);
+}
+#endif
+
+static void saes_hash32(mm_u8 out[32], const mm_u8 *data, mm_u32 len,
+                        const char *label)
+{
+#ifdef M33MU_HAS_WOLFSSL
+    wc_Sha256 sha;
+    wc_InitSha256(&sha);
+    if (label != NULL) {
+        wc_Sha256Update(&sha, (const mm_u8 *)label, (word32)strlen(label));
+    }
+    if (data != NULL && len != 0u) {
+        wc_Sha256Update(&sha, data, (word32)len);
+    }
+    wc_Sha256Final(&sha, out);
+#else
+    mm_u64 state = 0x243f6a8885a308d3ull;
+    mm_u32 i;
+    if (label != NULL) {
+        const unsigned char *p = (const unsigned char *)label;
+        while (*p != '\0') {
+            state ^= (mm_u64)(*p++);
+            state = saes_splitmix64_next(&state);
+        }
+    }
+    for (i = 0u; i < len; ++i) {
+        state ^= (mm_u64)data[i] << ((i & 7u) * 8u);
+        state = saes_splitmix64_next(&state);
+    }
+    for (i = 0u; i < 4u; ++i) {
+        mm_u64 v = saes_splitmix64_next(&state);
+        out[i * 8u] = (mm_u8)(v >> 56);
+        out[i * 8u + 1u] = (mm_u8)(v >> 48);
+        out[i * 8u + 2u] = (mm_u8)(v >> 40);
+        out[i * 8u + 3u] = (mm_u8)(v >> 32);
+        out[i * 8u + 4u] = (mm_u8)(v >> 24);
+        out[i * 8u + 5u] = (mm_u8)(v >> 16);
+        out[i * 8u + 6u] = (mm_u8)(v >> 8);
+        out[i * 8u + 7u] = (mm_u8)v;
+    }
+#endif
+}
+
+static void saes_derive_huk(mm_u8 out[32])
+{
+    mm_u8 seed_buf[8];
+    mm_u32 i;
+    for (i = 0u; i < 8u; ++i) {
+        seed_buf[i] = (mm_u8)((g_saes_key_config.puf_seed >> (56u - (i * 8u))) & 0xffu);
+    }
+    saes_hash32(out, seed_buf, sizeof(seed_buf), "m33mu:stm32:saes:huk:v1");
+}
+
+static void saes_derive_dhuk(mm_u8 out[32])
+{
+    mm_u8 buf[64];
+    mm_u8 huk[32];
+    static const char dhuk_ctx[] = "m33mu:stm32:saes:dhuk:v1";
+    saes_derive_huk(huk);
+    memcpy(buf, huk, sizeof(huk));
+    memcpy(buf + sizeof(huk), dhuk_ctx, sizeof(dhuk_ctx) - 1u);
+    saes_hash32(out, buf, sizeof(huk) + (sizeof(dhuk_ctx) - 1u), NULL);
+}
+
+static void saes_expand_sbk(mm_u8 out[32])
+{
+    if (g_saes_key_config.sbkload_key_len == 32u) {
+        memcpy(out, g_saes_key_config.sbkload_key, 32u);
+        return;
+    }
+    saes_hash32(out, g_saes_key_config.sbkload_key,
+                g_saes_key_config.sbkload_key_len,
+                "m33mu:stm32:saes:sbkload:v1");
+}
+
+static void aes_sync_key_bytes_from_words(struct aes_state *a, mm_u32 key_len)
+{
+    mm_u32 i;
+    mm_u32 words = key_len / 4u;
+    a->key_len_bytes = key_len;
+    memset(a->key_bytes, 0, sizeof(a->key_bytes));
+    for (i = 0u; i < words; ++i) {
+        mm_u32 w = a->key_words[words - 1u - i];
+        a->key_bytes[i * 4u] = (mm_u8)((w >> 24) & 0xffu);
+        a->key_bytes[i * 4u + 1u] = (mm_u8)((w >> 16) & 0xffu);
+        a->key_bytes[i * 4u + 2u] = (mm_u8)((w >> 8) & 0xffu);
+        a->key_bytes[i * 4u + 3u] = (mm_u8)(w & 0xffu);
+    }
+}
+
+static void aes_update_software_key_valid(struct aes_state *a, mm_u32 key_len)
+{
+    mm_u32 words = key_len / 4u;
+    mm_u32 mask = (words >= 8u) ? 0xFFu : ((1u << words) - 1u);
+    a->key_valid = ((a->key_written & mask) == mask) ? MM_TRUE : MM_FALSE;
+    if (a->key_valid) {
+        aes_sync_key_bytes_from_words(a, key_len);
+    } else {
+        a->key_len_bytes = 0u;
+        memset(a->key_bytes, 0, sizeof(a->key_bytes));
+    }
+}
+
+static mm_bool saes_key_is_hidden(mm_u8 keysel)
+{
+    return keysel != SAES_KEYSEL_SOFTWARE;
+}
+
+static void saes_refresh_selected_key(struct aes_ctx *ctx, struct aes_state *a)
+{
+    mm_u32 key_len = aes_key_len_from_cr(a->regs[AES_CR / 4u]);
+    mm_u8 dhuk[32];
+    mm_u8 sbk[32];
+    memset(a->key_bytes, 0, sizeof(a->key_bytes));
+    a->key_len_bytes = key_len;
+    a->saes_hidden_key = saes_key_is_hidden(a->saes_keysel);
+    if (!a->saes_hidden_key) {
+        aes_update_software_key_valid(a, key_len);
+        if (a->key_valid && a->saes_keyprot) {
+            a->saes_key_owner_secure = ctx->secure_alias;
+        }
+        return;
+    }
+    a->key_valid = MM_FALSE;
+    switch (a->saes_keysel) {
+    case SAES_KEYSEL_DHUK:
+        if (!g_saes_key_config.puf_seed_set) return;
+        saes_derive_dhuk(dhuk);
+        memcpy(a->key_bytes, dhuk, key_len);
+        a->key_valid = MM_TRUE;
+        break;
+    case SAES_KEYSEL_SBK:
+        if (g_saes_key_config.sbkload_key_len == 0u) return;
+        saes_expand_sbk(sbk);
+        memcpy(a->key_bytes, sbk, key_len);
+        a->key_valid = MM_TRUE;
+        break;
+    case SAES_KEYSEL_DHUK_XOR_SBK:
+        if (!g_saes_key_config.puf_seed_set ||
+            g_saes_key_config.sbkload_key_len == 0u) return;
+        saes_derive_dhuk(dhuk);
+        saes_expand_sbk(sbk);
+        {
+            mm_u32 i;
+            for (i = 0u; i < key_len; ++i) {
+                a->key_bytes[i] = dhuk[i] ^ sbk[i];
+            }
+        }
+        a->key_valid = MM_TRUE;
+        break;
+    default:
+        return;
+    }
+    if (a->key_valid && a->saes_keyprot) {
+        a->saes_key_owner_secure = ctx->secure_alias;
+    }
+}
+
+static mm_bool saes_access_denied(const struct aes_ctx *ctx, const struct aes_state *a)
+{
+    if (!ctx->is_saes || !a->saes_keyprot || !a->key_valid) {
+        return MM_FALSE;
+    }
+    return (ctx->secure_alias != a->saes_key_owner_secure) ? MM_TRUE : MM_FALSE;
+}
+
+void mm_stm32_saes_set_key_material(mm_bool puf_seed_set, mm_u64 puf_seed,
+                                    const mm_u8 *sbkload_key,
+                                    mm_u32 sbkload_key_len)
+{
+    memset(&g_saes_key_config, 0, sizeof(g_saes_key_config));
+    g_saes_key_config.puf_seed_set = puf_seed_set;
+    g_saes_key_config.puf_seed = puf_seed;
+    if (sbkload_key != NULL && sbkload_key_len <= sizeof(g_saes_key_config.sbkload_key)) {
+        memcpy(g_saes_key_config.sbkload_key, sbkload_key, sbkload_key_len);
+        g_saes_key_config.sbkload_key_len = sbkload_key_len;
+    }
+}
 
 static mm_u32 bitrev32(mm_u32 v)
 {
@@ -614,6 +825,17 @@ mm_bool aes_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_o
         memcpy(value_out, &val, size_bytes);
         return MM_TRUE;
     }
+    if (saes_access_denied(ctx, a)) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
+    if (ctx->is_saes &&
+        (offset == AES_KEYR0 || offset == AES_KEYR1 || offset == AES_KEYR2 || offset == AES_KEYR3 ||
+         offset == AES_KEYR4 || offset == AES_KEYR5 || offset == AES_KEYR6 || offset == AES_KEYR7) &&
+        a->saes_hidden_key) {
+        *value_out = 0u;
+        return MM_TRUE;
+    }
     if (offset == AES_DOUTR) {
         mm_u32 datatype = (a->regs[AES_CR / 4u] >> AES_CR_DATATYPE_SHIFT) & 0x3u;
         if (!a->out_ready || a->out_word >= 4u) {
@@ -639,14 +861,9 @@ mm_bool aes_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *value_o
 #ifdef M33MU_HAS_WOLFSSL
 static void aes_build_key(struct aes_state *a, mm_u8 *key_out, mm_u32 key_len)
 {
-    mm_u32 i;
-    mm_u32 words = key_len / 4u;
-    for (i = 0u; i < words; ++i) {
-        mm_u32 w = a->key_words[words - 1u - i];
-        key_out[i * 4u] = (mm_u8)((w >> 24) & 0xffu);
-        key_out[i * 4u + 1u] = (mm_u8)((w >> 16) & 0xffu);
-        key_out[i * 4u + 2u] = (mm_u8)((w >> 8) & 0xffu);
-        key_out[i * 4u + 3u] = (mm_u8)(w & 0xffu);
+    memset(key_out, 0, key_len);
+    if (a->key_len_bytes >= key_len) {
+        memcpy(key_out, a->key_bytes, key_len);
     }
 }
 
@@ -1136,6 +1353,10 @@ mm_bool aes_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
         ctx->requires_secure(ctx->tzsc, ctx->is_saes)) {
         return MM_TRUE;
     }
+    if (offset != AES_ICR && saes_access_denied(ctx, a)) {
+        a->regs[AES_SR / 4u] |= AES_SR_WRERR;
+        return MM_TRUE;
+    }
     if (offset == AES_CR) {
         mm_u32 prev = a->regs[AES_CR / 4u];
         mm_u32 mode = (value >> AES_CR_MODE_SHIFT) & 0x3u;
@@ -1144,6 +1365,13 @@ mm_bool aes_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
         }
         a->regs[AES_CR / 4u] = value;
         a->npblb = (value >> AES_CR_NPBLB_SHIFT) & 0xFu;
+        if (ctx->is_saes) {
+            a->saes_keysel = (mm_u8)((value & AES_CR_KEYSEL_MASK) >> AES_CR_KEYSEL_SHIFT);
+            a->saes_keyprot = ((value & AES_CR_KEYPROT) != 0u) ? MM_TRUE : MM_FALSE;
+            saes_refresh_selected_key(ctx, a);
+            a->regs[AES_SR / 4u] = (a->regs[AES_SR / 4u] & ~AES_SR_KEYVALID) |
+                                   (a->key_valid ? AES_SR_KEYVALID : 0u);
+        }
         if (((prev ^ value) & (AES_CR_CHMOD2 | AES_CR_CHMOD_MASK)) != 0u) {
             aes_reset_auth_state(a);
         }
@@ -1164,10 +1392,12 @@ mm_bool aes_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
             }
         }
         if (((prev ^ value) & AES_CR_KEYSIZE) != 0u) {
-            mm_u32 key_len = (value & AES_CR_KEYSIZE) ? 32u : 16u;
-            mm_u32 words = key_len / 4u;
-            mm_u32 mask = (words >= 8u) ? 0xFFu : ((1u << words) - 1u);
-            a->key_valid = ((a->key_written & mask) == mask) ? MM_TRUE : MM_FALSE;
+            mm_u32 key_len = aes_key_len_from_cr(value);
+            if (ctx->is_saes) {
+                saes_refresh_selected_key(ctx, a);
+            } else {
+                aes_update_software_key_valid(a, key_len);
+            }
             a->regs[AES_SR / 4u] = (a->regs[AES_SR / 4u] & ~AES_SR_KEYVALID) |
                                    (a->key_valid ? AES_SR_KEYVALID : 0u);
         }
@@ -1176,9 +1406,12 @@ mm_bool aes_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
     if (offset == AES_KEYR0 || offset == AES_KEYR1 || offset == AES_KEYR2 || offset == AES_KEYR3 ||
         offset == AES_KEYR4 || offset == AES_KEYR5 || offset == AES_KEYR6 || offset == AES_KEYR7) {
         mm_u32 idx;
-        mm_u32 key_len = (a->regs[AES_CR / 4u] & AES_CR_KEYSIZE) ? 32u : 16u;
+        mm_u32 key_len = aes_key_len_from_cr(a->regs[AES_CR / 4u]);
         mm_u32 words = key_len / 4u;
-        mm_u32 mask;
+        if (ctx->is_saes && a->saes_hidden_key) {
+            a->regs[AES_SR / 4u] |= AES_SR_WRERR;
+            return MM_TRUE;
+        }
         if (offset >= AES_KEYR4) {
             idx = 4u + (offset - AES_KEYR4) / 4u;
         } else {
@@ -1186,12 +1419,15 @@ mm_bool aes_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 value)
         }
         if (idx < 8u) {
             a->key_words[idx] = value;
+            a->regs[offset / 4u] = value;
         }
         if (idx < words) {
             a->key_written |= (1u << idx);
         }
-        mask = (words >= 8u) ? 0xFFu : ((1u << words) - 1u);
-        a->key_valid = ((a->key_written & mask) == mask) ? MM_TRUE : MM_FALSE;
+        aes_update_software_key_valid(a, key_len);
+        if (ctx->is_saes && a->key_valid && a->saes_keyprot) {
+            a->saes_key_owner_secure = ctx->secure_alias;
+        }
         a->regs[AES_SR / 4u] = (a->regs[AES_SR / 4u] & ~AES_SR_KEYVALID) |
                                (a->key_valid ? AES_SR_KEYVALID : 0u);
         return MM_TRUE;
