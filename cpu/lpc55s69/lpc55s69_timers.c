@@ -273,6 +273,8 @@ void mm_lpc55s69_timers_init(struct mmio_bus *bus, struct mm_nvic *nvic)
 {
     struct mmio_region reg;
     g_mrt_nvic = nvic;
+    /* Wire NVIC into HashCrypt and other IRQ-capable peripherals */
+    mm_lpc55s69_set_nvic(nvic);
     memset(mrt_channels, 0, sizeof(mrt_channels));
     mrt_irqflag = 0u;
 

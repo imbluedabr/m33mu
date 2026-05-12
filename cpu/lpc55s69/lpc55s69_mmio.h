@@ -12,6 +12,7 @@ struct mmio_bus;
 struct mm_memmap;
 struct mm_flash_persist;
 struct mm_nvic;
+struct mm_lpc55_hashcrypt;
 
 mm_bool mm_lpc55s69_register_mmio(struct mmio_bus *bus);
 void mm_lpc55s69_flash_bind(struct mm_memmap *map,
@@ -38,5 +39,11 @@ void mm_lpc55s69_flash_mark_programmed(mm_u32 offset, mm_u32 len);
  * bit:           bit number within that register
  */
 mm_bool mm_lpc55s69_syscon_periph_active(mm_u32 ahbclk_offset, mm_u32 bit);
+
+/*
+ * Wire the NVIC pointer into sub-peripherals that can raise IRQs
+ * (notably HashCrypt).  Called by mm_lpc55s69_timers_init.
+ */
+void mm_lpc55s69_set_nvic(struct mm_nvic *nvic);
 
 #endif /* M33MU_LPC55S69_MMIO_H */
