@@ -284,6 +284,7 @@ static struct mm_iotsafe_file_slot *find_file_slot(struct mm_iotsafe_modem *mode
     return free_slot;
 }
 
+#ifdef M33MU_HAS_WOLFSSL
 static mm_bool file_slot_store(struct mm_iotsafe_modem *modem, mm_u16 id,
                                const mm_u8 *data, size_t len)
 {
@@ -299,6 +300,7 @@ static mm_bool file_slot_store(struct mm_iotsafe_modem *modem, mm_u16 id,
     slot->len = (mm_u16)len;
     return MM_TRUE;
 }
+#endif
 
 #ifdef M33MU_HAS_WOLFSSL
 static mm_bool ensure_rng(struct mm_iotsafe_modem *modem)
@@ -354,22 +356,6 @@ static mm_bool key_slot_store_from_ecc(struct mm_iotsafe_key_slot *slot,
         slot->has_private = 1u;
     }
     return MM_TRUE;
-}
-
-static void build_pubkey_tlv_from_slot(const struct mm_iotsafe_key_slot *slot,
-                                       mm_u8 *out, size_t *out_len)
-{
-    size_t idx = 0;
-    out[idx++] = IOTSAFE_TAG_ECC_KEY_FIELD;
-    out[idx++] = 0x45u;
-    out[idx++] = IOTSAFE_TAG_ECC_KEY_TYPE;
-    out[idx++] = 0x43u;
-    out[idx++] = IOTSAFE_TAG_ECC_KEY_XY;
-    out[idx++] = 0x41u;
-    out[idx++] = 0x04u;
-    memcpy(&out[idx], &slot->pub[1], MM_IOTSAFE_ECC_RAW_PUB_SZ);
-    idx += MM_IOTSAFE_ECC_RAW_PUB_SZ;
-    *out_len = idx;
 }
 
 static int hash_type_from_iotsafe(mm_u16 hash_algo)
@@ -485,10 +471,12 @@ static const mm_u8 *find_tlv_value(const mm_u8 *buf, size_t len, mm_u8 tag,
     return 0;
 }
 
+#ifdef M33MU_HAS_WOLFSSL
 static mm_u16 read_be16(const mm_u8 *p)
 {
     return (mm_u16)(((mm_u16)p[0] << 8) | (mm_u16)p[1]);
 }
+#endif
 
 static mm_u16 read_slot_id16(const mm_u8 *p)
 {
@@ -500,6 +488,22 @@ static void append_status_9000(char *hex_out, size_t *hex_len)
     memcpy(hex_out + *hex_len, "9000", 4u);
     *hex_len += 4u;
     hex_out[*hex_len] = '\0';
+}
+
+static void build_pubkey_tlv_from_slot(const struct mm_iotsafe_key_slot *slot,
+                                       mm_u8 *out, size_t *out_len)
+{
+    size_t idx = 0;
+    out[idx++] = IOTSAFE_TAG_ECC_KEY_FIELD;
+    out[idx++] = 0x45u;
+    out[idx++] = IOTSAFE_TAG_ECC_KEY_TYPE;
+    out[idx++] = 0x43u;
+    out[idx++] = IOTSAFE_TAG_ECC_KEY_XY;
+    out[idx++] = 0x41u;
+    out[idx++] = 0x04u;
+    memcpy(&out[idx], &slot->pub[1], MM_IOTSAFE_ECC_RAW_PUB_SZ);
+    idx += MM_IOTSAFE_ECC_RAW_PUB_SZ;
+    *out_len = idx;
 }
 
 static int process_apdu(struct mm_iotsafe_modem *modem,
@@ -577,7 +581,7 @@ static int process_apdu(struct mm_iotsafe_modem *modem,
         size_t id_len = 0;
         const mm_u8 *id_val;
         struct mm_iotsafe_file_slot *file;
-        mm_u8 resp[6];
+        mm_u8 resp[8];
         if (p1 != IOTSAFE_GETDATA_FILE) {
             return -1;
         }
@@ -589,16 +593,17 @@ static int process_apdu(struct mm_iotsafe_modem *modem,
         if (file == 0) {
             return -1;
         }
-        /* wolfSSL's GetCert parser skips the first two response bytes before
-         * scanning for the file-size TLV, so keep the size descriptor at that
-         * offset instead of echoing the file-id TLV back.
-         */
-        resp[0] = 0x00u;
-        resp[1] = 0x00u;
-        resp[2] = 0x20u;
-        resp[3] = 0x02u;
-        resp[4] = (mm_u8)((file->len >> 8) & 0xFFu);
-        resp[5] = (mm_u8)(file->len & 0xFFu);
+        /* IoTSAFE GETDATA(C3): file-id TLV (echoed wire bytes) followed by
+         * the file-size TLV (tag 0x20). wolfSSL's GetCert parser walks the
+         * TLV stream to find the size descriptor. */
+        resp[0] = IOTSAFE_TAG_FILE_ID;
+        resp[1] = 0x02u;
+        resp[2] = id_val[0];
+        resp[3] = id_val[1];
+        resp[4] = 0x20u;
+        resp[5] = 0x02u;
+        resp[6] = (mm_u8)((file->len >> 8) & 0xFFu);
+        resp[7] = (mm_u8)(file->len & 0xFFu);
         bytes_to_hex(resp, sizeof(resp), hex_out);
         *hex_len = sizeof(resp) * 2u;
         append_status_9000(hex_out, hex_len);

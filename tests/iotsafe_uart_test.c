@@ -91,9 +91,14 @@ int main(void)
     expect_contains(reply, "34454943864104", "read key public key tlv");
     expect_contains(reply, "9000", "read key status");
 
-    send_text(&io, "AT+CSIM=18,\"81CBC3000483020002\"\r\n");
+    /* IoT SAFE wire encoding mirrors wolfSSL's `(byte*)&id_var` convention:
+     * host-native byte order. On all current m33mu targets (Cortex-M33 LE
+     * and the host x86_64 LE) that is little-endian, so file id 0x0002 is
+     * sent as wire bytes `02 00`. The simulator echoes those wire bytes
+     * back verbatim in the file-id TLV. */
+    send_text(&io, "AT+CSIM=18,\"81CBC3000483020200\"\r\n");
     read_reply(&io, reply, sizeof(reply));
-    expect_contains(reply, "83020002", "file id tlv");
+    expect_contains(reply, "83020200", "file id tlv");
     expect_contains(reply, "2002", "file size tlv");
     expect_contains(reply, "9000", "getdata status");
 
