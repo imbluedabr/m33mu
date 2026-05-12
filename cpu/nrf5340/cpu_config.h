@@ -30,4 +30,7 @@
 
 #define NRF5340_FLAGS MM_TARGET_FLAG_FPU
 
+/* IRQ numbers (matches nrf5340_application.h) */
+#define CRYPTOCELL_IRQn 68
+
 #endif /* M33MU_CPU_NRF5340_CONFIG_H */

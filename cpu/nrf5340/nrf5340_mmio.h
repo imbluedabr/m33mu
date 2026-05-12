@@ -18,5 +18,8 @@ mm_bool mm_nrf5340_clock_hf_running(void);
 mm_bool mm_nrf5340_clock_lf_running(void);
 void mm_nrf5340_rtc_tick(mm_u64 cycles);
 void mm_nrf5340_mmio_reset(void);
+/* Wire NVIC into peripherals that raise IRQs (e.g. CryptoCell-312).
+ * Called from mm_nrf5340_timers_init after NVIC is available. */
+void mm_nrf5340_set_nvic(struct mm_nvic *nvic);
 
 #endif /* M33MU_NRF5340_MMIO_H */

@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include "nrf5340/nrf5340_mmio.h"
 #include "nrf5340/nrf5340_wdt.h"
+#include "nrf5340/nrf5340_cryptocell.h"
 #include "m33mu/memmap.h"
 #include "m33mu/flash_persist.h"
 #include "m33mu/gpio.h"
@@ -129,6 +130,12 @@ extern void mm_system_request_reset(void);
 #define SPU_BASE_S  0x50003000u
 #define SPU_SIZE    0x1000u
 
+/* CryptoCell-312: secure-only, no NS alias */
+#define CC312_CTRL_BASE_S   0x50844000u
+#define CC312_CTRL_SIZE     0x1000u
+#define CC312_ENGINE_BASE_S 0x50845000u
+#define CC312_ENGINE_SIZE   0x2000u
+
 struct clock_state {
     mm_u32 regs[CLOCK_SIZE / 4];
     mm_bool hfclk_on;
@@ -190,6 +197,7 @@ static struct gpio_bank gpio_banks[2];
 static struct nvmc_state nvmc_state;
 static struct rng_state rng_state;
 static struct spu_state spu_state;
+static struct mm_nrf5340_cryptocell *cc312_state;
 
 static mm_bool qspi_trace_enabled(void)
 {
@@ -1072,6 +1080,7 @@ mm_bool mm_nrf5340_register_mmio(struct mmio_bus *bus)
 {
     struct mmio_region reg;
     if (bus == 0) return MM_FALSE;
+    memset(&reg, 0, sizeof(reg));
 
     memset(&clock_state, 0, sizeof(clock_state));
     clock_state.hfclk_on = MM_TRUE;
@@ -1154,14 +1163,14 @@ mm_bool mm_nrf5340_register_mmio(struct mmio_bus *bus)
     reg.base = NVMC_BASE_S;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
-    reg.base = RNG_BASE_NS;
-    reg.size = RNG_SIZE;
-    reg.opaque = &rng_state;
-    reg.read = rng_read;
-    reg.write = rng_write;
-    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
-    reg.base = RNG_BASE_S;
-    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+    /* Note: RNG_BASE_NS/S (0x40845000/0x50845000) is the CC-312 engine base.
+     * The real nRF5340 does not have a standalone RNG at this address —
+     * random generation is provided by CC_RNG inside the CryptoCell block.
+     * The CC-312 engine region registered below covers this address range.
+     * The rng_state and rng_read/write are retained for potential future
+     * use but are not registered as a separate MMIO region. */
+    (void)rng_read;
+    (void)rng_write;
 
     reg.base = SPU_BASE_S;
     reg.size = SPU_SIZE;
@@ -1171,6 +1180,29 @@ mm_bool mm_nrf5340_register_mmio(struct mmio_bus *bus)
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     if (!mm_nrf5340_wdt_register(bus)) return MM_FALSE;
+
+    /* CryptoCell-312: secure-only regions */
+    if (cc312_state == NULL) {
+        cc312_state = mm_nrf5340_cryptocell_new();
+        if (cc312_state == NULL) return MM_FALSE;
+    }
+    mm_nrf5340_cryptocell_reset(cc312_state);
+
+    reg.base  = CC312_CTRL_BASE_S;
+    reg.size  = CC312_CTRL_SIZE;
+    reg.opaque = cc312_state;
+    reg.read  = mm_nrf5340_cryptocell_ctrl_read;
+    reg.write = mm_nrf5340_cryptocell_ctrl_write;
+    reg.name  = "cc312_ctrl";
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
+
+    reg.base  = CC312_ENGINE_BASE_S;
+    reg.size  = CC312_ENGINE_SIZE;
+    reg.opaque = cc312_state;
+    reg.read  = mm_nrf5340_cryptocell_read;
+    reg.write = mm_nrf5340_cryptocell_write;
+    reg.name  = "cc312_engine";
+    if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     mm_gpio_bank_set_reader(nrf_gpio_bank_read, 0);
     mm_gpio_bank_set_moder_reader(nrf_gpio_bank_read_moder, 0);
@@ -1194,6 +1226,18 @@ void mm_nrf5340_flash_bind(struct mm_memmap *map,
     nvmc_state.base_s = map->flash_base_s;
     nvmc_state.base_ns = map->flash_base_ns;
     mm_memmap_set_flash_writer(map, nvmc_write_cb, &nvmc_state);
+
+    /* Wire memmap into CryptoCell-312 so DMA can read/write target RAM */
+    if (cc312_state != 0) {
+        mm_nrf5340_cryptocell_set_memmap(cc312_state, map);
+    }
+}
+
+void mm_nrf5340_set_nvic(struct mm_nvic *nvic)
+{
+    if (cc312_state != 0) {
+        mm_nrf5340_cryptocell_set_nvic(cc312_state, nvic);
+    }
 }
 
 mm_u64 mm_nrf5340_cpu_hz(void)
@@ -1228,4 +1272,8 @@ void mm_nrf5340_mmio_reset(void)
     mm_gpio_set_bank_info_reader(nrf5340_gpio_bank_info, 0);
     mm_rcc_set_clock_list_reader(nrf5340_rcc_clock_list_line, 0);
     mm_nrf5340_wdt_reset();
+
+    if (cc312_state != 0) {
+        mm_nrf5340_cryptocell_reset(cc312_state);
+    }
 }

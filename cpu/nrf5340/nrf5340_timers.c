@@ -16,6 +16,7 @@ void mm_nrf5340_timers_init(struct mmio_bus *bus, struct mm_nvic *nvic)
     static const int irqs[] = { 15, 16, 17 };
     if (bus == 0) return;
     mm_nrf5340_wdt_set_nvic(nvic);
+    mm_nrf5340_set_nvic(nvic);
     nrf_timers_register(&g_timers, bus, nvic, bases_ns, bases_s, irqs, 3u);
 }
 
