@@ -20,6 +20,14 @@ jobs:
         run: cmake -S . -B build
       - name: Build m33mu
         run: cmake --build build
+      - name: Fetch wolfSSL source tree for firmware build
+        # The firmware Makefile (tests/firmware/test-stm32h563-wolfssl-iotsafe)
+        # compiles wolfSSL .c sources directly with arm-none-eabi-gcc and
+        # expects a sibling checkout at WOLFSSL_ROOT=../../../../wolfssl.
+        # Match the host wolfssl version we link against (libwolfssl-dev:
+        # 5.9.1-stable on ubuntu-latest).
+        working-directory: ..
+        run: git clone --depth 1 --branch v5.9.1-stable https://github.com/wolfSSL/wolfssl.git
       - name: Build firmware
         run: cmake --build build --target firmware-build
       - name: Run STM32H5 firmware test (SPI peripherals selection)
