@@ -21,13 +21,17 @@ jobs:
       - name: Build m33mu
         run: cmake --build build
       - name: Fetch wolfSSL source tree for firmware build
-        # The firmware Makefile (tests/firmware/test-stm32h563-wolfssl-iotsafe)
-        # compiles wolfSSL .c sources directly with arm-none-eabi-gcc and
-        # expects a sibling checkout at WOLFSSL_ROOT=../../../../wolfssl.
-        # Match the host wolfssl version we link against (libwolfssl-dev:
-        # 5.9.1-stable on ubuntu-latest).
+        # The firmware Makefile (tests/firmware/test-stm32h563-wolfssl-iotsafe
+        # and test-stm32u585-wolfssl-pka) compiles wolfSSL .c sources directly
+        # with arm-none-eabi-gcc and expects a sibling checkout at
+        # WOLFSSL_ROOT=../../../../wolfssl.
+        # Track master rather than v5.9.1-stable to pick up post-5.9.1 SP-int
+        # bug fixes (notably c119a2193 "SP int: fixes from review by Claude"
+        # — fixes sp_mod_2d uninit-read and negation-loop OOB that triggered
+        # the sp_256_rshift1_9 MemFault on CI). Re-pin to a tagged release
+        # once one ships including these fixes.
         working-directory: ..
-        run: git clone --depth 1 --branch v5.9.1-stable https://github.com/wolfSSL/wolfssl.git
+        run: git clone --depth 1 --branch master https://github.com/wolfSSL/wolfssl.git
       - name: Build firmware
         run: cmake --build build --target firmware-build
       - name: Run STM32H5 firmware test (SPI peripherals selection)
