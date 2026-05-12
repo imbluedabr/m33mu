@@ -183,7 +183,7 @@ static int capstone_should_skip(mm_u32 insn, const char *mnemonic, const char *o
             return 1;
         }
     }
-    if (strcmp(mnemonic, "msr") == 0 || strcmp(mnemonic, "mrs") == 0) {
+    if (strncmp(mnemonic, "msr", 3) == 0 || strncmp(mnemonic, "mrs", 3) == 0) {
         size_t i;
         for (i = 0; i < (sizeof(msr_allowed) / sizeof(msr_allowed[0])); ++i) {
             if (strstr(op_str, msr_allowed[i]) != 0) {
@@ -301,6 +301,9 @@ static int capstone_should_skip(mm_u32 insn, const char *mnemonic, const char *o
     /* SSAT/USAT with PC: Capstone mismatch - ARM spec says UNPREDICTABLE
      * but Capstone decodes it. We correctly return UNDEFINED and discard these. */
     if (strcmp(mnemonic, "ssat") == 0 || strcmp(mnemonic, "usat") == 0) {
+        if (strstr(op_str, "#0,") != 0) {
+            return 1;  /* sat_imm is encoded as [1..32]; Capstone accepts 0 */
+        }
         if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
             return 1;  /* Capstone accepts, m33mu rejects (correct per ARM spec) */
         }

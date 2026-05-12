@@ -7,7 +7,7 @@ WOLFSSL_BUILD := build/wolfssl
 CFLAGS := -mcpu=cortex-m33 -mthumb -Os -ffreestanding -fdata-sections -ffunction-sections -g -ggdb
 CFLAGS += -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-sign-compare
 CFLAGS += -DWOLFSSL_USER_SETTINGS
-CFLAGS += -I$(WOLFSSL_ROOT) -I.
+CFLAGS += -I$(WOLFSSL_ROOT) -I. -I../../../include/m33mu
 
 LDFLAGS := -T target.ld -Wl,-gc-sections -Wl,-Map=app.map --specs=nosys.specs
 LDFLAGS += -mcpu=cortex-m33 -mthumb

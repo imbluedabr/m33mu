@@ -12,8 +12,7 @@
 
 #ifdef M33MU_HAS_WOLFSSL
 #include <wolfssl/options.h>
-#define USE_CERT_BUFFERS_256
-#include <wolfssl/certs_test.h>
+#include "m33mu/iotsafe_test_certs.h"
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/ecc.h>
 #include <wolfssl/wolfcrypt/hmac.h>

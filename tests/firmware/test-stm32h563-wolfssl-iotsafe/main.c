@@ -5,7 +5,7 @@
 
 #include <wolfssl/wolfcrypt/settings.h>
 #include <wolfssl/ssl.h>
-#include <wolfssl/certs_test.h>
+#include "iotsafe_test_certs.h"
 #include <wolfssl/wolfcrypt/ecc.h>
 #include <wolfssl/wolfcrypt/hash.h>
 #include <wolfssl/wolfcrypt/random.h>
