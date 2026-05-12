@@ -66,7 +66,7 @@ static void maybe_print_progress(mm_u64 tested, mm_u64 total, unsigned long hits
             total ? (100.0 * (double)tested / (double)total) : 0.0);
 }
 
-static int capstone_should_skip(const char *mnemonic, const char *op_str)
+static int capstone_should_skip(mm_u32 insn, const char *mnemonic, const char *op_str)
 {
     static const char *const msr_allowed[] = {
         "apsr", "iapsr", "eapsr", "xpsr",
@@ -205,6 +205,16 @@ static int capstone_should_skip(const char *mnemonic, const char *op_str)
     if (strcmp(mnemonic, "ubfx") == 0 || strcmp(mnemonic, "sbfx") == 0 ||
         strcmp(mnemonic, "bfi") == 0 || strcmp(mnemonic, "bfc") == 0) {
         if (strstr(op_str, "pc") != 0 || strstr(op_str, "PC") != 0) {
+            return 1;
+        }
+        /* ARMv7-M ARM A6.7.20/21/179/221: hw1 bit 10 (the "i" field slot)
+         * must be 0 for these bit-field ops -- the immediate they carry is
+         * entirely in hw2, so i has no encoded meaning. Capstone is lenient
+         * and disassembles the i=1 forms as the same instruction, but they
+         * are strictly UNDEFINED. m33mu correctly returns MM_OP_UNDEFINED
+         * on those; skip the cross-check. Note this test packs insn as
+         * (hw2 << 16) | hw1, so hw1[10] lives at insn[10]. */
+        if ((insn & (1u << 10)) != 0u) {
             return 1;
         }
     }
@@ -423,7 +433,7 @@ static int run_range(mm_u32 start, mm_u32 end)
             if (!cap_ok) {
                 continue;
             }
-            if (capstone_should_skip(mnemonic, op_str)) {
+            if (capstone_should_skip(insn, mnemonic, op_str)) {
                 continue;
             }
 
@@ -476,7 +486,7 @@ static int run_range(mm_u32 start, mm_u32 end)
             if (!cap_ok) {
                 continue;
             }
-            if (capstone_should_skip(mnemonic, op_str)) {
+            if (capstone_should_skip(insn, mnemonic, op_str)) {
                 continue;
             }
 
