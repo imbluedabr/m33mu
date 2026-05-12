@@ -30,6 +30,8 @@
 #include "m33mu/dsp_helpers.h"
 #include "rp2350/rp2350_mmio.h"
 #include "rp2350/rp2350_coproc.h"
+#include "lpc55s69/lpc55s69_mmio.h"
+#include "lpc55s69/lpc55s69_casper.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -805,6 +807,24 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                            cpu.xpsr = mm_xpsr_write_nzcvq(cpu.xpsr, 0u);
                                                        } else {
                                                            cpu.r[d.rd] = 0u;
+                                                       }
+                                                   }
+                                               } else if (coproc == 1u && mm_lpc55s69_casper_cp_active()) {
+                                                   /* CASPER CP=1 coprocessor — LPC55S69 only */
+                                                   struct mm_lpc55_casper *cas = mm_lpc55_casper_get_global();
+                                                   if (cas != NULL) {
+                                                       if (opcode == 0u) {
+                                                           /* MCR: write to CASPER register */
+                                                           (void)mm_lpc55_casper_cp_mcr(cas, op1, d.rn, d.rm, op2, cpu.r[d.rd]);
+                                                       } else {
+                                                           /* MRC: read from CASPER register */
+                                                           mm_u32 val = 0u;
+                                                           (void)mm_lpc55_casper_cp_mrc(cas, op1, d.rn, d.rm, op2, &val);
+                                                           if (d.rd == 15u) {
+                                                               cpu.xpsr = mm_xpsr_write_nzcvq(cpu.xpsr, val);
+                                                           } else {
+                                                               cpu.r[d.rd] = val;
+                                                           }
                                                        }
                                                    }
                                                } else {

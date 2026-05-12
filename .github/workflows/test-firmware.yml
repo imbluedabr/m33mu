@@ -88,3 +88,14 @@ jobs:
             --spiflash:SPI1:file=tests/firmware/test-stm32u585-otfdec/spi_flash.bin:size=4096:mmap=0x60000000:cs=PB0 \
             tests/firmware/test-stm32u585-otfdec/app.bin | tee /tmp/m33mu-otfdec.log
           grep -q "OTFDEC TEST SUCCESSFUL" /tmp/m33mu-otfdec.log
+      - name: Run LPC55S69 CASPER firmware test
+        run: |
+          set -euo pipefail
+          build/m33mu \
+            --cpu lpc55s69 \
+            --uart-stdout \
+            --expect-bkpt 0x42 \
+            --timeout 30 \
+            --quit-on-faults \
+            tests/firmware/test-lpc55s69-casper/app.bin | tee /tmp/m33mu-casper.log
+          grep -q "CASPER TEST SUCCESSFUL" /tmp/m33mu-casper.log

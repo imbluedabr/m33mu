@@ -43,6 +43,6 @@ static const struct mm_ram_region LPC55S69_RAM_REGIONS[] = {
 #define LPC55S69_TIMER_RESET    mm_lpc55s69_timers_reset
 #define LPC55S69_TIMER_TICK     mm_lpc55s69_timers_tick
 
-#define LPC55S69_FLAGS (MM_TARGET_FLAG_FPU)
+#define LPC55S69_FLAGS (MM_TARGET_FLAG_FPU | MM_TARGET_FLAG_CASPER_CP)
 
 #endif /* M33MU_CPU_LPC55S69_CONFIG_H */

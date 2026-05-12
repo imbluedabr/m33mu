@@ -42,8 +42,14 @@ mm_bool mm_lpc55s69_syscon_periph_active(mm_u32 ahbclk_offset, mm_u32 bit);
 
 /*
  * Wire the NVIC pointer into sub-peripherals that can raise IRQs
- * (notably HashCrypt).  Called by mm_lpc55s69_timers_init.
+ * (notably HashCrypt and CASPER).  Called by mm_lpc55s69_timers_init.
  */
 void mm_lpc55s69_set_nvic(struct mm_nvic *nvic);
+
+/*
+ * Returns MM_TRUE when the LPC55S69 CASPER CP=1 coprocessor hook is active.
+ * Used by execute.c to gate the CP=1 MCR/MRC dispatch.
+ */
+mm_bool mm_lpc55s69_casper_cp_active(void);
 
 #endif /* M33MU_LPC55S69_MMIO_H */

@@ -7,6 +7,7 @@
 #include "lpc55s69/lpc55s69_mmio.h"
 #include "lpc55s69/lpc55s69_romapi.h"
 #include "lpc55s69/lpc55s69_hashcrypt.h"
+#include "lpc55s69/lpc55s69_casper.h"
 #include "lpc55s69/cpu_config.h"
 #include "m33mu/memmap.h"
 #include "m33mu/mmio.h"
@@ -1004,9 +1005,12 @@ static struct mmio_region hashcrypt_ns_region;
 static struct mmio_region hashcrypt_s_region;
 
 /* -------------------------------------------------------------------------
- * CASPER  (0x400A5000) — RSA/ECC accelerator  (size 0x84)
+ * CASPER  (0x400A5000 NS, 0x500A5000 S) — RSA/ECC accelerator (size 0x84)
+ * Backed by mm_lpc55_casper; NVIC and memmap pointers wired at register time.
  * ------------------------------------------------------------------------- */
-DECL_STUB(casper, 0x84u);
+static struct mm_lpc55_casper casper_state;
+static struct mmio_region casper_ns_region;
+static struct mmio_region casper_s_region;
 
 /* -------------------------------------------------------------------------
  * POWERQUAD  (0x400A6000) — DSP/Math accelerator  (size 0x260)
@@ -1085,7 +1089,7 @@ void mm_lpc55s69_mmio_reset(void)
     memset(dbgmailbox_regs,  0, sizeof(dbgmailbox_regs));
     memset(adc0_regs,        0, sizeof(adc0_regs));
     /* hashcrypt reset handled by mm_lpc55_hashcrypt_reset() below */
-    memset(casper_regs,      0, sizeof(casper_regs));
+    /* casper reset handled by mm_lpc55_casper_reset() below */
     memset(powerquad_regs,   0, sizeof(powerquad_regs));
 
     /* WWDT non-zero resets */
@@ -1144,6 +1148,7 @@ void mm_lpc55s69_mmio_reset(void)
 
     mm_lpc55s69_romapi_reset();
     mm_lpc55_hashcrypt_reset(&hashcrypt_state);
+    mm_lpc55_casper_reset(&casper_state);
 }
 
 /*
@@ -1153,6 +1158,16 @@ void mm_lpc55s69_mmio_reset(void)
 void mm_lpc55s69_set_nvic(struct mm_nvic *nvic)
 {
     hashcrypt_state.nvic = nvic;
+    casper_state.nvic    = nvic;
+}
+
+mm_bool mm_lpc55s69_casper_cp_active(void)
+{
+    /* Returns MM_TRUE whenever the CASPER instance has been initialised
+     * (i.e. mm_lpc55s69_register_mmio has been called).  This is always
+     * true for the LPC55S69 target and false for all other targets since
+     * this function is never called for them. */
+    return (mm_lpc55_casper_get_global() != NULL) ? MM_TRUE : MM_FALSE;
 }
 
 static mm_bool reg_pair(struct mmio_bus *bus, struct mmio_region *r,
@@ -1271,7 +1286,19 @@ mm_bool mm_lpc55s69_register_mmio(struct mmio_bus *bus)
     hashcrypt_s_region = hashcrypt_ns_region;
     hashcrypt_s_region.base = 0x500A4000u;
     if (!mmio_bus_register_region(bus, &hashcrypt_s_region)) return MM_FALSE;
-    if (!stub_reg_pair(bus, &casper_stub,    0x400A5000u)) return MM_FALSE;
+    /* CASPER — proper peripheral model */
+    mm_lpc55_casper_init(&casper_state, NULL, NULL); /* NVIC/memmap wired later */
+    mm_lpc55_casper_set_global(&casper_state);
+    casper_ns_region.base   = 0x400A5000u;
+    casper_ns_region.size   = CASPER_SIZE;
+    casper_ns_region.opaque = &casper_state;
+    casper_ns_region.read   = mm_lpc55_casper_read;
+    casper_ns_region.write  = mm_lpc55_casper_write;
+    casper_ns_region.name   = "casper";
+    if (!mmio_bus_register_region(bus, &casper_ns_region)) return MM_FALSE;
+    casper_s_region = casper_ns_region;
+    casper_s_region.base = 0x500A5000u;
+    if (!mmio_bus_register_region(bus, &casper_s_region)) return MM_FALSE;
     if (!stub_reg_pair(bus, &powerquad_stub, 0x400A6000u)) return MM_FALSE;
     if (!stub_reg_pair(bus, &dma1_stub,      0x400A7000u)) return MM_FALSE;
 
@@ -1353,6 +1380,9 @@ void mm_lpc55s69_flash_bind(struct mm_memmap *map,
     (void)flags;
 
     flash_buf = flash;
+
+    /* Wire the memory-map pointer into CASPER so it can read operands from RAM */
+    casper_state.map = map;
 
     /*
      * Do NOT pre-mark factory-blank (0xFF) pages as ECC-faulting.
