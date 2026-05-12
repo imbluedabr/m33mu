@@ -1,6 +1,8 @@
-name: capstone-fuzz-pr
+name: capstone-fuzz
 
 on:
+  push:
+    branches: [ "master" ]
   pull_request:
 
 jobs:
