@@ -35,9 +35,17 @@ extern void __libc_init_array(void);
 
 /* RCC */
 #define RCC_BASE          0x44020C00u
+#define RCC_CR            (*(volatile uint32_t *)(RCC_BASE + 0x00u))
 #define RCC_AHB2ENR       (*(volatile uint32_t *)(RCC_BASE + 0x8Cu))
 #define RCC_APB1LENR      (*(volatile uint32_t *)(RCC_BASE + 0x9Cu))
 #define RCC_APB2ENR       (*(volatile uint32_t *)(RCC_BASE + 0xA0u))
+
+#define RCC_CR_HSI48ON    (1u << 12)
+#define RCC_CR_HSI48RDY   (1u << 13)
+#define RCC_AHB2ENR_RNGEN (1u << 18)
+#define RCC_CR_HSIDIV_SHIFT 3u
+#define RCC_CR_HSIDIV_MASK  (0x3u << RCC_CR_HSIDIV_SHIFT)
+#define RCC_CR_HSIDIVF      (1u << 5)
 
 /* GPIOA/GPIOB/GPIOD */
 #define GPIOA_BASE        0x42020000u
@@ -117,6 +125,15 @@ extern void __libc_init_array(void);
 /* NVIC (for USART3 IRQ if needed later) */
 #define NVIC_ISER1        (*(volatile uint32_t *)0xE000E104u)
 
+/* RNG */
+#define RNG_BASE                0x420C0800u
+#define RNG_CR                  (*(volatile uint32_t *)(RNG_BASE + 0x00u))
+#define RNG_SR                  (*(volatile uint32_t *)(RNG_BASE + 0x04u))
+#define RNG_DR                  (*(volatile uint32_t *)(RNG_BASE + 0x08u))
+
+#define RNG_CR_RNGEN            (1u << 2)
+#define RNG_SR_DRDY             (1u << 0)
+
 static volatile uint32_t global_counter = 0;
 static uint32_t static_buf[4] = { 1u, 2u, 3u, 4u };
 static uint32_t zero_buf[4];
@@ -163,6 +180,20 @@ static void tests(void)
     }
 
     /* ISA sweeper disabled for now */
+}
+
+static void hsi_force_div1(void)
+{
+    uint32_t reg;
+    uint32_t timeout;
+
+    reg = RCC_CR;
+    reg &= ~RCC_CR_HSIDIV_MASK;
+    RCC_CR = reg;
+    timeout = 100000u;
+    while (((RCC_CR & RCC_CR_HSIDIVF) == 0u) && (timeout != 0u)) {
+        timeout--;
+    }
 }
 
 static void gpio_config_usart3_pd8_pd9(void)
@@ -617,6 +648,72 @@ static void tim_init_basic(void)
     NVIC_ISER1 = (1u << 13) | (1u << 14) | (1u << 15) | (1u << 16);
 }
 
+static int rng_status_test(void)
+{
+    uint32_t timeout;
+    uint32_t sample;
+
+    RCC_CR |= RCC_CR_HSI48ON;
+    timeout = 100000u;
+    while (((RCC_CR & RCC_CR_HSI48RDY) == 0u) && (timeout != 0u)) {
+        timeout--;
+    }
+    if (timeout == 0u) {
+        printf("RNG test FAIL: HSI48RDY timeout\r\n");
+        return -1;
+    }
+
+    RCC_AHB2ENR |= RCC_AHB2ENR_RNGEN;
+    RNG_CR |= RNG_CR_RNGEN;
+    timeout = 100000u;
+    while (((RNG_SR & RNG_SR_DRDY) == 0u) && (timeout != 0u)) {
+        timeout--;
+    }
+    if (timeout == 0u) {
+        printf("RNG test FAIL: DRDY timeout\r\n");
+        return -1;
+    }
+
+    sample = RNG_DR;
+    (void)sample;
+    printf("RNG status OK\r\n");
+    return 0;
+}
+
+static int hsidiv_status_test(void)
+{
+    uint32_t reg;
+    uint32_t timeout;
+
+    reg = RCC_CR;
+    reg &= ~RCC_CR_HSIDIV_MASK;
+    reg |= (0x1u << RCC_CR_HSIDIV_SHIFT);
+    RCC_CR = reg;
+    timeout = 100000u;
+    while (((RCC_CR & RCC_CR_HSIDIVF) == 0u) && (timeout != 0u)) {
+        timeout--;
+    }
+    if (timeout == 0u) {
+        printf("RCC test FAIL: HSIDIVF timeout (/2)\r\n");
+        return -1;
+    }
+
+    reg = RCC_CR;
+    reg &= ~RCC_CR_HSIDIV_MASK;
+    RCC_CR = reg;
+    timeout = 100000u;
+    while (((RCC_CR & RCC_CR_HSIDIVF) == 0u) && (timeout != 0u)) {
+        timeout--;
+    }
+    if (timeout == 0u) {
+        printf("RCC test FAIL: HSIDIVF timeout (/1)\r\n");
+        return -1;
+    }
+
+    printf("RCC HSIDIV status OK\r\n");
+    return 0;
+}
+
 int main(void)
 {
     const uint32_t test_addr = 0u;
@@ -630,11 +727,18 @@ int main(void)
     volatile uint8_t *mmap = (volatile uint8_t *)0x60000000u;
     uint8_t tpm_buf[16];
 
+    hsi_force_div1();
     gpio_config_usart3_pd8_pd9();
     usart3_init_115200();
     systick_init_1ms();
     delay_ms(2000u);
     printf("Test started.\r\n");
+    if (hsidiv_status_test() != 0) {
+        __asm volatile("bkpt #0x7e");
+    }
+    if (rng_status_test() != 0) {
+        __asm volatile("bkpt #0x7e");
+    }
     printf("Testing timers...\r\n");
     tests();
     tim_init_basic();

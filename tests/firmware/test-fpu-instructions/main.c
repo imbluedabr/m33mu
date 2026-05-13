@@ -35,6 +35,7 @@
 #define FPU_FPCCR           (*(volatile uint32_t *)0xE000EF34u)
 #define FPU_FPDSCR          (*(volatile uint32_t *)0xE000EF3Cu)
 #define RCC_BASE            0x44020C00u
+#define RCC_CR              (*(volatile uint32_t *)(RCC_BASE + 0x00u))
 #define RCC_AHB2ENR         (*(volatile uint32_t *)(RCC_BASE + 0x8Cu))
 #define GPIOC_BASE          0x42020800u
 #define GPIOD_BASE          0x42020C00u
@@ -55,6 +56,9 @@
 #define SYST_CSR_CLKSOURCE  (1u << 2)
 #define SYST_CSR_COUNTFLAG  (1u << 16)
 #define CPU_HZ              (64000000u)
+#define RCC_CR_HSIDIV_SHIFT 3u
+#define RCC_CR_HSIDIV_MASK  (0x3u << RCC_CR_HSIDIV_SHIFT)
+#define RCC_CR_HSIDIVF      (1u << 5)
 
 #define SCB_ICSR_PENDSVSET  (1u << 28)
 
@@ -76,6 +80,17 @@ static inline uint32_t vmrs_fpscr(void){ uint32_t v; __asm volatile("vmrs %0, fp
 static inline void vmsr_fpscr(uint32_t v){ __asm volatile("vmsr fpscr, %0" :: "r"(v) : "memory"); }
 
 static volatile uint32_t g_ms_ticks = 0;
+
+static void hsi_force_div1(void) {
+  uint32_t reg = RCC_CR;
+  uint32_t timeout;
+  reg &= ~RCC_CR_HSIDIV_MASK;
+  RCC_CR = reg;
+  timeout = 100000u;
+  while (((RCC_CR & RCC_CR_HSIDIVF) == 0u) && (timeout != 0u)) {
+    timeout--;
+  }
+}
 
 void SysTick_Handler(void) {
   g_ms_ticks++;
@@ -614,6 +629,7 @@ static void test_interrupt_fp_stacking(void) {
 
 // -------------------- Public entry --------------------
 void fpu_test_run(void) {
+  hsi_force_div1();
   gpio_fpu_init();
   gpio_fpu_set(1);
 

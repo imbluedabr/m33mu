@@ -682,8 +682,8 @@ void mm_stm32h563_mmio_reset(void)
     mm_gpio_bank_set_seccfgr_reader(stm32h563_gpio_bank_read_seccfgr, 0);
     mm_gpio_set_bank_info_reader(stm32h563_gpio_bank_info, 0);
     mm_rcc_set_clock_list_reader(stm32h563_rcc_clock_list_line, 0);
-    /* Enable HSI by default and mark ready flags. */
-    rcc.regs[0] |= 1u;
+    /* Enable HSI by default. Model the H5 reset divider as HSIDIV=/2. */
+    rcc.regs[RCC_CR / 4u] |= 1u | (1u << 3);
     /* RCC_AHB2ENR reset value (see STM32H563 SVD). */
     rcc.regs[0x8c / 4u] = 0xC0000000u;
     rcc_update_ready(&rcc);
@@ -1313,12 +1313,22 @@ static mm_bool rcc_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 *
     return MM_TRUE;
 }
 
+static mm_u64 rcc_hsi_hz(const struct rcc_state *r)
+{
+    mm_u32 cr = r->regs[RCC_CR / 4u];
+    mm_u32 divsel = (cr >> 3) & 0x3u;
+    mm_u32 div = 1u << divsel;
+    return 64000000ull / (mm_u64)div;
+}
+
 static void rcc_update_ready(struct rcc_state *r)
 {
-    mm_u32 cr = r->regs[0]; /* offset 0x0 */
+    mm_u32 cr = r->regs[RCC_CR / 4u];
     /* Mirror RDY bits to match ON bits (immediate ready). */
     /* HSIRDY bit1 follows HSION bit0 */
     if ((cr & (1u << 0)) != 0u) cr |= (1u << 1); else cr &= ~(1u << 1);
+    /* HSIDIVF bit5 reflects immediate divider propagation while HSI is on. */
+    if ((cr & (1u << 0)) != 0u) cr |= (1u << 5); else cr &= ~(1u << 5);
     /* CSIRDY bit9 follows CSION bit8 */
     if ((cr & (1u << 8)) != 0u) cr |= (1u << 9); else cr &= ~(1u << 9);
     /* HSI48RDY bit13 follows HSI48ON bit12 */
@@ -1352,7 +1362,7 @@ static mm_u64 rcc_pll1_p_clk(const struct rcc_state *r)
     mm_u32 n = (plldivr & 0x1ffu) + 1u;
     mm_u32 p = ((plldivr >> 9) & 0x7fu) + 1u;
 
-    if (src == 1u) fin = 64000000ull; /* HSI */
+    if (src == 1u) fin = rcc_hsi_hz(r); /* HSI */
     else if (src == 2u) fin = 4000000ull; /* CSI */
     else if (src == 3u) fin = 8000000ull; /* HSE */
     else fin = 0;
@@ -1372,7 +1382,7 @@ static void rcc_update_sysclk(struct rcc_state *r)
     mm_u64 sys = 0;
     mm_u32 div = 1u;
 
-    if (sw == 0u) sys = 64000000ull;
+    if (sw == 0u) sys = rcc_hsi_hz(r);
     else if (sw == 1u) sys = 4000000ull;
     else if (sw == 2u) sys = 8000000ull;
     else if (sw == 3u) sys = rcc_pll1_p_clk(r);

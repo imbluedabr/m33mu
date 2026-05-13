@@ -36,9 +36,28 @@ volatile uint32_t systick_ms = 0;
 /* RCC                                                                  */
 /* ------------------------------------------------------------------ */
 #define RCC_BASE          0x44020C00u
+#define RCC_CR            (*(volatile uint32_t *)(RCC_BASE + 0x00u))
 #define RCC_AHB2ENR1      (*(volatile uint32_t *)(RCC_BASE + 0x8Cu))
 #define RCC_APB1LENR      (*(volatile uint32_t *)(RCC_BASE + 0x9Cu))
 #define RCC_APB2ENR       (*(volatile uint32_t *)(RCC_BASE + 0xA4u))
+
+#define RCC_CR_HSIDIV_SHIFT 3u
+#define RCC_CR_HSIDIV_MASK  (0x3u << RCC_CR_HSIDIV_SHIFT)
+#define RCC_CR_HSIDIVF      (1u << 5)
+
+static void hsi_force_div1(void)
+{
+    uint32_t reg;
+    uint32_t timeout;
+
+    reg = RCC_CR;
+    reg &= ~RCC_CR_HSIDIV_MASK;
+    RCC_CR = reg;
+    timeout = 100000u;
+    while (((RCC_CR & RCC_CR_HSIDIVF) == 0u) && (timeout != 0u)) {
+        timeout--;
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* GPIO                                                                 */
@@ -655,6 +674,7 @@ void Reset_Handler(void)
     for (dst = &_sbss; dst < &_ebss;) *dst++ = 0;
     __libc_init_array();
 
+    hsi_force_div1();
     init_uart();
     init_spi1();
     init_i2c(I2C1_BASE, 21u, 8u, 9u);   /* I2C1: PB8=SCL, PB9=SDA, APB1LENR bit 21 */

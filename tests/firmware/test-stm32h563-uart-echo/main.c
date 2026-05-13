@@ -15,8 +15,13 @@ extern void __libc_init_array(void);
 #define SYSCLK_HZ 64000000u
 
 #define RCC_BASE          0x44020C00u
+#define RCC_CR            (*(volatile uint32_t *)(RCC_BASE + 0x00u))
 #define RCC_AHB2ENR       (*(volatile uint32_t *)(RCC_BASE + 0x8Cu))
 #define RCC_APB1LENR      (*(volatile uint32_t *)(RCC_BASE + 0x9Cu))
+
+#define RCC_CR_HSIDIV_SHIFT 3u
+#define RCC_CR_HSIDIV_MASK  (0x3u << RCC_CR_HSIDIV_SHIFT)
+#define RCC_CR_HSIDIVF      (1u << 5)
 
 #define GPIOD_BASE        0x42020C00u
 #define GPIO_MODER(x)     (*(volatile uint32_t *)((x) + 0x00u))
@@ -55,6 +60,20 @@ volatile uint32_t systick_ms = 0;
 static volatile unsigned uart_rx_bytes = 0;
 static volatile unsigned uart_processed = 0;
 static unsigned char uart_buf_rx[64];
+
+static void hsi_force_div1(void)
+{
+    uint32_t reg;
+    uint32_t timeout;
+
+    reg = RCC_CR;
+    reg &= ~RCC_CR_HSIDIV_MASK;
+    RCC_CR = reg;
+    timeout = 100000u;
+    while (((RCC_CR & RCC_CR_HSIDIVF) == 0u) && (timeout != 0u)) {
+        timeout--;
+    }
+}
 
 static void gpio_config_usart3_pd8_pd9(void)
 {
@@ -186,6 +205,7 @@ int main(void)
     unsigned char c = 0;
     int ret;
 
+    hsi_force_div1();
     gpio_config_usart3_pd8_pd9();
     usart3_init_115200();
     NVIC_ISER1 = (1u << (60u - 32u));
