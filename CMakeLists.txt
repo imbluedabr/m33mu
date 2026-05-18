@@ -557,6 +557,7 @@ endif()
 add_custom_target(firmware-build
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563-dualbank app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563-uart-echo app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563-wolfssl-iotsafe app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32u585 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32l552 app.bin
@@ -567,9 +568,14 @@ add_custom_target(firmware-build
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-pic32ck all
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-pic32ck-sdk clean all
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-fpu-instructions app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-lpc55s69 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-rtos-exceptions app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-rw612-sdk all
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-se-suite app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-ta100 app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-tz-bxns-cmse-sau-mpu clean all
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-lpc55s69-hashcrypt app.bin
+  # Excluded: test-lpc55s69-sdk depends on an external NXP MCUXpresso SDK tree.
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32u585-otfdec app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-lpc55s69-casper app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-nrf5340-cryptocell app.bin
