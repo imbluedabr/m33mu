@@ -92,15 +92,22 @@ struct mm_scs {
      * 0xE000_E000 window (CMSIS also provides a 0xE002_E000 alias).
      */
     enum mm_sec_state last_access_sec;
-    /* SysTick (shared) */
-    mm_u32 systick_ctrl;
-    mm_u32 systick_load;
-    mm_u32 systick_val;
-    mm_u32 systick_calib;
-    mm_bool systick_countflag;
-    mm_u64 systick_wraps;  /* cumulative wraps for debug/diagnostics */
+    /* SysTick (banked by security state on ARMv8-M). */
+    mm_u32 systick_ctrl_s;
+    mm_u32 systick_ctrl_ns;
+    mm_u32 systick_load_s;
+    mm_u32 systick_load_ns;
+    mm_u32 systick_val_s;
+    mm_u32 systick_val_ns;
+    mm_u32 systick_calib_s;
+    mm_u32 systick_calib_ns;
+    mm_bool systick_countflag_s;
+    mm_bool systick_countflag_ns;
+    mm_u64 systick_wraps_s;  /* cumulative wraps for debug/diagnostics */
+    mm_u64 systick_wraps_ns;
     mm_bool pend_sv;
-    mm_bool pend_st;
+    mm_bool pend_st_s;
+    mm_bool pend_st_ns;
     mm_bool trace_enabled;
     mm_bool fpu_present;
 };

@@ -20,6 +20,7 @@
  */
 
 #include "m33mu/scs.h"
+#include "m33mu/trace.h"
 #include "rp2350/rp2350_mmio.h"
 #include "m33mu/memmap.h"
 #include <stdlib.h>
@@ -122,35 +123,109 @@ static mm_bool scs_finish_read_subword(mm_u32 offset, mm_u32 size_bytes, mm_u32 
     return MM_FALSE;
 }
 
-static mm_bool scs_read_systick(struct mm_scs *scs, mm_u32 aligned, mm_bool clear_countflag, mm_bool noisy, mm_u32 *value_out)
+static mm_u32 *scs_systick_ctrl_ptr(struct mm_scs *scs, enum mm_sec_state sec)
 {
+    return (sec == MM_NONSECURE) ? &scs->systick_ctrl_ns : &scs->systick_ctrl_s;
+}
+
+static mm_u32 *scs_systick_load_ptr(struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->systick_load_ns : &scs->systick_load_s;
+}
+
+static mm_u32 *scs_systick_val_ptr(struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->systick_val_ns : &scs->systick_val_s;
+}
+
+static mm_u32 *scs_systick_calib_ptr(struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->systick_calib_ns : &scs->systick_calib_s;
+}
+
+static mm_bool *scs_systick_countflag_ptr(struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->systick_countflag_ns : &scs->systick_countflag_s;
+}
+
+static mm_u64 *scs_systick_wraps_ptr(struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->systick_wraps_ns : &scs->systick_wraps_s;
+}
+
+static mm_bool *scs_pend_st_ptr(struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->pend_st_ns : &scs->pend_st_s;
+}
+
+static const mm_u32 *scs_systick_ctrl_ptr_const(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->systick_ctrl_ns : &scs->systick_ctrl_s;
+}
+
+static const mm_u32 *scs_systick_load_ptr_const(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->systick_load_ns : &scs->systick_load_s;
+}
+
+static const mm_u32 *scs_systick_val_ptr_const(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->systick_val_ns : &scs->systick_val_s;
+}
+
+static const mm_u64 *scs_systick_wraps_ptr_const(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->systick_wraps_ns : &scs->systick_wraps_s;
+}
+
+static const mm_bool *scs_pend_st_ptr_const(const struct mm_scs *scs, enum mm_sec_state sec)
+{
+    return (sec == MM_NONSECURE) ? &scs->pend_st_ns : &scs->pend_st_s;
+}
+
+static mm_bool scs_read_systick(struct mm_scs *scs,
+                                enum mm_sec_state sec,
+                                mm_u32 aligned,
+                                mm_bool clear_countflag,
+                                mm_bool noisy,
+                                mm_u32 *value_out)
+{
+    mm_u32 *ctrl = scs_systick_ctrl_ptr(scs, sec);
+    mm_u32 *load = scs_systick_load_ptr(scs, sec);
+    mm_u32 *val = scs_systick_val_ptr(scs, sec);
+    mm_u32 *calib = scs_systick_calib_ptr(scs, sec);
+    mm_bool *countflag = scs_systick_countflag_ptr(scs, sec);
+
     switch (aligned) {
     case SYST_CSR:
-        *value_out = scs->systick_ctrl & 0x7u;
-        if (scs->systick_countflag) {
+        *value_out = *ctrl & 0x7u;
+        if (*countflag) {
             *value_out |= (1u << 16);
         }
         if (clear_countflag) {
-            scs->systick_countflag = MM_FALSE;
+            *countflag = MM_FALSE;
         }
         if (noisy && scs->trace_enabled) {
-            printf("[SYSTICK_CTRL_READ] ctrl=0x%08lx\n", (unsigned long)*value_out);
+            printf("[SYSTICK_CTRL_READ] sec=%d ctrl=0x%08lx\n",
+                   (int)sec, (unsigned long)*value_out);
         }
         return MM_TRUE;
     case SYST_RVR:
-        *value_out = scs->systick_load;
+        *value_out = *load;
         if (noisy && scs->trace_enabled) {
-            printf("[SYSTICK_LOAD_READ] load=0x%06lx\n", (unsigned long)*value_out);
+            printf("[SYSTICK_LOAD_READ] sec=%d load=0x%06lx\n",
+                   (int)sec, (unsigned long)*value_out);
         }
         return MM_TRUE;
     case SYST_CVR:
-        *value_out = scs->systick_val;
+        *value_out = *val;
         if (noisy && scs->trace_enabled) {
-            printf("[SYSTICK_VAL_READ] val=0x%06lx\n", (unsigned long)*value_out);
+            printf("[SYSTICK_VAL_READ] sec=%d val=0x%06lx\n",
+                   (int)sec, (unsigned long)*value_out);
         }
         return MM_TRUE;
     case SYST_CALIB:
-        *value_out = scs->systick_calib;
+        *value_out = *calib;
         return MM_TRUE;
     default:
         return MM_FALSE;
@@ -246,7 +321,7 @@ static mm_u32 scs_read_scb_reg(const struct mm_scs_mmio *ctx, struct mm_scs *scs
     case 0x4:
         val = (eff_sec == MM_NONSECURE) ? scs->icsr_ns : scs->icsr_s;
         if (scs->pend_sv) val |= (1u << 28);
-        if (scs->pend_st) val |= (1u << 26);
+        if (*scs_pend_st_ptr_const(scs, eff_sec)) val |= (1u << 26);
         break;
     case 0x8: val = (eff_sec == MM_NONSECURE) ? scs->vtor_ns : scs->vtor_s; break;
     case 0xC: val = (eff_sec == MM_NONSECURE) ? scs->aircr_ns : scs->aircr_s; break;
@@ -315,35 +390,46 @@ static mm_u32 scs_read_scb_reg(const struct mm_scs_mmio *ctx, struct mm_scs *scs
     return val;
 }
 
-static mm_bool scs_write_systick(struct mm_scs *scs, mm_u32 offset, mm_u32 aligned, mm_u32 size_bytes, mm_u32 value)
+static mm_bool scs_write_systick(struct mm_scs *scs,
+                                 enum mm_sec_state sec,
+                                 mm_u32 offset,
+                                 mm_u32 aligned,
+                                 mm_u32 size_bytes,
+                                 mm_u32 value)
 {
     mm_u32 shift = (offset & 0x3u) * 8u;
     mm_u32 mask = (size_bytes == 1u) ? 0xFFu : 0xFFFFu;
+    mm_u32 *ctrl = scs_systick_ctrl_ptr(scs, sec);
+    mm_u32 *load = scs_systick_load_ptr(scs, sec);
+    mm_u32 *val = scs_systick_val_ptr(scs, sec);
+    mm_bool *countflag = scs_systick_countflag_ptr(scs, sec);
 
     switch (aligned) {
     case SYST_CSR: {
-        mm_u32 cur = scs->systick_ctrl;
+        mm_u32 cur = *ctrl;
         mm_u32 v = value;
         if (size_bytes == 1u || size_bytes == 2u) {
             v = (cur & ~(mask << shift)) | ((value & mask) << shift);
         }
-        scs->systick_ctrl = v & 0x7u;
+        *ctrl = v & 0x7u;
         if (scs->trace_enabled) {
-            printf("[SYSTICK_CTRL_WRITE] ctrl=0x%08lx\n", (unsigned long)scs->systick_ctrl);
+            printf("[SYSTICK_CTRL_WRITE] sec=%d ctrl=0x%08lx\n",
+                   (int)sec, (unsigned long)*ctrl);
         }
         return MM_TRUE;
     }
     case SYST_RVR:
-        scs->systick_load = ((size_bytes == 4u) ? value : ((value & mask) << shift)) & SYST_LOAD_MASK;
+        *load = ((size_bytes == 4u) ? value : ((value & mask) << shift)) & SYST_LOAD_MASK;
         if (scs->trace_enabled) {
-            printf("[SYSTICK_LOAD_WRITE] load=0x%06lx\n", (unsigned long)scs->systick_load);
+            printf("[SYSTICK_LOAD_WRITE] sec=%d load=0x%06lx\n",
+                   (int)sec, (unsigned long)*load);
         }
         return MM_TRUE;
     case SYST_CVR:
-        scs->systick_val = 0;
-        scs->systick_countflag = MM_FALSE;
+        *val = 0;
+        *countflag = MM_FALSE;
         if (scs->trace_enabled) {
-            printf("[SYSTICK_VAL_WRITE] val cleared\n");
+            printf("[SYSTICK_VAL_WRITE] sec=%d val cleared\n", (int)sec);
         }
         return MM_TRUE;
     default:
@@ -480,8 +566,8 @@ static mm_bool scs_write_scb(struct mm_scs_mmio *ctx, struct mm_scs *scs, enum m
         mm_u32 v = value;
         if (v & (1u << 28)) scs->pend_sv = MM_TRUE;
         if (v & (1u << 27)) scs->pend_sv = MM_FALSE;
-        if (v & (1u << 26)) scs->pend_st = MM_TRUE;
-        if (v & (1u << 25)) scs->pend_st = MM_FALSE;
+        if (v & (1u << 26)) *scs_pend_st_ptr(scs, eff_sec) = MM_TRUE;
+        if (v & (1u << 25)) *scs_pend_st_ptr(scs, eff_sec) = MM_FALSE;
         if (eff_sec == MM_NONSECURE) scs->icsr_ns = v & ~(0xFu << 25);
         else scs->icsr_s = v & ~(0xFu << 25);
         return MM_TRUE;
@@ -489,10 +575,14 @@ static mm_bool scs_write_scb(struct mm_scs_mmio *ctx, struct mm_scs *scs, enum m
     case 0x8:
         if (eff_sec == MM_NONSECURE) {
             scs->vtor_ns = value;
-            printf("[VTOR_NS_WRITE] vtor_ns=0x%08lx\n", (unsigned long)value);
+            if (mm_trace_enabled()) {
+                printf("[VTOR_NS_WRITE] vtor_ns=0x%08lx\n", (unsigned long)value);
+            }
         } else {
             scs->vtor_s = value;
-            printf("[VTOR_S_WRITE] vtor_s=0x%08lx\n", (unsigned long)value);
+            if (mm_trace_enabled()) {
+                printf("[VTOR_S_WRITE] vtor_s=0x%08lx\n", (unsigned long)value);
+            }
         }
         return MM_TRUE;
     case 0xC:
@@ -638,14 +728,21 @@ void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
     scs->sau_sfar = 0;
     scs->securefault_pending = MM_FALSE;
     scs->last_access_sec = MM_SECURE;
-    scs->systick_ctrl = 0;
-    scs->systick_load = 0;
-    scs->systick_val = 0;
-    scs->systick_calib = 0;
-    scs->systick_countflag = MM_FALSE;
-    scs->systick_wraps = 0;
+    scs->systick_ctrl_s = 0;
+    scs->systick_ctrl_ns = 0;
+    scs->systick_load_s = 0;
+    scs->systick_load_ns = 0;
+    scs->systick_val_s = 0;
+    scs->systick_val_ns = 0;
+    scs->systick_calib_s = 0;
+    scs->systick_calib_ns = 0;
+    scs->systick_countflag_s = MM_FALSE;
+    scs->systick_countflag_ns = MM_FALSE;
+    scs->systick_wraps_s = 0;
+    scs->systick_wraps_ns = 0;
     scs->pend_sv = MM_FALSE;
-    scs->pend_st = MM_FALSE;
+    scs->pend_st_s = MM_FALSE;
+    scs->pend_st_ns = MM_FALSE;
     {
         const char *env = getenv("M33MU_SYSTICK_TRACE");
         scs->trace_enabled = (env != 0 && env[0] != '\0') ? MM_TRUE : MM_FALSE;
@@ -700,7 +797,7 @@ static mm_bool scs_read_internal(void *opaque, mm_u32 offset, mm_u32 size_bytes,
     if (offset < SCS_SCB_OFFSET) {
         enum mm_sec_state eff_sec = scs_effective_sec(ctx, scs);
         aligned = offset & ~0x3u;
-        if (scs_read_systick(scs, aligned, clear_countflag, noisy, &val)) {
+        if (scs_read_systick(scs, eff_sec, aligned, clear_countflag, noisy, &val)) {
             return scs_finish_read_subword(offset, size_bytes, val, value_out);
         }
         if (scs_read_nvic(nvic, eff_sec, offset, aligned, size_bytes, noisy, value_out)) {
@@ -824,7 +921,7 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
     if (offset < SCS_SCB_OFFSET) {
         enum mm_sec_state eff_sec = scs_effective_sec(ctx, scs);
         aligned = offset & ~0x3u;
-        if (scs_write_systick(scs, offset, aligned, size_bytes, value)) {
+        if (scs_write_systick(scs, eff_sec, offset, aligned, size_bytes, value)) {
             return MM_TRUE;
         }
         if (scs_write_nvic(nvic, eff_sec, offset, aligned, size_bytes, value)) {
@@ -1125,102 +1222,117 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
 
 mm_u32 mm_scs_systick_advance(struct mm_scs *scs, mm_u64 cycles)
 {
-    mm_bool enable;
-    mm_bool tickint;
-    mm_u32 load;
-    mm_u32 cur;
-    mm_u64 remaining;
-    mm_u64 wraps = 0;
+    mm_u32 total_wraps = 0u;
+    enum mm_sec_state sec;
 
     if (scs == 0 || cycles == 0u) {
         return 0u;
     }
-    enable = (scs->systick_ctrl & 0x1u) != 0u;
-    tickint = (scs->systick_ctrl & 0x2u) != 0u;
-    if (!enable) {
-        return 0u;
-    }
-    load = scs->systick_load & SYST_LOAD_MASK;
-    if (load == 0u) {
-        return 0u;
-    }
 
-    cur = scs->systick_val & SYST_LOAD_MASK;
-    {
-        /* For trace/debug: remember starting value when skipping many cycles. */
-        mm_u32 start_cur = (cur == 0u) ? SYST_LOAD_MASK : cur;
-        (void)start_cur; /* used in tracing below */
-    }
-    if (cur == 0u) {
-        /* Reload before first tick or after explicit VAL write. */
-        cur = load;
-    }
+    for (sec = MM_NONSECURE; sec <= MM_SECURE; ++sec) {
+        mm_u32 *ctrl = scs_systick_ctrl_ptr(scs, sec);
+        mm_u32 *load = scs_systick_load_ptr(scs, sec);
+        mm_u32 *val = scs_systick_val_ptr(scs, sec);
+        mm_bool *countflag = scs_systick_countflag_ptr(scs, sec);
+        mm_u64 *wraps_total = scs_systick_wraps_ptr(scs, sec);
+        mm_bool *pend_st = scs_pend_st_ptr(scs, sec);
+        mm_bool enable = (*ctrl & 0x1u) != 0u;
+        mm_bool tickint = (*ctrl & 0x2u) != 0u;
+        mm_u32 load_val;
+        mm_u32 cur;
+        mm_u64 remaining;
+        mm_u64 wraps = 0u;
 
-    remaining = cycles;
-    if (remaining < (mm_u64)cur) {
-        cur = (mm_u32)(cur - remaining);
-        remaining = 0;
-    } else {
-        remaining -= (mm_u64)cur;
-        wraps += 1;
-        if (load != 0u) {
-            wraps += remaining / (mm_u64)load;
+        if (!enable) {
+            continue;
+        }
+        load_val = *load & SYST_LOAD_MASK;
+        if (load_val == 0u) {
+            continue;
+        }
+
+        cur = *val & SYST_LOAD_MASK;
+        if (cur == 0u) {
+            cur = load_val;
+        }
+
+        remaining = cycles;
+        if (remaining < (mm_u64)cur) {
+            cur = (mm_u32)(cur - remaining);
+            remaining = 0;
+        } else {
+            remaining -= (mm_u64)cur;
+            wraps += 1u;
+            wraps += remaining / (mm_u64)load_val;
             {
-                mm_u32 rem = (mm_u32)(remaining % (mm_u64)load);
-                cur = (rem == 0u) ? load : (load - rem);
+                mm_u32 rem = (mm_u32)(remaining % (mm_u64)load_val);
+                cur = (rem == 0u) ? load_val : (load_val - rem);
             }
         }
-    }
 
-    scs->systick_val = cur & SYST_LOAD_MASK;
-    if (scs->trace_enabled && cycles > 1u) {
-        mm_u32 end_cur = scs->systick_val & SYST_LOAD_MASK;
-        printf("[SYSTICK_FAST] delta=%llu wraps=%lu end=0x%06lx\n",
-               (unsigned long long)cycles,
-               (unsigned long)wraps,
-               (unsigned long)end_cur);
-    }
-    if (wraps > 0u) {
-        scs->systick_wraps += wraps;
-        scs->systick_countflag = MM_TRUE;
-        if (scs->trace_enabled) {
-            printf("[SYSTICK_WRAP] wraps=%lu total=%llu val=0x%06lx load=0x%06lx tickint=%d\n",
+        *val = cur & SYST_LOAD_MASK;
+        if (scs->trace_enabled && cycles > 1u) {
+            mm_u32 end_cur = *val & SYST_LOAD_MASK;
+            printf("[SYSTICK_FAST] sec=%d delta=%llu wraps=%lu end=0x%06lx\n",
+                   (int)sec,
+                   (unsigned long long)cycles,
                    (unsigned long)wraps,
-                   (unsigned long long)scs->systick_wraps,
-                   (unsigned long)scs->systick_val,
-                   (unsigned long)load,
-                   tickint ? 1 : 0);
+                   (unsigned long)end_cur);
         }
-        if (tickint) {
-            scs->pend_st = MM_TRUE;
+        if (wraps > 0u) {
+            *wraps_total += wraps;
+            *countflag = MM_TRUE;
+            total_wraps += (mm_u32)wraps;
+            if (scs->trace_enabled) {
+                printf("[SYSTICK_WRAP] sec=%d wraps=%lu total=%llu val=0x%06lx load=0x%06lx tickint=%d\n",
+                       (int)sec,
+                       (unsigned long)wraps,
+                       (unsigned long long)*wraps_total,
+                       (unsigned long)*val,
+                       (unsigned long)load_val,
+                       tickint ? 1 : 0);
+            }
+            if (tickint) {
+                *pend_st = MM_TRUE;
+            }
+        } else if (scs->trace_enabled) {
+            printf("[SYSTICK_STEP] sec=%d val=0x%06lx\n",
+                   (int)sec, (unsigned long)*val);
         }
-    } else if (scs->trace_enabled) {
-        printf("[SYSTICK_STEP] val=0x%06lx\n", (unsigned long)scs->systick_val);
     }
-    return (mm_u32)wraps;
+    return total_wraps;
 }
 
 mm_u64 mm_scs_systick_cycles_until_fire(const struct mm_scs *scs)
 {
-    mm_bool enable;
-    mm_u32 load;
-    mm_u32 cur;
+    mm_u64 best = (mm_u64)-1;
+    enum mm_sec_state sec;
     if (scs == 0) {
         return (mm_u64)-1;
     }
-    enable = (scs->systick_ctrl & 0x1u) != 0u;
-    if (!enable) {
-        return (mm_u64)-1;
+    for (sec = MM_NONSECURE; sec <= MM_SECURE; ++sec) {
+        const mm_u32 *ctrl = scs_systick_ctrl_ptr_const(scs, sec);
+        const mm_u32 *load = scs_systick_load_ptr_const(scs, sec);
+        const mm_u32 *val = scs_systick_val_ptr_const(scs, sec);
+        mm_bool enable = (*ctrl & 0x1u) != 0u;
+        mm_u32 load_val;
+        mm_u32 cur;
+        if (!enable) {
+            continue;
+        }
+        load_val = *load & SYST_LOAD_MASK;
+        if (load_val == 0u) {
+            continue;
+        }
+        cur = *val & SYST_LOAD_MASK;
+        if (cur == 0u) {
+            cur = load_val;
+        }
+        if ((mm_u64)cur < best) {
+            best = (mm_u64)cur;
+        }
     }
-    load = scs->systick_load & SYST_LOAD_MASK;
-    if (load == 0u) {
-        return (mm_u64)-1;
-    }
-    cur = scs->systick_val & SYST_LOAD_MASK;
-    if (cur == 0u) {
-        cur = load;
-    }
-    return (mm_u64)cur;
+    return best;
 }
 
 mm_u64 mm_scs_systick_wrap_count(const struct mm_scs *scs)
@@ -1228,7 +1340,8 @@ mm_u64 mm_scs_systick_wrap_count(const struct mm_scs *scs)
     if (scs == 0) {
         return 0;
     }
-    return scs->systick_wraps;
+    return *scs_systick_wraps_ptr_const(scs, MM_SECURE) +
+           *scs_systick_wraps_ptr_const(scs, MM_NONSECURE);
 }
 
 void mm_scs_systick_step(struct mm_scs *scs)

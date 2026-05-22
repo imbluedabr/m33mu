@@ -2471,6 +2471,22 @@ static mm_bool faultmask_blocks_current(const struct mm_cpu *cpu)
     return cpu->faultmask_s != 0u;
 }
 
+static mm_bool primask_blocks_for_sec(const struct mm_cpu *cpu, enum mm_sec_state sec)
+{
+    if (cpu == 0) {
+        return MM_FALSE;
+    }
+    return (sec == MM_NONSECURE) ? (cpu->primask_ns != 0u) : (cpu->primask_s != 0u);
+}
+
+static mm_bool faultmask_blocks_for_sec(const struct mm_cpu *cpu, enum mm_sec_state sec)
+{
+    if (cpu == 0) {
+        return MM_FALSE;
+    }
+    return (sec == MM_NONSECURE) ? (cpu->faultmask_ns != 0u) : (cpu->faultmask_s != 0u);
+}
+
 static mm_u8 basepri_for_sec(const struct mm_cpu *cpu, enum mm_sec_state sec)
 {
     if (cpu == 0) {
@@ -2479,6 +2495,14 @@ static mm_u8 basepri_for_sec(const struct mm_cpu *cpu, enum mm_sec_state sec)
     return (sec == MM_NONSECURE) ? (mm_u8)(cpu->basepri_ns & 0xFFu)
                                  : (mm_u8)(cpu->basepri_s & 0xFFu);
 }
+
+static mm_u8 system_exc_priority_for_sec(const struct mm_scs *scs,
+                                         enum mm_sec_state sec,
+                                         mm_u32 exc_num);
+static mm_bool basepri_blocks_system_exc_for_sec(const struct mm_cpu *cpu,
+                                                 const struct mm_scs *scs,
+                                                 enum mm_sec_state sec,
+                                                 mm_u32 exc_num);
 
 static mm_u8 aircr_prigroup_for_sec(const struct mm_scs *scs, enum mm_sec_state sec)
 {
@@ -2507,14 +2531,24 @@ static mm_u8 system_exc_priority(const struct mm_cpu *cpu,
                                  const struct mm_scs *scs,
                                  mm_u32 exc_num)
 {
-    mm_u32 shpr1;
-    mm_u32 shpr2;
-    mm_u32 shpr3;
     enum mm_sec_state sec;
-    if (cpu == 0 || scs == 0) {
+    if (cpu == 0) {
         return 0xFFu;
     }
     sec = cpu->sec_state;
+    return system_exc_priority_for_sec(scs, sec, exc_num);
+}
+
+static mm_u8 system_exc_priority_for_sec(const struct mm_scs *scs,
+                                         enum mm_sec_state sec,
+                                         mm_u32 exc_num)
+{
+    mm_u32 shpr1;
+    mm_u32 shpr2;
+    mm_u32 shpr3;
+    if (scs == 0) {
+        return 0xFFu;
+    }
     shpr1 = (sec == MM_NONSECURE) ? scs->shpr1_ns : scs->shpr1_s;
     shpr2 = (sec == MM_NONSECURE) ? scs->shpr2_ns : scs->shpr2_s;
     shpr3 = (sec == MM_NONSECURE) ? scs->shpr3_ns : scs->shpr3_s;
@@ -2575,23 +2609,73 @@ static mm_bool basepri_blocks_system_exc(const struct mm_cpu *cpu,
                                          const struct mm_scs *scs,
                                          mm_u32 exc_num)
 {
+    if (cpu == 0) {
+        return MM_FALSE;
+    }
+    return basepri_blocks_system_exc_for_sec(cpu, scs, cpu->sec_state, exc_num);
+}
+
+static mm_bool basepri_blocks_system_exc_for_sec(const struct mm_cpu *cpu,
+                                                 const struct mm_scs *scs,
+                                                 enum mm_sec_state sec,
+                                                 mm_u32 exc_num)
+{
     mm_u8 basepri;
     mm_u8 prio;
     mm_u8 prigroup;
     if (cpu == 0 || scs == 0) {
         return MM_FALSE;
     }
-    basepri = basepri_for_sec(cpu, cpu->sec_state);
+    basepri = basepri_for_sec(cpu, sec);
     if (basepri == 0u) {
         return MM_FALSE;
     }
-    prio = system_exc_priority(cpu, scs, exc_num);
+    prio = system_exc_priority_for_sec(scs, sec, exc_num);
     if (prio == 0u) {
         return MM_FALSE;
     }
-    prigroup = aircr_prigroup_for_sec(scs, cpu->sec_state);
+    prigroup = aircr_prigroup_for_sec(scs, sec);
     return preempt_priority_value(prio, prigroup) >=
            preempt_priority_value(basepri, prigroup) ? MM_TRUE : MM_FALSE;
+}
+
+static mm_bool systick_pending_select(const struct mm_cpu *cpu,
+                                      const struct mm_scs *scs,
+                                      enum mm_sec_state *handler_sec_out)
+{
+    mm_u8 s_prio;
+    mm_u8 ns_prio;
+    mm_u8 s_preempt;
+    mm_u8 ns_preempt;
+
+    if (cpu == 0 || scs == 0 || handler_sec_out == 0) {
+        return MM_FALSE;
+    }
+    if (scs->pend_st_s && !scs->pend_st_ns) {
+        *handler_sec_out = MM_SECURE;
+        return MM_TRUE;
+    }
+    if (!scs->pend_st_s && scs->pend_st_ns) {
+        *handler_sec_out = MM_NONSECURE;
+        return MM_TRUE;
+    }
+    if (!scs->pend_st_s && !scs->pend_st_ns) {
+        return MM_FALSE;
+    }
+
+    /* When both banks are pending, select the handler security by the
+     * configured exception priority for each bank rather than forcing
+     * Secure-first delivery. */
+    s_prio = system_exc_priority_for_sec(scs, MM_SECURE, MM_VECT_SYSTICK);
+    ns_prio = system_exc_priority_for_sec(scs, MM_NONSECURE, MM_VECT_SYSTICK);
+    s_preempt = preempt_priority_value(s_prio, aircr_prigroup_for_sec(scs, MM_SECURE));
+    ns_preempt = preempt_priority_value(ns_prio, aircr_prigroup_for_sec(scs, MM_NONSECURE));
+    if (s_preempt < ns_preempt || (s_preempt == ns_preempt && s_prio <= ns_prio)) {
+        *handler_sec_out = MM_SECURE;
+    } else {
+        *handler_sec_out = MM_NONSECURE;
+    }
+    return MM_TRUE;
 }
 
 static mm_bool prot_mux_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_state sec, mm_u32 addr, mm_u32 size_bytes)
@@ -2801,6 +2885,7 @@ static mm_bool tailchain_select_pending(const struct mm_cpu *cpu,
 {
     struct mm_nvic *nvic;
     enum mm_sec_state irq_sec = MM_SECURE;
+    enum mm_sec_state systick_sec = MM_SECURE;
     int pend_irq;
     mm_bool have_best = MM_FALSE;
     mm_u8 best_preempt = 0xffu;
@@ -2829,12 +2914,12 @@ static mm_bool tailchain_select_pending(const struct mm_cpu *cpu,
         *irq_num_out = 0u;
         have_best = MM_TRUE;
     }
-    if (scs->pend_st &&
-        !primask_blocks_current(cpu) &&
-        !faultmask_blocks_current(cpu) &&
-        !basepri_blocks_system_exc(cpu, scs, MM_VECT_SYSTICK)) {
-        mm_u8 prigroup = aircr_prigroup_for_sec(scs, cpu->sec_state);
-        mm_u8 prio = system_exc_priority(cpu, scs, MM_VECT_SYSTICK);
+    if (systick_pending_select(cpu, scs, &systick_sec) &&
+        !primask_blocks_for_sec(cpu, systick_sec) &&
+        !faultmask_blocks_for_sec(cpu, systick_sec) &&
+        !basepri_blocks_system_exc_for_sec(cpu, scs, systick_sec, MM_VECT_SYSTICK)) {
+        mm_u8 prigroup = aircr_prigroup_for_sec(scs, systick_sec);
+        mm_u8 prio = system_exc_priority_for_sec(scs, systick_sec, MM_VECT_SYSTICK);
         mm_u8 preempt = preempt_priority_value(prio, prigroup);
         if (!have_best ||
             preempt < best_preempt ||
@@ -2842,7 +2927,7 @@ static mm_bool tailchain_select_pending(const struct mm_cpu *cpu,
             best_preempt = preempt;
             best_raw_prio = prio;
             *exc_num_out = MM_VECT_SYSTICK;
-            *handler_sec_out = cpu->sec_state;
+            *handler_sec_out = systick_sec;
             *is_irq_out = MM_FALSE;
             *irq_num_out = 0u;
             have_best = MM_TRUE;
@@ -2962,7 +3047,8 @@ static mm_bool exc_return_unstack(struct mm_cpu *cpu,
             if (tail_exc_num == MM_VECT_PENDSV) {
                 scs->pend_sv = MM_FALSE;
             } else if (tail_exc_num == MM_VECT_SYSTICK) {
-                scs->pend_st = MM_FALSE;
+                if (tail_handler_sec == MM_NONSECURE) scs->pend_st_ns = MM_FALSE;
+                else scs->pend_st_s = MM_FALSE;
             }
         }
         if (cpu->exc_depth > 0 && cpu->exc_depth <= MM_EXC_STACK_MAX) {
@@ -3366,6 +3452,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
 {
     mm_bool trace_started = MM_FALSE;
     mm_bool result = MM_TRUE;
+    enum mm_sec_state systick_sec = MM_SECURE;
     if (cpu == 0 || scs == 0 || nvic == 0 || map == 0 || cfg == 0) {
         return MM_FALSE;
     }
@@ -3373,7 +3460,7 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         mm_bool wake = MM_FALSE;
         if (cpu->event_reg) {
             wake = MM_TRUE;
-        } else if (scs->pend_st || scs->pend_sv) {
+        } else if (systick_pending_select(cpu, scs, &systick_sec) || scs->pend_sv) {
             wake = MM_TRUE;
         } else if (mm_nvic_select_ex(nvic, cpu, scs) >= 0) {
             wake = MM_TRUE;
@@ -3438,25 +3525,25 @@ static mm_bool step_core_simple(struct mm_cpu *cpu,
         result = MM_TRUE;
         goto out;
     }
-    if (scs->pend_st) {
-        if (primask_blocks_current(cpu) ||
-            faultmask_blocks_current(cpu) ||
-            basepri_blocks_system_exc(cpu, scs, MM_VECT_SYSTICK)) {
+    if (systick_pending_select(cpu, scs, &systick_sec)) {
+        if (primask_blocks_for_sec(cpu, systick_sec) ||
+            faultmask_blocks_for_sec(cpu, systick_sec) ||
+            basepri_blocks_system_exc_for_sec(cpu, scs, systick_sec, MM_VECT_SYSTICK)) {
             result = MM_TRUE;
             goto out;
         }
         {
             mm_u8 current_preempt = 0u;
             mm_u8 current_raw = 0u;
-            mm_u8 pend_prio = system_exc_priority(cpu, scs, MM_VECT_SYSTICK);
-            mm_u8 pend_preempt = preempt_priority_value(pend_prio, aircr_prigroup_for_sec(scs, cpu->sec_state));
+            mm_u8 pend_prio = system_exc_priority_for_sec(scs, systick_sec, MM_VECT_SYSTICK);
+            mm_u8 pend_preempt = preempt_priority_value(pend_prio, aircr_prigroup_for_sec(scs, systick_sec));
             if (current_execution_priority(cpu, scs, nvic, &current_preempt, &current_raw) &&
                 pend_preempt >= current_preempt) {
                 result = MM_TRUE;
                 goto out;
             }
         }
-        if (!enter_exception(cpu, map, scs, MM_VECT_SYSTICK, cpu->r[15] & ~1u, cpu->xpsr)) {
+        if (!enter_exception_ex(cpu, map, scs, MM_VECT_SYSTICK, cpu->r[15] & ~1u, cpu->xpsr, systick_sec)) {
             if (done) *done = MM_TRUE;
         } else {
             itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
@@ -4278,11 +4365,12 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
         break;
     case MM_VECT_PENDSV:
         scs->pend_sv = MM_FALSE;
-        shcsr_set_exception_active(scs, sec, MM_VECT_PENDSV);
+        shcsr_set_exception_active(scs, handler_sec, MM_VECT_PENDSV);
         break;
     case MM_VECT_SYSTICK:
-        scs->pend_st = MM_FALSE;
-        shcsr_set_exception_active(scs, sec, MM_VECT_SYSTICK);
+        if (handler_sec == MM_NONSECURE) scs->pend_st_ns = MM_FALSE;
+        else scs->pend_st_s = MM_FALSE;
+        shcsr_set_exception_active(scs, handler_sec, MM_VECT_SYSTICK);
         break;
     default:
         break;
@@ -6147,6 +6235,9 @@ int main(int argc, char **argv)
                     continue;
                 }
 
+                {
+                    enum mm_sec_state systick_sec = MM_SECURE;
+
                 /* If CPU is sleeping (WFI/WFE), stay in low-power loop until an event or pending exception arrives. */
                 if (cpu.sleeping) {
                     mm_bool wake = MM_FALSE;
@@ -6164,7 +6255,7 @@ int main(int argc, char **argv)
                     /* Wake on event register or any pending enabled exception. */
                     if (cpu.event_reg) {
                         wake = MM_TRUE;
-                    } else if (scs.pend_st || scs.pend_sv) {
+                    } else if (systick_pending_select(&cpu, &scs, &systick_sec) || scs.pend_sv) {
                         wake = MM_TRUE;
                     } else if (mm_nvic_select_ex(&nvic, &cpu, &scs) >= 0) {
                         wake = MM_TRUE;
@@ -6211,7 +6302,7 @@ int main(int argc, char **argv)
                                 done = MM_TRUE;
                                 continue;
                             }
-                            if (scs.pend_st || scs.pend_sv || mm_nvic_select_ex(&nvic, &cpu, &scs) >= 0 ||
+                            if (systick_pending_select(&cpu, &scs, &systick_sec) || scs.pend_sv || mm_nvic_select_ex(&nvic, &cpu, &scs) >= 0 ||
                                 (cpu.sleep_wfe && mm_nvic_any_pending(&nvic))) {
                                 cpu.sleeping = MM_FALSE;
                                 cpu.sleep_wfe = MM_FALSE;
@@ -6229,7 +6320,7 @@ int main(int argc, char **argv)
                             vcycles += delta;
                             cycle_total += delta;
                             cycles_since_poll += delta;
-                            if (scs.pend_st || scs.pend_sv) {
+                            if (systick_pending_select(&cpu, &scs, &systick_sec) || scs.pend_sv) {
                                 cpu.sleeping = MM_FALSE;
                                 cpu.sleep_wfe = MM_FALSE;
                                 cpu.event_reg = MM_FALSE;
@@ -6287,19 +6378,19 @@ handle_pending:
                     continue;
                 }
 check_systick_pending:
-                if (scs.pend_st &&
-                    !primask_blocks_current(&cpu) &&
-                    !faultmask_blocks_current(&cpu) &&
-                    !basepri_blocks_system_exc(&cpu, &scs, MM_VECT_SYSTICK)) {
+                if (systick_pending_select(&cpu, &scs, &systick_sec) &&
+                    !primask_blocks_for_sec(&cpu, systick_sec) &&
+                    !faultmask_blocks_for_sec(&cpu, systick_sec) &&
+                    !basepri_blocks_system_exc_for_sec(&cpu, &scs, systick_sec, MM_VECT_SYSTICK)) {
                     mm_u8 current_preempt = 0u;
                     mm_u8 current_raw = 0u;
-                    mm_u8 pend_prio = system_exc_priority(&cpu, &scs, MM_VECT_SYSTICK);
-                    mm_u8 pend_preempt = preempt_priority_value(pend_prio, aircr_prigroup_for_sec(&scs, cpu.sec_state));
+                    mm_u8 pend_prio = system_exc_priority_for_sec(&scs, systick_sec, MM_VECT_SYSTICK);
+                    mm_u8 pend_preempt = preempt_priority_value(pend_prio, aircr_prigroup_for_sec(&scs, systick_sec));
                     if (current_execution_priority(&cpu, &scs, &nvic, &current_preempt, &current_raw) &&
                         pend_preempt >= current_preempt) {
                         goto check_irq_pending;
                     }
-                    if (!enter_exception(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr)) {
+                    if (!enter_exception_ex(&cpu, &map, &scs, MM_VECT_SYSTICK, cpu.r[15] & ~1u, cpu.xpsr, systick_sec)) {
                         done = MM_TRUE;
                     } else {
                         itstate_sync_from_xpsr(cpu.xpsr, &it_pattern, &it_remaining, &it_cond);
@@ -6325,6 +6416,7 @@ check_irq_pending:
                         continue;
                     }
                 }
+                }
 
                 if (opt_gdb && mm_gdb_stub_is_reverse(&gdb) && mm_gdb_stub_should_run(&gdb)) {
                     if (!mm_trace_undo_step(&cpu, &map)) {
@@ -6348,7 +6440,7 @@ check_irq_pending:
                     mm_bool fast_mode = MM_TRUE;
                     mm_bool fast_fpu_ok = MM_TRUE;
                     mm_u32 tb_chain_steps = 0;
-                    const mm_u32 tb_chain_limit = 64u;
+                    const mm_u32 tb_chain_limit = 512u;
                     struct mm_execute_ctx exec_ctx;
                     struct mm_tb *next_tb = 0;
                     struct mm_tb *candidate_tb = 0;
@@ -6380,6 +6472,28 @@ check_irq_pending:
                                 tb = 0;
                             }
                         }
+                        exec_ctx.cpu = &cpu;
+                        exec_ctx.map = &map;
+                        exec_ctx.scs = &scs;
+                        exec_ctx.nvic = &nvic;
+                        exec_ctx.gdb = &gdb;
+                        exec_ctx.fetch = 0;
+                        exec_ctx.dec = 0;
+                        exec_ctx.opt_dump = opt_dump;
+                        exec_ctx.opt_gdb = opt_gdb;
+                        exec_ctx.opt_expect_bkpt = opt_expect_bkpt;
+                        exec_ctx.expect_bkpt = expect_bkpt;
+                        exec_ctx.it_pattern = &it_pattern;
+                        exec_ctx.it_remaining = &it_remaining;
+                        exec_ctx.it_cond = &it_cond;
+                        exec_ctx.done = &done;
+                        exec_ctx.bkpt_hit = &tb_bkpt_hit;
+                        exec_ctx.bkpt_imm = &tb_bkpt_imm;
+                        exec_ctx.handle_pc_write = handle_pc_write;
+                        exec_ctx.raise_mem_fault = raise_mem_fault;
+                        exec_ctx.raise_usage_fault = raise_usage_fault;
+                        exec_ctx.exc_return_unstack = exc_return_unstack;
+                        exec_ctx.enter_exception = enter_exception;
                         while (tb != 0) {
                             if (tb_chain_steps++ >= tb_chain_limit) {
                                 break;
@@ -6392,28 +6506,6 @@ check_irq_pending:
                             ops_executed = 0;
 
                             cpu.r[13] = mm_cpu_get_active_sp(&cpu);
-                            exec_ctx.cpu = &cpu;
-                            exec_ctx.map = &map;
-                            exec_ctx.scs = &scs;
-                            exec_ctx.nvic = &nvic;
-                            exec_ctx.gdb = &gdb;
-                            exec_ctx.fetch = 0;
-                            exec_ctx.dec = 0;
-                            exec_ctx.opt_dump = opt_dump;
-                            exec_ctx.opt_gdb = opt_gdb;
-                            exec_ctx.opt_expect_bkpt = opt_expect_bkpt;
-                            exec_ctx.expect_bkpt = expect_bkpt;
-                            exec_ctx.it_pattern = &it_pattern;
-                            exec_ctx.it_remaining = &it_remaining;
-                            exec_ctx.it_cond = &it_cond;
-                            exec_ctx.done = &done;
-                            exec_ctx.bkpt_hit = &tb_bkpt_hit;
-                            exec_ctx.bkpt_imm = &tb_bkpt_imm;
-                            exec_ctx.handle_pc_write = handle_pc_write;
-                            exec_ctx.raise_mem_fault = raise_mem_fault;
-                            exec_ctx.raise_usage_fault = raise_usage_fault;
-                            exec_ctx.exc_return_unstack = exc_return_unstack;
-                            exec_ctx.enter_exception = enter_exception;
 
                             (void)mm_tb_run(tb, &exec_ctx, &done, &tb_bkpt_hit, &tb_bkpt_imm, &ops_executed);
                             if (ops_executed != 0u) {
