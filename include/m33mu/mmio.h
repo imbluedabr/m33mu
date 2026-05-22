@@ -70,6 +70,8 @@ struct mmio_bus {
     size_t region_count;
     size_t region_capacity;
     mm_bool has_step_hooks;
+    size_t last_hit_index;
+    mm_bool last_hit_valid;
 };
 
 void mmio_bus_init(struct mmio_bus *bus, struct mmio_region *region_storage, size_t capacity);

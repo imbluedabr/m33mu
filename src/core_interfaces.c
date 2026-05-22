@@ -32,6 +32,77 @@
 static enum mm_sec_state g_mmio_active_sec = MM_SECURE;
 static mm_bool g_mmio_peek_mode = MM_FALSE;
 
+#define MMIO_CACHE_PAGE_SHIFT 12u
+#define MMIO_CACHE_PAGE_MASK  0xffu
+
+struct mmio_lookup_cache_entry {
+    const struct mmio_bus *bus;
+    mm_u32 page_tag;
+    size_t region_index;
+    mm_bool valid;
+};
+
+static struct mmio_lookup_cache_entry g_mmio_lookup_cache[256];
+
+static void mmio_cache_invalidate_bus(const struct mmio_bus *bus)
+{
+    size_t i;
+    if (bus == 0) {
+        return;
+    }
+    for (i = 0; i < (sizeof(g_mmio_lookup_cache) / sizeof(g_mmio_lookup_cache[0])); ++i) {
+        if (g_mmio_lookup_cache[i].valid && g_mmio_lookup_cache[i].bus == bus) {
+            g_mmio_lookup_cache[i].valid = MM_FALSE;
+        }
+    }
+}
+
+static size_t mmio_cache_slot_for_addr(mm_u32 addr)
+{
+    return (size_t)((addr >> MMIO_CACHE_PAGE_SHIFT) & MMIO_CACHE_PAGE_MASK);
+}
+
+static void mmio_cache_remember(const struct mmio_bus *bus, mm_u32 addr, size_t region_index)
+{
+    size_t slot;
+    if (bus == 0) {
+        return;
+    }
+    slot = mmio_cache_slot_for_addr(addr);
+    g_mmio_lookup_cache[slot].bus = bus;
+    g_mmio_lookup_cache[slot].page_tag = addr >> MMIO_CACHE_PAGE_SHIFT;
+    g_mmio_lookup_cache[slot].region_index = region_index;
+    g_mmio_lookup_cache[slot].valid = MM_TRUE;
+}
+
+static const struct mmio_region *mmio_cache_lookup(const struct mmio_bus *bus, mm_u32 addr, size_t *region_index_out)
+{
+    struct mmio_lookup_cache_entry *entry;
+    const struct mmio_region *region;
+    mm_u32 offset;
+    size_t slot;
+
+    if (bus == 0 || region_index_out == 0) {
+        return 0;
+    }
+    slot = mmio_cache_slot_for_addr(addr);
+    entry = &g_mmio_lookup_cache[slot];
+    if (!entry->valid ||
+        entry->bus != bus ||
+        entry->page_tag != (addr >> MMIO_CACHE_PAGE_SHIFT) ||
+        entry->region_index >= bus->region_count) {
+        return 0;
+    }
+    region = &bus->regions[entry->region_index];
+    offset = addr - region->base;
+    if (addr >= region->base && offset < region->size) {
+        *region_index_out = entry->region_index;
+        return region;
+    }
+    entry->valid = MM_FALSE;
+    return 0;
+}
+
 void mmio_set_active_sec(enum mm_sec_state sec)
 {
     g_mmio_active_sec = sec;
@@ -58,6 +129,9 @@ void mmio_bus_init(struct mmio_bus *bus, struct mmio_region *region_storage, siz
     bus->region_count = 0;
     bus->region_capacity = capacity;
     bus->has_step_hooks = MM_FALSE;
+    bus->last_hit_index = 0u;
+    bus->last_hit_valid = MM_FALSE;
+    mmio_cache_invalidate_bus(bus);
     if (region_storage != 0 && capacity > 0u) {
         memset(region_storage, 0, capacity * sizeof(*region_storage));
     }
@@ -110,19 +184,49 @@ mm_bool mmio_bus_register_region(struct mmio_bus *bus, const struct mmio_region 
     }
     bus->regions[bus->region_count] = clean;
     bus->region_count += 1;
+    bus->last_hit_valid = MM_FALSE;
+    mmio_cache_invalidate_bus(bus);
     return MM_TRUE;
 }
 
 static const struct mmio_region *mmio_bus_find(const struct mmio_bus *bus, mm_u32 addr)
 {
+    struct mmio_bus *mutable_bus;
     size_t i;
+    size_t hit_index;
+
+    if (bus == 0 || bus->regions == 0) {
+        return 0;
+    }
+
+    mutable_bus = (struct mmio_bus *)bus;
+    if (mutable_bus->last_hit_valid &&
+        mutable_bus->last_hit_index < mutable_bus->region_count) {
+        const struct mmio_region *last = &mutable_bus->regions[mutable_bus->last_hit_index];
+        mm_u32 last_offset = addr - last->base;
+        if (addr >= last->base && last_offset < last->size) {
+            mmio_cache_remember(bus, addr, mutable_bus->last_hit_index);
+            return last;
+        }
+    }
+
+    if (mmio_cache_lookup(bus, addr, &hit_index) != 0) {
+        mutable_bus->last_hit_index = hit_index;
+        mutable_bus->last_hit_valid = MM_TRUE;
+        return &mutable_bus->regions[hit_index];
+    }
+
     for (i = 0; i < bus->region_count; ++i) {
         const struct mmio_region *region = &bus->regions[i];
         mm_u32 offset = addr - region->base;
         if (addr >= region->base && offset < region->size) {
+            mutable_bus->last_hit_index = i;
+            mutable_bus->last_hit_valid = MM_TRUE;
+            mmio_cache_remember(bus, addr, i);
             return region;
         }
     }
+    mutable_bus->last_hit_valid = MM_FALSE;
     return 0;
 }
 
