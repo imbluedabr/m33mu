@@ -1524,11 +1524,11 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                        mm_tz_exec_sg(&cpu, &scs, f.pc_fetch);
                                        break;
                         case MM_OP_BXNS:
-                                       mm_tz_exec_bxns(&cpu, cpu.r[d.rm]);
+                                       mm_tz_exec_bxns(&cpu, &scs, cpu.r[d.rm]);
                                        break;
                         case MM_OP_BLXNS:
                                        /* Return address is the next instruction (fetch already advanced PC state). */
-                                       mm_tz_exec_blxns(&cpu, cpu.r[d.rm], (f.pc_fetch + d.len));
+                                       mm_tz_exec_blxns(&cpu, &scs, cpu.r[d.rm], (f.pc_fetch + d.len));
                                        break;
                         case MM_OP_BL:
                                        {

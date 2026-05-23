@@ -66,6 +66,7 @@ static const struct mm_ram_region STM32H563_RAM_REGIONS[] = {
 #define STM32H563_TIMER_RESET mm_stm32h563_timers_reset
 #define STM32H563_TIMER_TICK  mm_stm32h563_timers_tick
 
-#define STM32H563_FLAGS (MM_TARGET_FLAG_NVM_WRITEONCE | MM_TARGET_FLAG_FPU)
+#define STM32H563_FLAGS (MM_TARGET_FLAG_NVM_WRITEONCE | MM_TARGET_FLAG_FPU | \
+                         MM_TARGET_FLAG_FLASH_NS_ALIAS_RAZ_S)
 
 #endif /* M33MU_CPU_STM32H563_CONFIG_H */

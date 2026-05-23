@@ -255,6 +255,7 @@ void mm_memmap_init(struct mm_memmap *map, struct mmio_region *regions, size_t r
     map->code_cache = 0;
     map->flash_base_s = map->flash_base_ns = 0;
     map->flash_size_s = map->flash_size_ns = 0;
+    map->flash_ns_alias_raz_s = MM_FALSE;
     map->ram_base_s = map->ram_base_ns = 0;
     map->ram_size_s = map->ram_size_ns = 0;
     g_current_map = map;
@@ -301,6 +302,8 @@ mm_bool mm_memmap_configure_flash(struct mm_memmap *map, const struct mm_target_
     map->flash_base_ns = cfg->flash_base_ns;
     map->flash_size_s = cfg->flash_size_s;
     map->flash_size_ns = cfg->flash_size_ns;
+    map->flash_ns_alias_raz_s =
+        ((cfg->flags & MM_TARGET_FLAG_FLASH_NS_ALIAS_RAZ_S) != 0u) ? MM_TRUE : MM_FALSE;
     if (secure_view) {
         map->flash.length = cfg->flash_size_s;
         map->flash.base = cfg->flash_base_s;
@@ -387,6 +390,10 @@ mm_bool mm_memmap_read(const struct mm_memmap *map, enum mm_sec_state sec, mm_u3
         }
         if (addr >= base && (addr - base) + size <= size_limit) {
             offset = addr - base;
+            if (sec == MM_SECURE && map->flash_ns_alias_raz_s) {
+                *value_out = 0u;
+                return MM_TRUE;
+            }
             if (map->flash_ecc_check != 0 && !map->flash_ecc_check(map->flash_ecc_check_opaque, offset)) {
                 return MM_FALSE;
             }
@@ -629,6 +636,10 @@ mm_bool mm_memmap_read8(const struct mm_memmap *map, enum mm_sec_state sec, mm_u
         }
         if (addr >= base && (addr - base) < size_limit) {
             mm_u32 flash_off = addr - base;
+            if (sec == MM_SECURE && map->flash_ns_alias_raz_s) {
+                *value_out = 0u;
+                return MM_TRUE;
+            }
             if (map->flash_ecc_check != 0 && !map->flash_ecc_check(map->flash_ecc_check_opaque, flash_off)) {
                 return MM_FALSE;
             }

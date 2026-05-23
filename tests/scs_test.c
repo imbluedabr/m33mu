@@ -123,10 +123,10 @@ static int test_sau_secure_only(void)
     mmio_bus_init(&bus, regions, 1);
     if (!mm_scs_register_regions(&scs, &bus, 0xE000ED00u, 0xE000ED00u, 0)) return 1;
 
-    /* SAU lives at SCB+0xCC and is secure-only in this model.
+    /* SAU lives at SCB+0xD0 and is secure-only in this model.
      * Non-secure access is RAZ/WI, so we only read it from secure here.
      */
-    if (!mmio_bus_read(&bus, 0xE000EDCCu, 4u, &val)) return 1;
+    if (!mmio_bus_read(&bus, 0xE000EDD4u, 4u, &val)) return 1;
     if (val != 0x7u) return 1;
 
     /* Only secure writes are honoured; non-secure reads see zeros. */
@@ -138,7 +138,7 @@ static int test_sau_secure_only(void)
     if (!mmio_bus_write(&bus, 0xE000EDD0u, 4u, 0x1u)) return 1;
     if (!mmio_bus_read(&bus, 0xE000EDD0u, 4u, &val)) return 1;
     if (val != 0x0u) return 1;
-    if (!mmio_bus_read(&bus, 0xE000EDCCu, 4u, &val)) return 1;
+    if (!mmio_bus_read(&bus, 0xE000EDD4u, 4u, &val)) return 1;
     if (val != 0x0u) return 1;
     scs.last_access_sec = MM_SECURE;
     if (!mmio_bus_read(&bus, 0xE000EDD0u, 4u, &val)) return 1;
@@ -157,27 +157,27 @@ static int test_sau_region_bank(void)
     mmio_bus_init(&bus, regions, 1);
     if (!mm_scs_register_regions(&scs, &bus, 0xE000ED00u, 0xE000ED00u, 0)) return 1;
 
-    /* Program region 2 and region 3 using the new SAU layout (CTRL@0xD0, RNR@0xD4,
-     * RBAR@0xD8, RLAR@0xDC) and read back through the bank.
+    /* Program region 2 and region 3 using the ARMv8-M SAU layout:
+     * CTRL@0xD0, TYPE@0xD4, RNR@0xD8, RBAR@0xDC, RLAR@0xE0.
      */
-    if (!mmio_bus_write(&bus, 0xE000EDD4u, 4u, 2u)) return 1; /* SAU_RNR (new) */
-    if (!mmio_bus_write(&bus, 0xE000EDD8u, 4u, 0x11111000u)) return 1; /* SAU_RBAR */
-    if (!mmio_bus_write(&bus, 0xE000EDDCu, 4u, 0x22222001u)) return 1; /* SAU_RLAR (EN=1) */
+    if (!mmio_bus_write(&bus, 0xE000EDD8u, 4u, 2u)) return 1; /* SAU_RNR */
+    if (!mmio_bus_write(&bus, 0xE000EDDCu, 4u, 0x11111000u)) return 1; /* SAU_RBAR */
+    if (!mmio_bus_write(&bus, 0xE000EDE0u, 4u, 0x22222001u)) return 1; /* SAU_RLAR (EN=1) */
 
-    if (!mmio_bus_write(&bus, 0xE000EDD4u, 4u, 3u)) return 1; /* SAU_RNR (new) */
-    if (!mmio_bus_write(&bus, 0xE000EDD8u, 4u, 0x33333000u)) return 1; /* SAU_RBAR */
-    if (!mmio_bus_write(&bus, 0xE000EDDCu, 4u, 0x44444001u)) return 1; /* SAU_RLAR (EN=1) */
+    if (!mmio_bus_write(&bus, 0xE000EDD8u, 4u, 3u)) return 1; /* SAU_RNR */
+    if (!mmio_bus_write(&bus, 0xE000EDDCu, 4u, 0x33333000u)) return 1; /* SAU_RBAR */
+    if (!mmio_bus_write(&bus, 0xE000EDE0u, 4u, 0x44444001u)) return 1; /* SAU_RLAR (EN=1) */
 
-    if (!mmio_bus_write(&bus, 0xE000EDD4u, 4u, 2u)) return 1;
-    if (!mmio_bus_read(&bus, 0xE000EDD8u, 4u, &val)) return 1;
-    if (val != 0x11111000u) return 1;
+    if (!mmio_bus_write(&bus, 0xE000EDD8u, 4u, 2u)) return 1;
     if (!mmio_bus_read(&bus, 0xE000EDDCu, 4u, &val)) return 1;
+    if (val != 0x11111000u) return 1;
+    if (!mmio_bus_read(&bus, 0xE000EDE0u, 4u, &val)) return 1;
     if (val != 0x22222001u) return 1;
 
-    if (!mmio_bus_write(&bus, 0xE000EDD4u, 4u, 3u)) return 1;
-    if (!mmio_bus_read(&bus, 0xE000EDD8u, 4u, &val)) return 1;
-    if (val != 0x33333000u) return 1;
+    if (!mmio_bus_write(&bus, 0xE000EDD8u, 4u, 3u)) return 1;
     if (!mmio_bus_read(&bus, 0xE000EDDCu, 4u, &val)) return 1;
+    if (val != 0x33333000u) return 1;
+    if (!mmio_bus_read(&bus, 0xE000EDE0u, 4u, &val)) return 1;
     if (val != 0x44444001u) return 1;
 
     return 0;

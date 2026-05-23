@@ -50,7 +50,6 @@ struct mm_scs_mmio {
 #define NVIC_REG_BLOCK_END (0x100u + 4u * NVIC_WORDS)
 
 static mm_bool g_meminfo_enabled = MM_FALSE;
-static int g_sau_layout = 0; /* 0=unknown, 1=new(CTRL@0xD0/RNR@0xD4), 2=legacy(RNR@0xD8) */
 #define NVIC_WORDS ((MM_MAX_IRQ + 31u) / 32u)
 static mm_u32 g_nvic_enable_log_first[NVIC_WORDS];
 static mm_u32 g_nvic_enable_log_second[NVIC_WORDS];
@@ -365,25 +364,18 @@ static mm_u32 scs_read_scb_reg(const struct mm_scs_mmio *ctx, struct mm_scs *scs
     }
     case 0xC0: val = (eff_sec == MM_NONSECURE) ? scs->mpu_mair0_ns : scs->mpu_mair0_s; break;
     case 0xC4: val = (eff_sec == MM_NONSECURE) ? scs->mpu_mair1_ns : scs->mpu_mair1_s; break;
-    case 0xCC: val = (eff_sec == MM_SECURE) ? scs->sau_type : 0u; break;
     case 0xD0: val = (eff_sec == MM_SECURE) ? scs->sau_ctrl : 0u; break;
-    case 0xD4: val = (eff_sec == MM_SECURE) ? scs->sau_rnr : 0u; break;
-    case 0xD8:
-        if (eff_sec != MM_SECURE) { val = 0; break; }
-        val = (g_sau_layout == 2) ? scs->sau_rnr : scs->sau_rbar[scs->sau_rnr & 0x7u];
-        break;
+    case 0xD4: val = (eff_sec == MM_SECURE) ? scs->sau_type : 0u; break;
+    case 0xD8: val = (eff_sec == MM_SECURE) ? scs->sau_rnr : 0u; break;
     case 0xDC:
         if (eff_sec != MM_SECURE) { val = 0; break; }
-        val = (g_sau_layout == 2) ? scs->sau_rbar[scs->sau_rnr & 0x7u] : scs->sau_rlar[scs->sau_rnr & 0x7u];
+        val = scs->sau_rbar[scs->sau_rnr & 0x7u];
         break;
     case 0xE0:
         if (eff_sec != MM_SECURE) { val = 0; break; }
-        val = (g_sau_layout == 2) ? scs->sau_rlar[scs->sau_rnr & 0x7u] : scs->sau_sfsr;
+        val = scs->sau_rlar[scs->sau_rnr & 0x7u];
         break;
-    case 0xE4:
-        if (eff_sec != MM_SECURE) { val = 0; break; }
-        val = (g_sau_layout == 2) ? scs->sau_sfsr : scs->sau_sfar;
-        break;
+    case 0xE4: val = (eff_sec == MM_SECURE) ? scs->sau_sfsr : 0u; break;
     case 0xE8: val = (eff_sec == MM_SECURE) ? scs->sau_sfar : 0u; break;
     default: val = 0; break;
     }
@@ -654,17 +646,6 @@ static mm_bool nvic_enable_log_suppressed(mm_u32 idx, mm_u32 value)
 void mm_scs_set_meminfo(mm_bool enabled)
 {
     g_meminfo_enabled = enabled ? MM_TRUE : MM_FALSE;
-}
-
-static void sau_set_layout(int layout)
-{
-    if (layout == 0 || layout == g_sau_layout) {
-        return;
-    }
-    g_sau_layout = layout;
-    if (g_meminfo_enabled) {
-        printf("[MEMINFO] SAU_LAYOUT=%s\n", (layout == 2) ? "legacy" : "new");
-    }
 }
 
 void mm_scs_init(struct mm_scs *scs, mm_u32 cpuid_const)
@@ -1083,7 +1064,9 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                    (unsigned long)value);
         }
         return MM_TRUE;
-    case 0xD4: /* SAU_RNR (new layout) */
+    case 0xD4: /* SAU_TYPE is read-only. */
+        return MM_TRUE;
+    case 0xD8: /* SAU_RNR */
         if (eff_sec == MM_SECURE) {
             scs->sau_rnr = value & 0x7u;
             if (g_meminfo_enabled) {
@@ -1095,117 +1078,57 @@ static mm_bool scs_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
                    (unsigned long)value);
         }
         return MM_TRUE;
-    case 0xD8: /* SAU_RNR (legacy) or SAU_RBAR (new) */
+    case 0xDC: /* SAU_RBAR */
         if (eff_sec == MM_SECURE) {
-            if ((value & ~0x7u) == 0u) {
-                scs->sau_rnr = value & 0x7u;
-                if (value != 0u) sau_set_layout(2);
-                if (g_meminfo_enabled) {
-                    printf("[MEMINFO] SAU_RNR=%lu\n",
-                           (unsigned long)(value & 0x7u));
-                }
-            } else {
-                mm_u32 idx = scs->sau_rnr & 0x7u;
-                scs->sau_rbar[idx] = value;
-                if (g_meminfo_enabled) {
-                    printf("[MEMINFO] SAU_RBAR[%lu]=0x%08lx (BASE=0x%08lx)\n",
-                           (unsigned long)idx,
-                           (unsigned long)value,
-                           (unsigned long)(value & 0xFFFFFFE0u));
-                }
+            mm_u32 idx = scs->sau_rnr & 0x7u;
+            scs->sau_rbar[idx] = value;
+            if (g_meminfo_enabled) {
+                printf("[MEMINFO] SAU_RBAR[%lu]=0x%08lx (BASE=0x%08lx)\n",
+                       (unsigned long)idx,
+                       (unsigned long)value,
+                       (unsigned long)(value & 0xFFFFFFE0u));
             }
         } else if (g_meminfo_enabled) {
-            printf("[MEMINFO] SAU_RNR/RBAR write ignored (NS) value=0x%08lx\n",
+            printf("[MEMINFO] SAU_RBAR write ignored (NS) value=0x%08lx\n",
                    (unsigned long)value);
         }
         return MM_TRUE;
-    case 0xDC: /* SAU_RBAR (legacy) or SAU_RLAR (new) */
+    case 0xE0: /* SAU_RLAR */
         if (eff_sec == MM_SECURE) {
-            if ((value & 0x1Fu) == 0u) {
-                mm_u32 idx = scs->sau_rnr & 0x7u;
-                scs->sau_rbar[idx] = value;
-                if (value != 0u) sau_set_layout(2);
-                if (g_meminfo_enabled) {
-                    printf("[MEMINFO] SAU_RBAR[%lu]=0x%08lx (BASE=0x%08lx)\n",
-                           (unsigned long)idx,
-                           (unsigned long)value,
-                           (unsigned long)(value & 0xFFFFFFE0u));
-                }
-            } else {
-                mm_u32 idx = scs->sau_rnr & 0x7u;
-                scs->sau_rlar[idx] = value;
-                if (g_meminfo_enabled) {
-                    mm_u32 base = scs->sau_rbar[idx] & 0xFFFFFFE0u;
-                    mm_u32 limit = value & 0xFFFFFFE0u;
-                    mm_u32 end = limit | 0x1Fu;
-                    printf("[MEMINFO] SAU_RLAR[%lu]=0x%08lx (EN=%lu NSC=%lu LIMIT=0x%08lx RANGE=0x%08lx..0x%08lx)\n",
-                           (unsigned long)idx,
-                           (unsigned long)value,
-                           (unsigned long)((value & 0x1u) != 0u),
-                           (unsigned long)((value & 0x2u) != 0u),
-                           (unsigned long)limit,
-                           (unsigned long)base,
-                           (unsigned long)end);
-                }
+            mm_u32 idx = scs->sau_rnr & 0x7u;
+            scs->sau_rlar[idx] = value;
+            if (g_meminfo_enabled) {
+                mm_u32 base = scs->sau_rbar[idx] & 0xFFFFFFE0u;
+                mm_u32 limit = value & 0xFFFFFFE0u;
+                mm_u32 end = limit | 0x1Fu;
+                printf("[MEMINFO] SAU_RLAR[%lu]=0x%08lx (EN=%lu NSC=%lu LIMIT=0x%08lx RANGE=0x%08lx..0x%08lx)\n",
+                       (unsigned long)idx,
+                       (unsigned long)value,
+                       (unsigned long)((value & 0x1u) != 0u),
+                       (unsigned long)((value & 0x2u) != 0u),
+                       (unsigned long)limit,
+                       (unsigned long)base,
+                       (unsigned long)end);
             }
         } else if (g_meminfo_enabled) {
-            printf("[MEMINFO] SAU_RBAR/RLAR write ignored (NS) value=0x%08lx\n",
+            printf("[MEMINFO] SAU_RLAR write ignored (NS) value=0x%08lx\n",
                    (unsigned long)value);
         }
         return MM_TRUE;
-    case 0xE0: /* SAU_RLAR (legacy) or SAU_SFSR (new) */
+    case 0xE4: /* SAU_SFSR */
         if (eff_sec == MM_SECURE) {
-            if (value <= 0xFFu) {
-                scs->sau_sfsr = value;
-                if (g_meminfo_enabled) {
-                    printf("[MEMINFO] SAU_SFSR=0x%08lx\n", (unsigned long)value);
-                }
-            } else {
-                mm_u32 idx = scs->sau_rnr & 0x7u;
-                scs->sau_rlar[idx] = value;
-                sau_set_layout(2);
-                if (g_meminfo_enabled) {
-                    mm_u32 base = scs->sau_rbar[idx] & 0xFFFFFFE0u;
-                    mm_u32 limit = value & 0xFFFFFFE0u;
-                    mm_u32 end = limit | 0x1Fu;
-                    printf("[MEMINFO] SAU_RLAR[%lu]=0x%08lx (EN=%lu NSC=%lu LIMIT=0x%08lx RANGE=0x%08lx..0x%08lx)\n",
-                           (unsigned long)idx,
-                           (unsigned long)value,
-                           (unsigned long)((value & 0x1u) != 0u),
-                           (unsigned long)((value & 0x2u) != 0u),
-                           (unsigned long)limit,
-                           (unsigned long)base,
-                           (unsigned long)end);
-                }
+            scs->sau_sfsr = value;
+            if (g_meminfo_enabled) {
+                printf("[MEMINFO] SAU_SFSR=0x%08lx\n", (unsigned long)value);
             }
         } else if (g_meminfo_enabled) {
-            printf("[MEMINFO] SAU_RLAR/SFSR write ignored (NS) value=0x%08lx\n",
+            printf("[MEMINFO] SAU_SFSR write ignored (NS) value=0x%08lx\n",
                    (unsigned long)value);
         }
         return MM_TRUE;
-    case 0xE4: /* SAU_SFSR (legacy) or SAU_SFAR (new) */
-        if (eff_sec == MM_SECURE) {
-            if (value <= 0xFFu) {
-                scs->sau_sfsr = value;
-                sau_set_layout(2);
-                if (g_meminfo_enabled) {
-                    printf("[MEMINFO] SAU_SFSR=0x%08lx\n", (unsigned long)value);
-                }
-            } else {
-                scs->sau_sfar = value;
-                if (g_meminfo_enabled) {
-                    printf("[MEMINFO] SAU_SFAR=0x%08lx\n", (unsigned long)value);
-                }
-            }
-        } else if (g_meminfo_enabled) {
-            printf("[MEMINFO] SAU_SFSR/SFAR write ignored (NS) value=0x%08lx\n",
-                   (unsigned long)value);
-        }
-        return MM_TRUE;
-    case 0xE8: /* SAU_SFAR (legacy) */
+    case 0xE8: /* SAU_SFAR */
         if (eff_sec == MM_SECURE) {
             scs->sau_sfar = value;
-            sau_set_layout(2);
             if (g_meminfo_enabled) {
                 printf("[MEMINFO] SAU_SFAR=0x%08lx\n", (unsigned long)value);
             }

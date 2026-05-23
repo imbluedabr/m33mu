@@ -25,6 +25,12 @@
 #include "m33mu/mem_prot.h"
 #include "m33mu/scs.h"
 
+static mm_bool test_mpcbb_block_secure(int bank, mm_u32 block_index)
+{
+    (void)bank;
+    return block_index == 0u ? MM_FALSE : MM_TRUE;
+}
+
 static int test_nsc_exec_allowed_data_denied(void)
 {
     struct mm_memmap map;
@@ -114,6 +120,59 @@ static int test_nsc_exec_allowed_data_denied(void)
     return 0;
 }
 
+static int test_secure_sram_alias_denied_when_mpcbb_marks_ns(void)
+{
+    struct mm_memmap map;
+    struct mmio_region regions[4];
+    struct mm_target_cfg cfg;
+    struct mm_scs scs;
+    struct mm_prot_ctx prot;
+    struct mm_ram_region ram_regions[1];
+    mm_u8 ram[0x400];
+    mm_u32 v;
+
+    memset(&cfg, 0, sizeof(cfg));
+    memset(ram, 0, sizeof(ram));
+    ram_regions[0].base_s = 0x30000000u;
+    ram_regions[0].base_ns = 0x20000000u;
+    ram_regions[0].size = sizeof(ram);
+    ram_regions[0].mpcbb_index = 0;
+    cfg.ram_base_s = 0x30000000u;
+    cfg.ram_size_s = sizeof(ram);
+    cfg.ram_base_ns = 0x20000000u;
+    cfg.ram_size_ns = sizeof(ram);
+    cfg.ram_regions = ram_regions;
+    cfg.ram_region_count = 1u;
+    cfg.mpcbb_block_size = 512u;
+    cfg.mpcbb_block_secure = test_mpcbb_block_secure;
+
+    mm_memmap_init(&map, regions, 4);
+    if (!mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE)) return 1;
+
+    mm_scs_init(&scs, 0);
+    scs.sau_ctrl = 0x1u;
+    scs.sau_rbar[0] = 0x20000000u;
+    scs.sau_rlar[0] = 0x200003E0u | 0x1u;
+
+    mm_prot_init(&prot, &scs, &cfg, 0);
+    mm_memmap_set_interceptor(&map, mm_prot_interceptor, &prot);
+    mm_prot_add_region(&prot, 0x30000000u, sizeof(ram),
+                       MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+    mm_prot_add_region(&prot, 0x20000000u, sizeof(ram),
+                       MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+
+    if (mm_memmap_read(&map, MM_SECURE, 0x30000000u, 4u, &v)) return 1;
+    if ((scs.cfsr_s & 0x82u) != 0x82u) return 1;
+    if (scs.mmfar_s != 0x30000000u) return 1;
+
+    scs.cfsr_s = 0u;
+    scs.mmfar_s = 0u;
+    if (!mm_memmap_read(&map, MM_SECURE, 0x20000000u, 4u, &v)) return 1;
+    if (scs.cfsr_s != 0u) return 1;
+
+    return 0;
+}
+
 static int test_secure_data_read_can_access_ns_window_even_if_sau_disabled(void)
 {
     struct mm_memmap map;
@@ -171,6 +230,7 @@ int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "nsc_exec_allowed_data_denied", test_nsc_exec_allowed_data_denied },
+        { "secure_sram_alias_denied_when_mpcbb_marks_ns", test_secure_sram_alias_denied_when_mpcbb_marks_ns },
         { "secure_data_read_can_access_ns_window_even_if_sau_disabled", test_secure_data_read_can_access_ns_window_even_if_sau_disabled },
     };
     int failures = 0;

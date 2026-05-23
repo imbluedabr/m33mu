@@ -31,7 +31,7 @@
 #define MM_TZ_FNC_RETURN 0xFEFFFFFFu
 
 void mm_tz_exec_sg(struct mm_cpu *cpu, struct mm_scs *scs, mm_u32 insn_addr);
-void mm_tz_exec_bxns(struct mm_cpu *cpu, mm_u32 target);
-void mm_tz_exec_blxns(struct mm_cpu *cpu, mm_u32 target, mm_u32 return_addr);
+void mm_tz_exec_bxns(struct mm_cpu *cpu, struct mm_scs *scs, mm_u32 target);
+void mm_tz_exec_blxns(struct mm_cpu *cpu, struct mm_scs *scs, mm_u32 target, mm_u32 return_addr);
 
 #endif /* M33MU_TZ_H */

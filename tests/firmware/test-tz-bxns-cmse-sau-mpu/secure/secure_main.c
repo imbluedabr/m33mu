@@ -37,14 +37,14 @@
 #define SHARED_STATUS   (*(volatile uint32_t*)(SHARED_STATUS_ADDR))
 
 /* SAU register layout (new, ARMv8-M Mainline):
- * TYPE @ 0xE000EDCC, CTRL @ 0xE000EDD0, RNR @ 0xE000EDD4,
- * RBAR @ 0xE000EDD8, RLAR @ 0xE000EDDC.
+ * CTRL @ 0xE000EDD0, TYPE @ 0xE000EDD4, RNR @ 0xE000EDD8,
+ * RBAR @ 0xE000EDDC, RLAR @ 0xE000EDE0.
  */
-#define SAU_TYPE        (*(volatile uint32_t*)(0xE000EDCCu))
 #define SAU_CTRL        (*(volatile uint32_t*)(0xE000EDD0u))
-#define SAU_RNR         (*(volatile uint32_t*)(0xE000EDD4u))
-#define SAU_RBAR        (*(volatile uint32_t*)(0xE000EDD8u))
-#define SAU_RLAR        (*(volatile uint32_t*)(0xE000EDDCu))
+#define SAU_TYPE        (*(volatile uint32_t*)(0xE000EDD4u))
+#define SAU_RNR         (*(volatile uint32_t*)(0xE000EDD8u))
+#define SAU_RBAR        (*(volatile uint32_t*)(0xE000EDDCu))
+#define SAU_RLAR        (*(volatile uint32_t*)(0xE000EDE0u))
 #define SAU_SFSR        (*(volatile uint32_t*)(0xE000EDE4u))
 #define SAU_SFAR        (*(volatile uint32_t*)(0xE000EDE8u))
 

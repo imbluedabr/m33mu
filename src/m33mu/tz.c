@@ -26,6 +26,7 @@
 #include <stdlib.h>
 
 #define SFSR_INVEP     (1u << 0)
+#define SFSR_AUVIOL    (1u << 3)
 #define SFSR_SFARVALID (1u << 6)
 
 static int g_tz_trace = -1;
@@ -57,6 +58,68 @@ static void tz_note_ns_msp_top(struct mm_cpu *cpu)
     if (cpu->sec_state == MM_NONSECURE) {
         mm_cpu_note_msp_top(cpu, MM_NONSECURE);
     }
+}
+
+static mm_bool tz_target_is_valid_ns(struct mm_scs *scs, mm_u32 target)
+{
+    mm_u32 addr = target & ~1u;
+
+    if (target == 0u || addr == 0u) {
+        return MM_FALSE;
+    }
+    if (scs == 0) {
+        return MM_TRUE;
+    }
+    return mm_sau_attr_for_addr(scs, addr) == MM_SAU_NONSECURE;
+}
+
+static void tz_record_invalid_entry(struct mm_scs *scs, mm_u32 target)
+{
+    if (scs == 0) {
+        return;
+    }
+    scs->sau_sfsr |= SFSR_INVEP | SFSR_AUVIOL | SFSR_SFARVALID;
+    scs->sau_sfar = target & ~1u;
+    scs->securefault_pending = MM_TRUE;
+}
+
+static void tz_warn_if_reset_vector_mismatch(struct mm_scs *scs, mm_u32 target)
+{
+    static mm_u32 last_vtor;
+    static mm_u32 last_target;
+    struct mm_memmap *map;
+    mm_u32 reset = 0u;
+    mm_u32 target_addr = target & ~1u;
+    mm_u32 reset_addr;
+    mm_u32 delta;
+
+    if (scs == 0 || scs->vtor_ns == 0u || target_addr == 0u) {
+        return;
+    }
+    map = mm_memmap_current();
+    if (map == 0) {
+        return;
+    }
+    if (!mm_memmap_read(map, MM_NONSECURE, scs->vtor_ns + 4u, 4u, &reset)) {
+        return;
+    }
+    reset_addr = reset & ~1u;
+    if (reset_addr == 0u || reset_addr == target_addr) {
+        return;
+    }
+    delta = (target_addr > reset_addr) ? (target_addr - reset_addr) : (reset_addr - target_addr);
+    if (delta > 0x400u) {
+        return;
+    }
+    if (last_vtor == scs->vtor_ns && last_target == target_addr) {
+        return;
+    }
+    last_vtor = scs->vtor_ns;
+    last_target = target_addr;
+    printf("[TZ_WARN] non-secure branch target 0x%08lx differs from VTOR_NS reset vector 0x%08lx (VTOR_NS=0x%08lx)\n",
+           (unsigned long)target_addr,
+           (unsigned long)reset_addr,
+           (unsigned long)scs->vtor_ns);
 }
 
 static void tz_dump_words(const char *tag, struct mm_cpu *cpu, enum mm_sec_state sec,
@@ -164,7 +227,7 @@ void mm_tz_exec_sg(struct mm_cpu *cpu, struct mm_scs *scs, mm_u32 insn_addr)
     }
 }
 
-void mm_tz_exec_bxns(struct mm_cpu *cpu, mm_u32 target)
+void mm_tz_exec_bxns(struct mm_cpu *cpu, struct mm_scs *scs, mm_u32 target)
 {
     if (cpu == 0) {
         return;
@@ -184,19 +247,29 @@ void mm_tz_exec_bxns(struct mm_cpu *cpu, mm_u32 target)
                (unsigned long)cpu->psp_s,
                (unsigned long)cpu->psp_ns);
     }
+    if (!tz_target_is_valid_ns(scs, target)) {
+        tz_record_invalid_entry(scs, target);
+        return;
+    }
+    tz_warn_if_reset_vector_mismatch(scs, target);
     cpu->sec_state = MM_NONSECURE;
     tz_note_ns_msp_top(cpu);
     tz_sync_r13_from_active_sp(cpu);
     cpu->r[15] = target | 1u;
 }
 
-void mm_tz_exec_blxns(struct mm_cpu *cpu, mm_u32 target, mm_u32 return_addr)
+void mm_tz_exec_blxns(struct mm_cpu *cpu, struct mm_scs *scs, mm_u32 target, mm_u32 return_addr)
 {
     mm_u32 ra;
     if (cpu == 0) {
         return;
     }
     /* BLXNS is defined for Secure->Non-secure call. */
+    if (!tz_target_is_valid_ns(scs, target)) {
+        tz_record_invalid_entry(scs, target);
+        return;
+    }
+    tz_warn_if_reset_vector_mismatch(scs, target);
     ra = return_addr | 1u;
     tz_push_secure_call_frame(cpu, ra);
     if (tz_trace_enabled()) {

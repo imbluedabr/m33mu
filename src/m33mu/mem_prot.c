@@ -124,7 +124,8 @@ static const char *type_name(enum mm_access_type type)
 static mm_bool mpcbb_attr_for_addr(const struct mm_prot_ctx *ctx,
                                    mm_u32 addr,
                                    enum mm_sau_attr *attr_out,
-                                   enum mm_sec_state *sec_out)
+                                   enum mm_sec_state *sec_out,
+                                   mm_bool *secure_alias_out)
 {
     const struct mm_target_cfg *cfg;
     mm_u32 i;
@@ -138,11 +139,17 @@ static mm_bool mpcbb_attr_for_addr(const struct mm_prot_ctx *ctx,
     }
     for (i = 0; i < cfg->ram_region_count; ++i) {
         const struct mm_ram_region *r = &cfg->ram_regions[i];
+        if (r->mpcbb_index < 0) {
+            continue;
+        }
         if (addr >= r->base_s && (addr - r->base_s) < r->size) {
             mm_u32 block = (addr - r->base_s) / cfg->mpcbb_block_size;
             mm_bool sec = cfg->mpcbb_block_secure(r->mpcbb_index, block);
             *sec_out = sec ? MM_SECURE : MM_NONSECURE;
             *attr_out = sec ? MM_SAU_SECURE : MM_SAU_NONSECURE;
+            if (secure_alias_out != 0) {
+                *secure_alias_out = (r->base_s != r->base_ns) ? MM_TRUE : MM_FALSE;
+            }
             return MM_TRUE;
         }
         if (addr >= r->base_ns && (addr - r->base_ns) < r->size) {
@@ -150,6 +157,9 @@ static mm_bool mpcbb_attr_for_addr(const struct mm_prot_ctx *ctx,
             mm_bool sec = cfg->mpcbb_block_secure(r->mpcbb_index, block);
             *sec_out = sec ? MM_SECURE : MM_NONSECURE;
             *attr_out = sec ? MM_SAU_SECURE : MM_SAU_NONSECURE;
+            if (secure_alias_out != 0) {
+                *secure_alias_out = MM_FALSE;
+            }
             return MM_TRUE;
         }
     }
@@ -409,6 +419,7 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
     mm_bool ignore_addr_sec;
     mm_bool privileged = MM_TRUE;
     mm_bool mpcbb_hit = MM_FALSE;
+    mm_bool mpcbb_secure_alias = MM_FALSE;
     mm_u32 needed = 0;
     size_t i;
 
@@ -463,7 +474,8 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
             mpcbb_hit = MM_FALSE;
         } else if (ctx->scs != 0) {
             sau_attr = mm_sau_attr_for_addr(ctx->scs, addr);
-            mpcbb_hit = mpcbb_attr_for_addr(ctx, addr, &mpc_attr, &mpc_addr_sec);
+            mpcbb_hit = mpcbb_attr_for_addr(ctx, addr, &mpc_attr, &mpc_addr_sec,
+                                            &mpcbb_secure_alias);
             if (mpcbb_hit) {
                 /* For SRAM on STM32H5, MPCBB (IDAU) and SAU both apply.
                  * Treat the most restrictive attribution as effective. */
@@ -476,6 +488,13 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
                 attr = sau_attr;
             }
             addr_sec = (attr == MM_SAU_NONSECURE) ? MM_NONSECURE : MM_SECURE;
+        }
+        if (sec == MM_SECURE && mpcbb_hit && mpcbb_secure_alias &&
+            mpc_attr == MM_SAU_NONSECURE) {
+            memfault_reason(ctx, type, sec, addr, "mpcbb-secure-alias-ns",
+                            attr, addr_sec, mpcbb_hit);
+            record_memfault(ctx, sec, type, addr);
+            return MM_FALSE;
         }
         if (sec == MM_NONSECURE) {
             if (attr == MM_SAU_SECURE) {

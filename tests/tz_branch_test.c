@@ -27,12 +27,17 @@
 
 static void cpu_init(struct mm_cpu *cpu)
 {
-    int i;
-    for (i = 0; i < 16; ++i) cpu->r[i] = 0;
+    memset(cpu, 0, sizeof(*cpu));
     cpu->sec_state = MM_SECURE;
     cpu->mode = MM_THREAD;
-    cpu->exc_depth = 0;
-    cpu->tz_depth = 0;
+}
+
+static void sau_allow_ns_flash(struct mm_scs *scs)
+{
+    memset(scs, 0, sizeof(*scs));
+    scs->sau_ctrl = 0x1u;
+    scs->sau_rbar[0] = 0x08000000u;
+    scs->sau_rlar[0] = 0x080FFFE0u | 0x1u;
 }
 
 static int test_sg_ns_to_s(void)
@@ -75,19 +80,24 @@ static int test_sg_outside_nsc_raises_securefault(void)
 static int test_bxns_s_to_ns(void)
 {
     struct mm_cpu cpu;
+    struct mm_scs scs;
     cpu_init(&cpu);
-    mm_tz_exec_bxns(&cpu, 0x08000100u);
+    sau_allow_ns_flash(&scs);
+    mm_tz_exec_bxns(&cpu, &scs, 0x08000100u);
     if (cpu.sec_state != MM_NONSECURE) return 1;
     if (cpu.r[15] != (0x08000100u | 1u)) return 1;
+    if (scs.securefault_pending) return 1;
     return 0;
 }
 
 static int test_blxns_sets_lr_and_branches(void)
 {
     struct mm_cpu cpu;
+    struct mm_scs scs;
     cpu_init(&cpu);
+    sau_allow_ns_flash(&scs);
     cpu.r[14] = 0;
-    mm_tz_exec_blxns(&cpu, 0x08000200u, 0x0c000123u);
+    mm_tz_exec_blxns(&cpu, &scs, 0x08000200u, 0x0c000123u);
     if (cpu.sec_state != MM_NONSECURE) return 1;
     if (cpu.r[15] != (0x08000200u | 1u)) return 1;
     if (cpu.r[14] != MM_TZ_FNC_RETURN) return 1;
@@ -100,8 +110,10 @@ static int test_blxns_sets_lr_and_branches(void)
 static int test_blxns_stack_full_aborts_transition(void)
 {
     struct mm_cpu cpu;
+    struct mm_scs scs;
     mm_u32 i;
     cpu_init(&cpu);
+    sau_allow_ns_flash(&scs);
     cpu.sec_state = MM_SECURE;
     cpu.mode = MM_THREAD;
     cpu.r[14] = 0x12345679u;
@@ -114,7 +126,7 @@ static int test_blxns_stack_full_aborts_transition(void)
         cpu.tz_ret_mode[i] = MM_THREAD;
     }
 
-    mm_tz_exec_blxns(&cpu, 0x08000200u, 0x0c000123u);
+    mm_tz_exec_blxns(&cpu, &scs, 0x08000200u, 0x0c000123u);
 
     if (cpu.sec_state != MM_SECURE) return 1;
     if (cpu.mode != MM_THREAD) return 1;
@@ -130,6 +142,24 @@ static int test_blxns_stack_full_aborts_transition(void)
     return 0;
 }
 
+static int test_blxns_null_target_raises_securefault(void)
+{
+    struct mm_cpu cpu;
+    struct mm_scs scs;
+    cpu_init(&cpu);
+    sau_allow_ns_flash(&scs);
+    cpu.r[15] = 0x0c000100u;
+
+    mm_tz_exec_blxns(&cpu, &scs, 0u, 0x0c000123u);
+
+    if (cpu.sec_state != MM_SECURE) return 1;
+    if (!scs.securefault_pending) return 1;
+    if (scs.sau_sfar != 0u) return 1;
+    if ((scs.sau_sfsr & ((1u << 0) | (1u << 3) | (1u << 6))) !=
+        ((1u << 0) | (1u << 3) | (1u << 6))) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
@@ -138,6 +168,7 @@ int main(void)
         { "bxns_s_to_ns", test_bxns_s_to_ns },
         { "blxns_sets_lr_and_branches", test_blxns_sets_lr_and_branches },
         { "blxns_stack_full_aborts_transition", test_blxns_stack_full_aborts_transition },
+        { "blxns_null_target_raises_securefault", test_blxns_null_target_raises_securefault },
     };
     int failures = 0;
     int i;

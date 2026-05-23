@@ -60,6 +60,36 @@ static int test_banked_flash_same_backing(void)
     return 0;
 }
 
+static int test_secure_read_ns_flash_alias_raz(void)
+{
+    struct mm_memmap map;
+    struct mmio_region regions[4];
+    struct mm_target_cfg cfg;
+    mm_u8 flash[16];
+    mm_u32 val = 0xFFFFFFFFu;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flash_base_s = 0x0C000000u;
+    cfg.flash_size_s = sizeof(flash);
+    cfg.flash_base_ns = 0x08000000u;
+    cfg.flash_size_ns = sizeof(flash);
+    cfg.flags = MM_TARGET_FLAG_FLASH_NS_ALIAS_RAZ_S;
+
+    memset(flash, 0xFF, sizeof(flash));
+    flash[0] = 0x12;
+    flash[1] = 0x34;
+
+    mm_memmap_init(&map, regions, 4);
+    if (!mm_memmap_configure_flash(&map, &cfg, flash, MM_TRUE)) return 1;
+    if (!mm_memmap_read(&map, MM_SECURE, 0x0C000000u, 2u, &val)) return 1;
+    if ((val & 0xFFFFu) != 0x3412u) return 1;
+    if (!mm_memmap_read(&map, MM_NONSECURE, 0x08000000u, 2u, &val)) return 1;
+    if ((val & 0xFFFFu) != 0x3412u) return 1;
+    if (!mm_memmap_read(&map, MM_SECURE, 0x08000000u, 2u, &val)) return 1;
+    if (val != 0u) return 1;
+    return 0;
+}
+
 static int test_ram_write_read(void)
 {
     struct mm_memmap map;
@@ -111,6 +141,7 @@ int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "banked_flash", test_banked_flash_same_backing },
+        { "secure_read_ns_flash_alias_raz", test_secure_read_ns_flash_alias_raz },
         { "ram_write_read", test_ram_write_read },
         { "interceptor_blocks", test_interceptor_blocks_write },
     };
