@@ -2840,7 +2840,8 @@ static void scs_set_vectactive(struct mm_scs *scs, enum mm_sec_state sec, mm_u32
     *icsr = (*icsr & ~0x1FFu) | (exc_num & 0x1FFu);
 }
 
-static mm_u32 exc_return_encode(enum mm_sec_state sec,
+static mm_u32 exc_return_encode(enum mm_sec_state stack_sec,
+                                enum mm_sec_state exception_sec,
                                 mm_bool use_psp,
                                 mm_bool to_thread,
                                 mm_bool basic_frame,
@@ -2854,12 +2855,14 @@ static mm_u32 exc_return_encode(enum mm_sec_state sec,
      *  bit3 Mode   = 1 Thread, 0 Handler
      *  bit2 SPSEL  = 1 PSP, 0 MSP
      *  bit1 RES0
-     *  bit0 ES     = 1 Secure, 0 Non-secure
+     *  bit0 ES     = 1 Secure exception, 0 Non-secure exception
      */
     mm_u32 base = 0xFFFFFF80u;
-    if (sec == MM_SECURE) {
+    if (stack_sec == MM_SECURE) {
         base |= (1u << 6); /* Secure stack */
-        base |= 1u;        /* ES=Secure */
+    }
+    if (exception_sec == MM_SECURE) {
+        base |= 1u;        /* Secure exception */
     }
     if (default_callee_stacking) {
         base |= (1u << 5); /* DCRS */
@@ -3846,6 +3849,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
     fp_lazy = fp_stack && fpu_lazy_preserve_enabled(cpu, scs);
     addl_state = cross_domain_additional_state_required(sec, handler_sec);
     exc_ret_val = exc_return_encode(stack_sec,
+                                    handler_sec,
                                     use_psp_entry,
                                     pre_mode == MM_THREAD,
                                     fp_stack ? MM_FALSE : MM_TRUE,
@@ -4168,6 +4172,7 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
     fp_stack = fpu_auto_preserve_enabled(cpu, scs);
     fp_lazy = fp_stack && fpu_lazy_preserve_enabled(cpu, scs);
     exc_ret_val = exc_return_encode(sec,
+                                    sec,
                                     use_psp_entry,
                                     cpu->mode == MM_THREAD,
                                     fp_stack ? MM_FALSE : MM_TRUE,
@@ -4390,11 +4395,12 @@ static mm_bool enter_exception_ex(struct mm_cpu *cpu,
     addl_state = cross_domain_additional_state_required(sec, handler_sec);
     if (pre_mode == MM_HANDLER) {
         use_psp_entry = MM_FALSE;
-        exc_ret_val = exc_return_encode(sec, MM_FALSE, MM_FALSE, fp_stack ? MM_FALSE : MM_TRUE, addl_state ? MM_FALSE : MM_TRUE);
+        exc_ret_val = exc_return_encode(sec, handler_sec, MM_FALSE, MM_FALSE, fp_stack ? MM_FALSE : MM_TRUE, addl_state ? MM_FALSE : MM_TRUE);
     } else {
         use_psp_entry = (((sec == MM_NONSECURE) ? cpu->control_ns : cpu->control_s) & 0x2u) != 0u;
         exc_ret_val = tail_chain ? cpu->r[14] :
             exc_return_encode(sec,
+                              handler_sec,
                               use_psp_entry,
                               MM_TRUE,
                               fp_stack ? MM_FALSE : MM_TRUE,

@@ -208,12 +208,13 @@ static void usart_update_ack(struct stm32_usart_inst *u)
 {
     mm_u32 cr1 = u->regs[USART_CR1 / 4];
     mm_u32 isr = u->regs[USART_ISR / 4];
-    if ((cr1 & (CR1_UE | CR1_TE)) == (CR1_UE | CR1_TE)) {
+    mm_bool clock = (u->clock_on == 0 || u->clock_on(u));
+    if (clock && (cr1 & (CR1_UE | CR1_TE)) == (CR1_UE | CR1_TE)) {
         isr |= ISR_TEACK;
     } else {
         isr &= ~ISR_TEACK;
     }
-    if ((cr1 & (CR1_UE | CR1_RE)) == (CR1_UE | CR1_RE)) {
+    if (clock && (cr1 & (CR1_UE | CR1_RE)) == (CR1_UE | CR1_RE)) {
         isr |= ISR_REACK;
     } else {
         isr &= ~ISR_REACK;

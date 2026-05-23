@@ -28,13 +28,15 @@ static struct stm32_usart_state g_usart;
 
 static mm_bool clock_apb2_usart1(struct stm32_usart_inst *u)
 {
-    if (u->rcc_regs == 0) return MM_TRUE;
-    return ((u->rcc_regs[0xa4 / 4] >> 14) & 1u) != 0u;
+    mm_u32 *regs = (mmio_active_sec() == MM_SECURE && u->rcc_regs_s != 0) ? u->rcc_regs_s : u->rcc_regs;
+    if (regs == 0) return MM_TRUE;
+    return ((regs[0xa4 / 4] >> 14) & 1u) != 0u;
 }
 
 static mm_bool clock_apb1lenr_generic(struct stm32_usart_inst *u)
 {
     mm_u32 bit = 0;
+    mm_u32 *regs;
     switch (u->index) {
     case 1: bit = 17; break;
     case 2: bit = 18; break;
@@ -45,26 +47,30 @@ static mm_bool clock_apb1lenr_generic(struct stm32_usart_inst *u)
     case 7: bit = 31; break;
     default: return MM_TRUE;
     }
-    if (u->rcc_regs == 0) return MM_TRUE;
-    return ((u->rcc_regs[0x9c / 4] >> bit) & 1u) != 0u;
+    regs = (mmio_active_sec() == MM_SECURE && u->rcc_regs_s != 0) ? u->rcc_regs_s : u->rcc_regs;
+    if (regs == 0) return MM_TRUE;
+    return ((regs[0x9c / 4] >> bit) & 1u) != 0u;
 }
 
 static mm_bool clock_apb1henr_generic(struct stm32_usart_inst *u)
 {
     mm_u32 bit = 0;
+    mm_u32 *regs;
     switch (u->index) {
     case 8: bit = 0; break;
     case 11: bit = 1; break;
     default: return MM_TRUE;
     }
-    if (u->rcc_regs == 0) return MM_TRUE;
-    return ((u->rcc_regs[0xa0 / 4] >> bit) & 1u) != 0u;
+    regs = (mmio_active_sec() == MM_SECURE && u->rcc_regs_s != 0) ? u->rcc_regs_s : u->rcc_regs;
+    if (regs == 0) return MM_TRUE;
+    return ((regs[0xa0 / 4] >> bit) & 1u) != 0u;
 }
 
 static mm_bool clock_apb3_lpuart1(struct stm32_usart_inst *u)
 {
-    if (u->rcc_regs == 0) return MM_TRUE;
-    return ((u->rcc_regs[0xa8 / 4] >> 6) & 1u) != 0u;
+    mm_u32 *regs = (mmio_active_sec() == MM_SECURE && u->rcc_regs_s != 0) ? u->rcc_regs_s : u->rcc_regs;
+    if (regs == 0) return MM_TRUE;
+    return ((regs[0xa8 / 4] >> 6) & 1u) != 0u;
 }
 
 void mm_stm32h563_usart_poll(void)
@@ -101,6 +107,7 @@ void mm_stm32h563_usart_init(struct mmio_bus *bus, struct mm_nvic *nvic)
                                       MM_TRUE, MM_TRUE, stm32_usart_uart_rx_trace_enabled());
         u = &g_usart.usarts[i];
         u->rcc_regs = mm_stm32h563_rcc_regs();
+        u->rcc_regs_s = mm_stm32h563_rcc_secure_regs();
         u->watch_macro = (i == 2u) ? MM_TRUE : MM_FALSE;
         u->sec_reg = tz1;
         if (i == 0) {

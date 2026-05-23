@@ -423,6 +423,7 @@ static void mpcbb_init_defaults(void);
 static void flash_sync_option_regs(struct flash_state *f);
 
 static struct rcc_state rcc;
+static struct rcc_state rcc_s;
 static struct pwr_state pwr;
 static struct simple_blk tzsc_s;
 static struct simple_blk tzsc_ns;
@@ -620,6 +621,7 @@ void mm_stm32h563_mmio_reset(void)
     mm_u32 optsr_swap = flash_ctl.regs[FLASH_OPTSR_CUR / 4u] & FLASH_OPTSR_SWAP_BANK;
     mm_bool dualbank = flash_ctl.dualbank_enabled;
     memset(&rcc, 0, sizeof(rcc));
+    memset(&rcc_s, 0, sizeof(rcc_s));
     memset(&pwr, 0, sizeof(pwr));
     memset(&tzsc_s, 0, sizeof(tzsc_s));
     memset(&tzsc_ns, 0, sizeof(tzsc_ns));
@@ -688,6 +690,7 @@ void mm_stm32h563_mmio_reset(void)
     rcc.regs[0x8c / 4u] = 0xC0000000u;
     rcc_update_ready(&rcc);
     rcc_update_sysclk(&rcc);
+    rcc_s = rcc;
     iwdg.regs[IWDG_RLR / 4u] = 0x00000FFFu;
     iwdg.regs[IWDG_WINR / 4u] = 0x00000FFFu;
     wwdg.regs[WWDG_CR / 4u] = 0x0000007Fu;
@@ -730,6 +733,43 @@ mm_u32 *mm_stm32h563_tzsc_regs(void)
     return tzsc_s.regs;
 }
 
+static mm_bool tzsc_bit_is_secure(mm_u32 offset, mm_u32 bit)
+{
+    return ((tzsc_s.regs[offset / 4u] >> bit) & 1u) != 0u;
+}
+
+mm_bool mm_stm32h563_tz_attr_for_addr(mm_u32 addr,
+                                      enum mm_sau_attr *attr_out,
+                                      mm_u32 *region_out)
+{
+    mm_bool secure = MM_FALSE;
+
+    if (attr_out == 0) {
+        return MM_FALSE;
+    }
+    if (region_out != 0) {
+        *region_out = 0u;
+    }
+
+    if (addr >= 0x50000000u && addr < 0x60000000u) {
+        *attr_out = MM_SAU_SECURE;
+        return MM_TRUE;
+    }
+
+    if (addr >= 0x40013800u && addr < 0x40013C00u) {
+        secure = tzsc_bit_is_secure(0x14u, 11u); /* USART1SEC */
+    } else if (addr >= 0x40004400u && addr < 0x40004800u) {
+        secure = tzsc_bit_is_secure(0x10u, 13u); /* USART2SEC */
+    } else if (addr >= 0x40004800u && addr < 0x40004C00u) {
+        secure = tzsc_bit_is_secure(0x10u, 14u); /* USART3SEC */
+    } else {
+        return MM_FALSE;
+    }
+
+    *attr_out = secure ? MM_SAU_SECURE : MM_SAU_NONSECURE;
+    return MM_TRUE;
+}
+
 mm_bool mm_stm32h563_mpcbb_block_secure(int bank, mm_u32 block_index)
 {
     mm_u32 word;
@@ -761,7 +801,7 @@ static mm_bool gpio_clock_enabled(const struct rcc_state *rcc, int index)
 
 static mm_bool stm32h563_gpio_clock_enabled_cb(int bank)
 {
-    return gpio_clock_enabled(&rcc, bank);
+    return gpio_clock_enabled(&rcc, bank) || gpio_clock_enabled(&rcc_s, bank);
 }
 
 static void exti_gpio_update_cb(int bank, mm_u32 old_level, mm_u32 new_level)
@@ -1685,7 +1725,8 @@ static mm_bool rng_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32 
 
 static mm_bool wwdg_clock_enabled(void)
 {
-    return ((rcc.regs[0x9c / 4] >> 11) & 1u) != 0u;
+    return ((rcc.regs[0x9c / 4] >> 11) & 1u) != 0u ||
+           ((rcc_s.regs[0x9c / 4] >> 11) & 1u) != 0u;
 }
 
 static int exti_line_bank(int line)
@@ -1885,9 +1926,14 @@ mm_u32 *mm_stm32h563_rcc_regs(void)
     return rcc.regs;
 }
 
+mm_u32 *mm_stm32h563_rcc_secure_regs(void)
+{
+    return rcc_s.regs;
+}
+
 mm_u64 mm_stm32h563_cpu_hz(void)
 {
-    return rcc.cpu_hz;
+    return rcc_s.cpu_hz != 0u ? rcc_s.cpu_hz : rcc.cpu_hz;
 }
 
 void mm_stm32h563_exti_set_nvic(struct mm_nvic *nvic)
@@ -1954,6 +2000,7 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     struct mmio_region reg;
 
     memset(&rcc, 0, sizeof(rcc));
+    memset(&rcc_s, 0, sizeof(rcc_s));
     memset(&pwr, 0, sizeof(pwr));
     memset(&tzsc_s, 0, sizeof(tzsc_s));
     memset(&tzsc_ns, 0, sizeof(tzsc_ns));
@@ -1977,6 +2024,7 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     rcc.regs[0x8c / 4u] = 0xC0000000u;
     rcc_update_ready(&rcc);
     rcc_update_sysclk(&rcc);
+    rcc_s = rcc;
     hash_ctx[0].state = &hash_accel;
     hash_ctx[0].secure_alias = MM_FALSE;
     hash_ctx[0].rcc = &rcc;
@@ -2053,6 +2101,7 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
     /* RCC secure alias */
     reg.base = RCC_SEC_BASE;
+    reg.opaque = &rcc_s;
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
 
     /* PWR */

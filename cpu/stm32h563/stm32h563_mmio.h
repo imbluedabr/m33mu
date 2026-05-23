@@ -24,6 +24,7 @@
 
 #include "m33mu/mmio.h"
 #include "m33mu/nvic.h"
+#include "m33mu/sau.h"
 
 struct mm_memmap;
 struct mm_flash_persist;
@@ -37,7 +38,11 @@ void mm_stm32h563_flash_bind(struct mm_memmap *map,
 void mm_stm32h563_otp_init(const char *target_name);
 mm_u64 mm_stm32h563_cpu_hz(void);
 mm_u32 *mm_stm32h563_rcc_regs(void);
+mm_u32 *mm_stm32h563_rcc_secure_regs(void);
 mm_u32 *mm_stm32h563_tzsc_regs(void);
+mm_bool mm_stm32h563_tz_attr_for_addr(mm_u32 addr,
+                                      enum mm_sau_attr *attr_out,
+                                      mm_u32 *region_out);
 void mm_stm32h563_rng_set_nvic(struct mm_nvic *nvic);
 void mm_stm32h563_exti_set_nvic(struct mm_nvic *nvic);
 mm_bool mm_stm32h563_usb_register_mmio(struct mmio_bus *bus);

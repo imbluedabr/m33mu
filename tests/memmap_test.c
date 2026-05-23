@@ -115,6 +115,36 @@ static int test_ram_write_read(void)
     return 0;
 }
 
+static int test_secure_nonsecure_sram_aliases_share_backing(void)
+{
+    struct mm_memmap map;
+    struct mmio_region regions[4];
+    struct mm_target_cfg cfg;
+    struct mm_ram_region ram_regions[1];
+    mm_u8 ram[0x400];
+    mm_u32 val = 0;
+
+    memset(&cfg, 0, sizeof(cfg));
+    memset(ram, 0, sizeof(ram));
+    ram_regions[0].base_s = 0x30000000u;
+    ram_regions[0].base_ns = 0x20000000u;
+    ram_regions[0].size = sizeof(ram);
+    ram_regions[0].mpcbb_index = 0;
+    cfg.ram_base_s = 0x30000000u;
+    cfg.ram_size_s = sizeof(ram);
+    cfg.ram_base_ns = 0x20000000u;
+    cfg.ram_size_ns = sizeof(ram);
+    cfg.ram_regions = ram_regions;
+    cfg.ram_region_count = 1u;
+
+    mm_memmap_init(&map, regions, 4);
+    if (!mm_memmap_configure_ram(&map, &cfg, ram, MM_TRUE)) return 1;
+    if (!mm_memmap_write(&map, MM_NONSECURE, 0x20000200u, 4u, 0x12345678u)) return 1;
+    if (!mm_memmap_read(&map, MM_SECURE, 0x30000200u, 4u, &val)) return 1;
+    if (val != 0x12345678u) return 1;
+    return 0;
+}
+
 static int test_interceptor_blocks_write(void)
 {
     struct mm_memmap map;
@@ -143,6 +173,7 @@ int main(void)
         { "banked_flash", test_banked_flash_same_backing },
         { "secure_read_ns_flash_alias_raz", test_secure_read_ns_flash_alias_raz },
         { "ram_write_read", test_ram_write_read },
+        { "secure_nonsecure_sram_aliases_share_backing", test_secure_nonsecure_sram_aliases_share_backing },
         { "interceptor_blocks", test_interceptor_blocks_write },
     };
     const int count = (int)(sizeof(tests) / sizeof(tests[0]));

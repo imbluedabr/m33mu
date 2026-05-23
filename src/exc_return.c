@@ -31,7 +31,7 @@
  *  bit3  Mode  = 1 Thread, 0 Handler
  *  bit2  SPSEL = 1 PSP, 0 MSP
  *  bit1  RES0
- *  bit0  ES    = 1 Secure, 0 Non-secure (exception target)
+ *  bit0  ES    = 1 Secure, 0 Non-secure (exception security)
  */
 
 struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
@@ -43,6 +43,7 @@ struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
     info.basic_frame = MM_TRUE;
     info.to_thread = MM_TRUE;
     info.target_sec = MM_SECURE;
+    info.exception_sec = MM_SECURE;
     info.return_sec = MM_SECURE;
 
     if ((value & 0xffffff00u) != 0xffffff00u) {
@@ -59,10 +60,11 @@ struct mm_exc_return_info mm_exc_return_decode(mm_u32 value)
     info.use_psp = (value & (1u << 2)) != 0u;
     /* Bit3 distinguishes Thread (1) vs Handler (0) return (DDI0553 C2.4.5). */
     info.to_thread = (value & (1u << 3)) != 0u;
-    /* Bit6 distinguishes Secure(1) from Non-secure(0) stack. */
+    /* Bit6 distinguishes Secure(1) from Non-secure(0) stack/return security. */
     info.target_sec = ((value & (1u << 6)) != 0u) ? MM_SECURE : MM_NONSECURE;
-    /* Bit0 distinguishes Secure(1) from Non-secure(0) return state. */
-    info.return_sec = (value & 1u) != 0u ? MM_SECURE : MM_NONSECURE;
+    info.return_sec = info.target_sec;
+    /* Bit0 records the security state of the exception being returned from. */
+    info.exception_sec = (value & 1u) != 0u ? MM_SECURE : MM_NONSECURE;
     info.valid = MM_TRUE;
     return info;
 }

@@ -24,6 +24,9 @@
 #include "m33mu/memmap.h"
 #include "m33mu/mem_prot.h"
 #include "m33mu/scs.h"
+#include "m33mu/nvic.h"
+#include "stm32h563/stm32h563_mmio.h"
+#include "stm32h563/stm32h563_usart.h"
 
 static mm_bool test_mpcbb_block_secure(int bank, mm_u32 block_index)
 {
@@ -226,12 +229,82 @@ static int test_secure_data_read_can_access_ns_window_even_if_sau_disabled(void)
     return 0;
 }
 
+static int test_stm32h563_tzsc_denies_ns_usart_when_secure(void)
+{
+    struct mm_memmap map;
+    struct mmio_region regions[4];
+    struct mm_target_cfg cfg;
+    struct mm_scs scs;
+    struct mm_prot_ctx prot;
+    mm_u32 v = 0;
+    mm_u32 *tzsc;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.tz_attr_for_addr = mm_stm32h563_tz_attr_for_addr;
+
+    mm_stm32h563_mmio_reset();
+    tzsc = mm_stm32h563_tzsc_regs();
+    if (tzsc == 0) return 1;
+    tzsc[0x10u / 4u] |= (1u << 14); /* USART3SEC */
+
+    mm_memmap_init(&map, regions, 4);
+    mm_scs_init(&scs, 0);
+    scs.sau_ctrl = 0x3u; /* ENABLE|ALLNS: SAU alone would allow the access. */
+
+    mm_prot_init(&prot, &scs, &cfg, 0);
+    mm_memmap_set_interceptor(&map, mm_prot_interceptor, &prot);
+    mm_prot_add_region(&prot, 0x40000000u, 0x20000000u,
+                       MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_SECURE);
+    mm_prot_add_region(&prot, 0x40000000u, 0x20000000u,
+                       MM_PROT_PERM_READ | MM_PROT_PERM_WRITE, MM_NONSECURE);
+
+    if (mm_memmap_read(&map, MM_NONSECURE, 0x4000481Cu, 4u, &v)) return 1;
+    if (!scs.securefault_pending) return 1;
+    if (scs.sau_sfar != 0x4000481Cu) return 1;
+    if ((scs.sau_sfsr & ((1u << 3) | (1u << 6))) != ((1u << 3) | (1u << 6))) return 1;
+
+    scs.securefault_pending = MM_FALSE;
+    scs.sau_sfsr = 0u;
+    scs.sau_sfar = 0u;
+    tzsc[0x10u / 4u] &= ~(1u << 14);
+    if (!mm_prot_interceptor(&prot, MM_ACCESS_WRITE, MM_NONSECURE, 0x40004800u, 4u)) return 1;
+    if (scs.securefault_pending) return 1;
+    return 0;
+}
+
+static int test_stm32h563_usart_uses_ns_rcc_gate_for_ns_access(void)
+{
+    struct mm_memmap map;
+    struct mmio_region regions[96];
+    struct mm_nvic nvic;
+    mm_u32 isr = 0u;
+
+    mm_memmap_init(&map, regions, 96);
+    mm_nvic_init(&nvic);
+    if (!mm_stm32h563_register_mmio(&map.mmio)) return 1;
+    mm_stm32h563_usart_init(&map.mmio, &nvic);
+
+    /* Secure RCC enable alone must not clock a Non-secure USART access. */
+    if (!mm_memmap_write(&map, MM_SECURE, 0x54020C9Cu, 4u, 1u << 18)) return 1;
+    if (!mm_memmap_write(&map, MM_NONSECURE, 0x40004800u, 4u, (1u << 0) | (1u << 3))) return 1;
+    if (!mm_memmap_read(&map, MM_NONSECURE, 0x4000481Cu, 4u, &isr)) return 1;
+    if ((isr & (1u << 21)) != 0u) return 1; /* TEACK */
+
+    if (!mm_memmap_write(&map, MM_NONSECURE, 0x44020C9Cu, 4u, 1u << 18)) return 1;
+    if (!mm_memmap_write(&map, MM_NONSECURE, 0x40004800u, 4u, (1u << 0) | (1u << 3))) return 1;
+    if (!mm_memmap_read(&map, MM_NONSECURE, 0x4000481Cu, 4u, &isr)) return 1;
+    if ((isr & (1u << 21)) == 0u) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
         { "nsc_exec_allowed_data_denied", test_nsc_exec_allowed_data_denied },
         { "secure_sram_alias_denied_when_mpcbb_marks_ns", test_secure_sram_alias_denied_when_mpcbb_marks_ns },
         { "secure_data_read_can_access_ns_window_even_if_sau_disabled", test_secure_data_read_can_access_ns_window_even_if_sau_disabled },
+        { "stm32h563_tzsc_denies_ns_usart_when_secure", test_stm32h563_tzsc_denies_ns_usart_when_secure },
+        { "stm32h563_usart_uses_ns_rcc_gate_for_ns_access", test_stm32h563_usart_uses_ns_rcc_gate_for_ns_access },
     };
     int failures = 0;
     int i;

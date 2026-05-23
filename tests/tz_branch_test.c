@@ -160,6 +160,24 @@ static int test_blxns_null_target_raises_securefault(void)
     return 0;
 }
 
+static int test_blxns_thumb_bit_target_raises_securefault(void)
+{
+    struct mm_cpu cpu;
+    struct mm_scs scs;
+    cpu_init(&cpu);
+    sau_allow_ns_flash(&scs);
+    cpu.r[15] = 0x0c000100u;
+
+    mm_tz_exec_blxns(&cpu, &scs, 0x08000201u, 0x0c000123u);
+
+    if (cpu.sec_state != MM_SECURE) return 1;
+    if (!scs.securefault_pending) return 1;
+    if (scs.sau_sfar != 0x08000200u) return 1;
+    if ((scs.sau_sfsr & ((1u << 0) | (1u << 3) | (1u << 6))) !=
+        ((1u << 0) | (1u << 3) | (1u << 6))) return 1;
+    return 0;
+}
+
 int main(void)
 {
     struct { const char *name; int (*fn)(void); } tests[] = {
@@ -169,6 +187,7 @@ int main(void)
         { "blxns_sets_lr_and_branches", test_blxns_sets_lr_and_branches },
         { "blxns_stack_full_aborts_transition", test_blxns_stack_full_aborts_transition },
         { "blxns_null_target_raises_securefault", test_blxns_null_target_raises_securefault },
+        { "blxns_thumb_bit_target_raises_securefault", test_blxns_thumb_bit_target_raises_securefault },
     };
     int failures = 0;
     int i;

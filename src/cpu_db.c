@@ -116,7 +116,7 @@ static const struct mm_cpu_entry cpu_table[] = {
             STM32H563_TIMER_INIT,
             STM32H563_TIMER_RESET,
             STM32H563_TIMER_TICK,
-            0
+            STM32H563_TZ_ATTR
         }
     },
     {

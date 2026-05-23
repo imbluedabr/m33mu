@@ -67,6 +67,9 @@ static mm_bool tz_target_is_valid_ns(struct mm_scs *scs, mm_u32 target)
     if (target == 0u || addr == 0u) {
         return MM_FALSE;
     }
+    if ((target & 1u) != 0u) {
+        return MM_FALSE;
+    }
     if (scs == 0) {
         return MM_TRUE;
     }

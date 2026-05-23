@@ -40,6 +40,7 @@ struct stm32_usart_inst {
     mm_bool enabled;
     int irq;
     mm_u32 *rcc_regs;
+    mm_u32 *rcc_regs_s;
     mm_bool (*clock_on)(struct stm32_usart_inst *u);
     volatile mm_u32 *sec_reg;
     mm_u32 sec_bitmask;

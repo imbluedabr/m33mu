@@ -32,7 +32,8 @@ struct mm_exc_return_info {
     mm_bool basic_frame; /* true if no FP context */
     mm_bool to_thread;
     enum mm_sec_state target_sec; /* stack security (EXC_RETURN.S) */
-    enum mm_sec_state return_sec; /* return security (EXC_RETURN.ES) */
+    enum mm_sec_state exception_sec; /* exception security (EXC_RETURN.ES) */
+    enum mm_sec_state return_sec; /* return security, derived from stack security */
 };
 
 struct mm_exc_return_info mm_exc_return_decode(mm_u32 value);

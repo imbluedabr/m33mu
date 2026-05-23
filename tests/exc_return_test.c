@@ -68,13 +68,14 @@ static int test_invalid_reserved_bit1(void)
 static int test_es_distinct_from_stack_security(void)
 {
     struct mm_exc_return_info info;
-    /* Secure stack (S=1) but return to Non-secure state (ES=0). */
+    /* Secure stack/return target (S=1), Non-secure exception state (ES=0). */
     info = mm_exc_return_decode(0xFFFFFFF8u);
     if (!info.valid) return 1;
     if (!info.to_thread) return 1;
     if (!info.default_callee_stacking) return 1;
     if (info.target_sec != MM_SECURE) return 1;
-    if (info.return_sec != MM_NONSECURE) return 1;
+    if (info.return_sec != MM_SECURE) return 1;
+    if (info.exception_sec != MM_NONSECURE) return 1;
     return 0;
 }
 
@@ -86,7 +87,21 @@ static int test_dcrs_cleared_for_additional_state(void)
     if (info.default_callee_stacking) return 1;
     if (!info.to_thread) return 1;
     if (info.target_sec != MM_SECURE) return 1;
+    if (info.return_sec != MM_SECURE) return 1;
+    if (info.exception_sec != MM_NONSECURE) return 1;
+    return 0;
+}
+
+static int test_secure_exception_to_nonsecure_thread_msp(void)
+{
+    struct mm_exc_return_info info;
+    info = mm_exc_return_decode(0xFFFFFFB9u);
+    if (!info.valid) return 1;
+    if (!info.to_thread) return 1;
+    if (info.use_psp) return 1;
+    if (info.target_sec != MM_NONSECURE) return 1;
     if (info.return_sec != MM_NONSECURE) return 1;
+    if (info.exception_sec != MM_SECURE) return 1;
     return 0;
 }
 
@@ -97,6 +112,7 @@ int main(void)
         { "nonsecure_target", test_nonsecure_target },
         { "es_distinct_from_stack_security", test_es_distinct_from_stack_security },
         { "dcrs_cleared_for_additional_state", test_dcrs_cleared_for_additional_state },
+        { "secure_exception_to_nonsecure_thread_msp", test_secure_exception_to_nonsecure_thread_msp },
         { "invalid_reserved_bit1", test_invalid_reserved_bit1 },
         { "invalid", test_invalid },
     };
