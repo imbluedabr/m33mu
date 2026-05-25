@@ -430,17 +430,21 @@ mm_bool mm_prot_interceptor(void *opaque, enum mm_access_type type, enum mm_sec_
         privileged = mm_cpu_get_privileged(ctx->cpu);
     }
 
-    /* Always allow System Control Space (SCS/SCB/NVIC/SysTick); tolerate alias forms.
-     * This is outside the SAU/MPU-controlled memory map in this emulator model.
+    /* Always allow the Private Peripheral Bus (Internal PPB): ITM/DWT/FPB at
+     * 0xE0000000..0xE000DFFF and SCS/SCB/NVIC/SysTick/MPU/SAU at
+     * 0xE000E000..0xE000FFFF; tolerate alias forms. The PPB sits outside the
+     * SAU/MPU-controlled memory map in this emulator model, and individual
+     * blocks gate accesses through their own component registers (e.g. DWT
+     * requires CoreDebug.DEMCR.TRCENA + privileged mode).
      */
-    if ((addr >= 0xE000E000u && addr < 0xE0010000u) ||
+    if ((addr >= 0xE0000000u && addr < 0xE0010000u) ||
         (addr >= 0xE002E000u && addr < 0xE0030000u) ||
         (addr >= 0x00E00000u && addr < 0x00E10000u)) {
         if (ctx->scs != 0) {
             ctx->scs->last_access_sec = sec;
         }
         if (prot_trace_level() >= 2) {
-            printf("[PROT_ALLOW] sec=%s type=%s addr=0x%08lx size=%lu reason=SCS\n",
+            printf("[PROT_ALLOW] sec=%s type=%s addr=0x%08lx size=%lu reason=PPB\n",
                    sec_name(sec),
                    type_name(type),
                    (unsigned long)addr,
