@@ -93,5 +93,7 @@ struct mm_target_cfg {
 #define MM_TARGET_FLAG_CASPER_CP (1u << 3)
 /* Secure data reads from the Non-secure flash alias return zero. */
 #define MM_TARGET_FLAG_FLASH_NS_ALIAS_RAZ_S (1u << 4)
+/* Target reset state keeps SCB->CCR.UNALIGN_TRP set. */
+#define MM_TARGET_FLAG_UNALIGN_TRP_RESET (1u << 5)
 
 #endif /* M33MU_TARGET_H */

@@ -1245,6 +1245,79 @@ static int test_ldrd_ldm_unaligned_raise_usagefault(void)
     return 0;
 }
 
+static int test_regular_load_store_unalign_trp_raise_usagefault(void)
+{
+    struct mm_cpu cpu;
+    struct mm_memmap map;
+    struct mm_scs scs;
+    struct mm_decoded dec;
+    mm_u8 ram[64];
+    mm_u32 value = 0;
+
+    memset(&cpu, 0, sizeof(cpu));
+    memset(&scs, 0, sizeof(scs));
+    memset(ram, 0, sizeof(ram));
+    setup_ram_map(&map, ram, sizeof(ram));
+    cpu.sec_state = MM_SECURE;
+    cpu.mode = MM_THREAD;
+    cpu.r[15] = 1u;
+    cpu.r[0] = 0x20000001u;
+    cpu.r[1] = 0x11223344u;
+
+    if (!mm_memmap_write(&map, cpu.sec_state, 0x20000001u, 4u, 0xA5A55A5Au)) {
+        return 1;
+    }
+
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_LDR_IMM;
+    dec.rn = 0u;
+    dec.rd = 2u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 0) return 1;
+    if (cpu.r[2] != 0xA5A55A5Au) return 1;
+
+    scs.ccr |= (1u << 3); /* CCR.UNALIGN_TRP */
+    g_last_ufsr_bits = 0u;
+    g_raise_usage_fault_calls = 0;
+    cpu.r[2] = 0u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 1) return 1;
+    if (g_raise_usage_fault_calls != 1 || g_last_ufsr_bits != (1u << 24)) {
+        printf("ldr_unalign_trp: calls=%d bits=0x%08lx\n",
+               g_raise_usage_fault_calls, (unsigned long)g_last_ufsr_bits);
+        return 1;
+    }
+    if (cpu.r[2] != 0u) return 1;
+
+    g_last_ufsr_bits = 0u;
+    g_raise_usage_fault_calls = 0;
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_STR_IMM;
+    dec.rn = 0u;
+    dec.rd = 1u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 1) return 1;
+    if (g_raise_usage_fault_calls != 1 || g_last_ufsr_bits != (1u << 24)) {
+        printf("str_unalign_trp: calls=%d bits=0x%08lx\n",
+               g_raise_usage_fault_calls, (unsigned long)g_last_ufsr_bits);
+        return 1;
+    }
+    if (!mm_memmap_read(&map, cpu.sec_state, 0x20000001u, 4u, &value)) return 1;
+    if (value != 0xA5A55A5Au) return 1;
+
+    g_last_ufsr_bits = 0u;
+    g_raise_usage_fault_calls = 0;
+    cpu.r[0] = 0x20000003u;
+    memset(&dec, 0, sizeof(dec));
+    dec.kind = MM_OP_LDRH_IMM;
+    dec.rn = 0u;
+    dec.rd = 2u;
+    if (exec_one(&cpu, &map, &scs, 0, &dec) != 1) return 1;
+    if (g_raise_usage_fault_calls != 1 || g_last_ufsr_bits != (1u << 24)) {
+        printf("ldrh_unalign_trp: calls=%d bits=0x%08lx\n",
+               g_raise_usage_fault_calls, (unsigned long)g_last_ufsr_bits);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (test_ldrsb_reg_wide_shift_execute() != 0) {
@@ -1341,6 +1414,10 @@ int main(void)
     }
     if (test_ldrd_ldm_unaligned_raise_usagefault() != 0) {
         printf("FAIL: ldrd_ldm_unaligned_raise_usagefault\n");
+        return 1;
+    }
+    if (test_regular_load_store_unalign_trp_raise_usagefault() != 0) {
+        printf("FAIL: regular_load_store_unalign_trp_raise_usagefault\n");
         return 1;
     }
     return 0;
