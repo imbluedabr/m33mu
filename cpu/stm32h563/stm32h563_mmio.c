@@ -676,7 +676,6 @@ void mm_stm32h563_mmio_reset(void)
         gpio_ctx_data[i * 2 + 1].exti_update = exti_gpio_update_cb;
     }
     mm_stm32h563_usb_reset();
-    mm_stm32h563_eth_reset();
     mm_stm32h563_i2c_reset();
     mm_gpio_bank_set_reader(stm32h563_gpio_bank_read, 0);
     mm_gpio_bank_set_moder_reader(stm32h563_gpio_bank_read_moder, 0);
