@@ -66,6 +66,7 @@ static void bkpt_ok(void)
 #define FLASH_OPTSR_SWAP    (1u << 31)
 
 #define FLASH_BASE_NS       0x08000000u
+#define FLASH_BASE_S        0x0C000000u
 #define FLASH_SIZE          0x00200000u
 #define FLASH_BANK_SIZE     (FLASH_SIZE / 2u)
 #define FLASH_SECTOR_COUNT  128u
@@ -103,8 +104,11 @@ static void dualbank_test_ram(void)
     uint32_t snb = 120u;
     uint32_t offset = (snb * FLASH_SECTOR_SIZE) + 0x100u;
 
-    bank0_addr = (volatile uint32_t *)(FLASH_BASE_NS + offset);
-    bank1_addr = (volatile uint32_t *)(FLASH_BASE_NS + FLASH_BANK_SIZE + offset);
+    /* Firmware runs in secure state and uses SECKEYR/SECCR to program
+     * flash, so read-back must go through the secure alias: per RM0481,
+     * a secure access to the NS flash alias reads as zero when TZEN=1. */
+    bank0_addr = (volatile uint32_t *)(FLASH_BASE_S + offset);
+    bank1_addr = (volatile uint32_t *)(FLASH_BASE_S + FLASH_BANK_SIZE + offset);
 
     flash_unlock();
     flash_sector_erase(0u, snb);
