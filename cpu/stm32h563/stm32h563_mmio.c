@@ -2331,7 +2331,7 @@ mm_bool mm_stm32h563_register_mmio(struct mmio_bus *bus)
     reg.base = RNG_SEC_BASE;
     rng_ctx[1][0] = &rng;
     rng_ctx[1][1] = (void *)1;
-    rng_ctx[1][2] = &rcc;
+    rng_ctx[1][2] = &rcc_s;
     rng_ctx[1][3] = &tzsc_s;
     reg.opaque = rng_ctx[1];
     if (!mmio_bus_register_region(bus, &reg)) return MM_FALSE;
