@@ -83,7 +83,6 @@
 #endif
 
 #define CCR_DIV_0_TRP (1u << 4)
-#define CCR_UNALIGN_TRP (1u << 3)
 #define CCR_STKALIGN (1u << 9)
 #define UFSR_UNDEFINSTR (1u << 16)
 #define UFSR_DIVBYZERO (1u << 25)
@@ -5699,15 +5698,9 @@ int main(int argc, char **argv)
 
             mm_scs_init(&scs, 0x410fc241u);
             mm_scs_set_fpu_present(&scs, (cfg.flags & MM_TARGET_FLAG_FPU) != 0u);
-            if ((cfg.flags & MM_TARGET_FLAG_UNALIGN_TRP_RESET) != 0u) {
-                scs.ccr |= CCR_UNALIGN_TRP;
-            }
             if (cfg.core_count > 1u) {
                 mm_scs_init(&scs1, 0x410fc241u);
                 mm_scs_set_fpu_present(&scs1, (cfg.flags & MM_TARGET_FLAG_FPU) != 0u);
-                if ((cfg.flags & MM_TARGET_FLAG_UNALIGN_TRP_RESET) != 0u) {
-                    scs1.ccr |= CCR_UNALIGN_TRP;
-                }
                 scs_mux.scs[0] = &scs;
                 scs_mux.scs[1] = &scs1;
                 scs_mux.nvic[0] = &nvic;
