@@ -390,6 +390,60 @@ static double fpu_round_to_int(float a, mm_u32 fpscr, mm_bool round)
     }
 }
 
+/* Round using an explicit mode encoded in the instruction (VCVT{A,N,P,M},
+ * VRINT{A,N,P,M,Z}).  Independent of FPSCR rmode.
+ *   0 = A: round to nearest, ties away from zero    (roundf)
+ *   1 = N: round to nearest, ties to even           (nearbyintf default)
+ *   2 = P: round toward +infinity                   (ceilf)
+ *   3 = M: round toward -infinity                   (floorf)
+ *   4 = Z: round toward zero                        (truncf)
+ */
+static double fpu_round_directed(float a, mm_u8 mode)
+{
+    switch (mode) {
+    case 0u:
+        return (double)roundf(a);
+    case 1u:
+        return (double)nearbyintf(a);
+    case 2u:
+        return (double)ceilf(a);
+    case 3u:
+        return (double)floorf(a);
+    case 4u:
+        return (double)truncf(a);
+    default:
+        return (double)nearbyintf(a);
+    }
+}
+
+static mm_u32 fpu_vcvt_s32_clamp(double v)
+{
+    if (v != v) {
+        return 0u;
+    }
+    if (v > 2147483647.0) {
+        return 0x7fffffffu;
+    }
+    if (v < -2147483648.0) {
+        return 0x80000000u;
+    }
+    return (mm_u32)(mm_i32)v;
+}
+
+static mm_u32 fpu_vcvt_u32_clamp(double v)
+{
+    if (v != v) {
+        return 0u;
+    }
+    if (v <= 0.0) {
+        return 0u;
+    }
+    if (v > 4294967295.0) {
+        return 0xffffffffu;
+    }
+    return (mm_u32)v;
+}
+
 static mm_u32 fpu_vcvt_s32_from_f32(const struct mm_cpu *cpu, float a, mm_bool round)
 {
     double v;
@@ -422,6 +476,71 @@ static mm_u32 fpu_vcvt_u32_from_f32(const struct mm_cpu *cpu, float a, mm_bool r
         return 0xffffffffu;
     }
     return (mm_u32)v;
+}
+
+/* IEEE 754 binary16 (half-precision) <-> binary32 (single-precision)
+ * codec.  Used by VCVTB/T.{F32.F16,F16.F32}.
+ *   half: 1 sign | 5 exponent (bias 15) | 10 mantissa
+ *   single: 1 sign | 8 exponent (bias 127) | 23 mantissa
+ * Handles zero, subnormal, normal, infinity, NaN.
+ */
+static mm_u32 fpu_half_to_single(mm_u16 h)
+{
+    mm_u32 sign = ((mm_u32)h >> 15) & 1u;
+    mm_u32 exp  = ((mm_u32)h >> 10) & 0x1fu;
+    mm_u32 mant = (mm_u32)h & 0x3ffu;
+    mm_u32 result;
+    if (exp == 0u) {
+        if (mant == 0u) {
+            /* +/-0 */
+            result = sign << 31;
+        } else {
+            /* Subnormal: normalize. */
+            mm_u32 e = 1u;
+            while ((mant & 0x400u) == 0u) {
+                mant <<= 1;
+                e += 1u;
+            }
+            mant &= 0x3ffu;
+            result = (sign << 31) | ((127u - 15u - e + 1u) << 23) | (mant << 13);
+        }
+    } else if (exp == 31u) {
+        /* Infinity or NaN: F16 exp 0x1F maps to F32 exp 0xFF. */
+        result = (sign << 31) | (0xffu << 23) | (mant << 13);
+    } else {
+        result = (sign << 31) | ((exp + (127u - 15u)) << 23) | (mant << 13);
+    }
+    return result;
+}
+
+static mm_u16 fpu_single_to_half(mm_u32 f)
+{
+    mm_u32 sign = (f >> 31) & 1u;
+    mm_i32 exp  = (mm_i32)((f >> 23) & 0xffu) - 127;
+    mm_u32 mant = f & 0x7fffffu;
+    if (exp == 128) {
+        /* Inf or NaN.  Preserve NaN payload (truncate to 10 bits, force quiet). */
+        if (mant == 0u) {
+            return (mm_u16)((sign << 15) | (0x1fu << 10));
+        }
+        return (mm_u16)((sign << 15) | (0x1fu << 10) | (mant >> 13) | 0x200u);
+    }
+    if (exp > 15) {
+        /* Overflow -> +/-Inf */
+        return (mm_u16)((sign << 15) | (0x1fu << 10));
+    }
+    if (exp >= -14) {
+        /* Normal range. */
+        mm_u32 half_mant = mant >> 13;
+        return (mm_u16)((sign << 15) | (((mm_u32)(exp + 15)) << 10) | half_mant);
+    }
+    if (exp >= -24) {
+        /* Subnormal: shift mantissa with implicit bit. */
+        mm_u32 m = (mant | 0x800000u) >> (14 - exp);
+        return (mm_u16)((sign << 15) | (m >> 13));
+    }
+    /* Underflow to zero. */
+    return (mm_u16)(sign << 15);
 }
 
 static mm_u32 fpu_vmov_imm_to_u32(mm_u8 imm8)
@@ -1135,6 +1254,278 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                               }
                                               a = fpu_u32_to_f32(cpu.s[d.rm]);
                                               cpu.s[d.rd] = fpu_f32_to_u32(sqrtf(a));
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VCVTA_S32_F32:
+                        case MM_OP_VCVTN_S32_F32:
+                        case MM_OP_VCVTP_S32_F32:
+                        case MM_OP_VCVTM_S32_F32:
+                        case MM_OP_VCVTA_U32_F32:
+                        case MM_OP_VCVTN_U32_F32:
+                        case MM_OP_VCVTP_U32_F32:
+                        case MM_OP_VCVTM_U32_F32: {
+                                              float a;
+                                              mm_u8 mode;
+                                              mm_bool to_signed;
+                                              double v;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u || d.rm >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              switch (d.kind) {
+                                              case MM_OP_VCVTA_S32_F32:
+                                              case MM_OP_VCVTA_U32_F32: mode = 0u; break;
+                                              case MM_OP_VCVTN_S32_F32:
+                                              case MM_OP_VCVTN_U32_F32: mode = 1u; break;
+                                              case MM_OP_VCVTP_S32_F32:
+                                              case MM_OP_VCVTP_U32_F32: mode = 2u; break;
+                                              case MM_OP_VCVTM_S32_F32:
+                                              case MM_OP_VCVTM_U32_F32: mode = 3u; break;
+                                              default: mode = 1u; break;
+                                              }
+                                              to_signed = (d.kind == MM_OP_VCVTA_S32_F32 ||
+                                                           d.kind == MM_OP_VCVTN_S32_F32 ||
+                                                           d.kind == MM_OP_VCVTP_S32_F32 ||
+                                                           d.kind == MM_OP_VCVTM_S32_F32);
+                                              a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                              v = fpu_round_directed(a, mode);
+                                              cpu.s[d.rd] = to_signed ? fpu_vcvt_s32_clamp(v) : fpu_vcvt_u32_clamp(v);
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VMAXNM_F32:
+                        case MM_OP_VMINNM_F32: {
+                                              float a, b, r;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              a = fpu_u32_to_f32(cpu.s[d.rn]);
+                                              b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                              /* NaN-propagation rule (IEEE 754 maxNum/minNum):
+                                               * if one is QNaN, return the other; if both NaN,
+                                               * return a NaN.  fmaxf/fminf give the right
+                                               * behavior for quiet NaNs. */
+                                              if (d.kind == MM_OP_VMAXNM_F32) {
+                                                  r = fmaxf(a, b);
+                                              } else {
+                                                  r = fminf(a, b);
+                                              }
+                                              cpu.s[d.rd] = fpu_f32_to_u32(r);
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VSEL_F32: {
+                                              /* VSEL reads N,Z,V from APSR (cpu->xpsr bits
+                                               * 31:28), not from FPSCR.  C is unused.
+                                               */
+                                              mm_u32 apsr = cpu.xpsr >> 28;
+                                              mm_bool n = (apsr >> 3) & 1u;
+                                              mm_bool z = (apsr >> 2) & 1u;
+                                              mm_bool v = (apsr >> 0) & 1u;
+                                              mm_bool pick;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              switch (d.imm & 0x3u) {
+                                              case 0u: pick = z;            break;  /* EQ */
+                                              case 1u: pick = v;            break;  /* VS */
+                                              case 2u: pick = (n == v);     break;  /* GE */
+                                              case 3u: pick = (z == 0u) && (n == v); break; /* GT */
+                                              default: pick = MM_FALSE;     break;
+                                              }
+                                              cpu.s[d.rd] = pick ? cpu.s[d.rn] : cpu.s[d.rm];
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VFMA_F32:
+                        case MM_OP_VFMS_F32:
+                        case MM_OP_VFNMA_F32:
+                        case MM_OP_VFNMS_F32: {
+                                              float a, b, c_acc, r;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              a = fpu_u32_to_f32(cpu.s[d.rn]);
+                                              b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                              c_acc = fpu_u32_to_f32(cpu.s[d.rd]);
+                                              /* Single fused multiply-accumulate per ARM ARM:
+                                               *   VFMA:  Sd = +Sd + (+Sn * Sm)
+                                               *   VFMS:  Sd = +Sd + (-Sn * Sm)
+                                               *   VFNMA: Sd = -Sd + (-Sn * Sm)
+                                               *   VFNMS: Sd = -Sd + (+Sn * Sm)
+                                               */
+                                              switch (d.kind) {
+                                              case MM_OP_VFMA_F32:  r = fmaf( a,  b,  c_acc); break;
+                                              case MM_OP_VFMS_F32:  r = fmaf(-a,  b,  c_acc); break;
+                                              case MM_OP_VFNMA_F32: r = fmaf(-a,  b, -c_acc); break;
+                                              case MM_OP_VFNMS_F32: r = fmaf( a,  b, -c_acc); break;
+                                              default:              r = 0.0f; break;
+                                              }
+                                              cpu.s[d.rd] = fpu_f32_to_u32(r);
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VNMUL_F32:
+                        case MM_OP_VNMLA_F32:
+                        case MM_OP_VNMLS_F32: {
+                                              float a, b, c_acc, r;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u || d.rn >= 32u || d.rm >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              a = fpu_u32_to_f32(cpu.s[d.rn]);
+                                              b = fpu_u32_to_f32(cpu.s[d.rm]);
+                                              c_acc = fpu_u32_to_f32(cpu.s[d.rd]);
+                                              switch (d.kind) {
+                                              case MM_OP_VNMUL_F32: r = -(a * b);           break;
+                                              case MM_OP_VNMLA_F32: r = (-c_acc) + (-(a * b)); break;
+                                              case MM_OP_VNMLS_F32: r = (-c_acc) + (a * b);   break;
+                                              default:              r = 0.0f; break;
+                                              }
+                                              cpu.s[d.rd] = fpu_f32_to_u32(r);
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VRINTA_F32:
+                        case MM_OP_VRINTN_F32:
+                        case MM_OP_VRINTP_F32:
+                        case MM_OP_VRINTM_F32:
+                        case MM_OP_VRINTZ_F32:
+                        case MM_OP_VRINTR_F32:
+                        case MM_OP_VRINTX_F32: {
+                                              float a;
+                                              double v;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u || d.rm >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              a = fpu_u32_to_f32(cpu.s[d.rm]);
+                                              switch (d.kind) {
+                                              case MM_OP_VRINTA_F32: v = fpu_round_directed(a, 0u); break;
+                                              case MM_OP_VRINTN_F32: v = fpu_round_directed(a, 1u); break;
+                                              case MM_OP_VRINTP_F32: v = fpu_round_directed(a, 2u); break;
+                                              case MM_OP_VRINTM_F32: v = fpu_round_directed(a, 3u); break;
+                                              case MM_OP_VRINTZ_F32: v = fpu_round_directed(a, 4u); break;
+                                              case MM_OP_VRINTR_F32:
+                                              case MM_OP_VRINTX_F32:
+                                              default:               v = fpu_round_to_int(a, cpu.fpscr, MM_TRUE); break;
+                                              }
+                                              if (a != a) {
+                                                  /* Preserve NaN input (quietized). */
+                                                  cpu.s[d.rd] = cpu.s[d.rm] | 0x00400000u;
+                                              } else {
+                                                  cpu.s[d.rd] = fpu_f32_to_u32((float)v);
+                                              }
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VCVTB_F32_F16:
+                        case MM_OP_VCVTT_F32_F16: {
+                                              mm_u32 src = cpu.s[d.rm];
+                                              mm_u16 half = (d.kind == MM_OP_VCVTT_F32_F16)
+                                                              ? (mm_u16)(src >> 16)
+                                                              : (mm_u16)(src & 0xffffu);
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u || d.rm >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              cpu.s[d.rd] = fpu_half_to_single(half);
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VCVTB_F16_F32:
+                        case MM_OP_VCVTT_F16_F32: {
+                                              mm_u32 src = cpu.s[d.rm];
+                                              mm_u32 dst = cpu.s[d.rd];
+                                              mm_u16 half;
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u || d.rm >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              half = fpu_single_to_half(src);
+                                              if (d.kind == MM_OP_VCVTT_F16_F32) {
+                                                  cpu.s[d.rd] = (dst & 0x0000ffffu) | ((mm_u32)half << 16);
+                                              } else {
+                                                  cpu.s[d.rd] = (dst & 0xffff0000u) | (mm_u32)half;
+                                              }
+                                              fpu_mark_active(&cpu);
+                                              break;
+                                          }
+                        case MM_OP_VCVT_FIXED: {
+                                              mm_bool to_float    = (d.imm & 1u) != 0u;
+                                              mm_bool unsigned_op = (d.imm & 2u) != 0u;
+                                              mm_bool sx32        = (d.imm & 4u) != 0u;
+                                              mm_u32 frac_bits = (d.imm >> 3) & 0x1fu;
+                                              mm_u32 src = cpu.s[d.rd];
+                                              double scale = (double)(1ULL << frac_bits);
+                                              if (!fpu_check_or_fault(ctx)) {
+                                                  return MM_EXEC_CONTINUE;
+                                              }
+                                              if (d.rd >= 32u) {
+                                                  EXEC_RAISE_UNDEF();
+                                              }
+                                              if (to_float) {
+                                                  /* fixed -> float */
+                                                  double v;
+                                                  if (sx32) {
+                                                      v = unsigned_op ? (double)src
+                                                                       : (double)(mm_i32)src;
+                                                  } else {
+                                                      /* low 16 bits as fixed source */
+                                                      mm_u16 lo16 = (mm_u16)(src & 0xffffu);
+                                                      v = unsigned_op ? (double)lo16
+                                                                       : (double)(mm_i16)lo16;
+                                                  }
+                                                  v = v / scale;
+                                                  cpu.s[d.rd] = fpu_f32_to_u32((float)v);
+                                              } else {
+                                                  /* float -> fixed (truncate toward zero) */
+                                                  float a = fpu_u32_to_f32(src);
+                                                  double v = (a != a) ? 0.0 : (double)a * scale;
+                                                  if (sx32) {
+                                                      if (unsigned_op) {
+                                                          if (v <= 0.0) cpu.s[d.rd] = 0u;
+                                                          else if (v > 4294967295.0) cpu.s[d.rd] = 0xffffffffu;
+                                                          else cpu.s[d.rd] = (mm_u32)v;
+                                                      } else {
+                                                          if (v > 2147483647.0) cpu.s[d.rd] = 0x7fffffffu;
+                                                          else if (v < -2147483648.0) cpu.s[d.rd] = 0x80000000u;
+                                                          else cpu.s[d.rd] = (mm_u32)(mm_i32)v;
+                                                      }
+                                                  } else {
+                                                      mm_u32 lo;
+                                                      if (unsigned_op) {
+                                                          if (v <= 0.0) lo = 0u;
+                                                          else if (v > 65535.0) lo = 0xffffu;
+                                                          else lo = (mm_u32)v & 0xffffu;
+                                                      } else {
+                                                          if (v > 32767.0) lo = 0x7fffu;
+                                                          else if (v < -32768.0) lo = 0x8000u;
+                                                          else lo = (mm_u32)(mm_i32)v & 0xffffu;
+                                                      }
+                                                      cpu.s[d.rd] = (src & 0xffff0000u) | lo;
+                                                  }
+                                              }
                                               fpu_mark_active(&cpu);
                                               break;
                                           }
@@ -2530,6 +2921,424 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                             }
                                             cpu.r[d.rd] = result;
                                         } break;
+
+                        /* -------- DSP 8-bit parallel add/sub ---------------- */
+                        case MM_OP_SADD8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              mm_u8 ge = 0u;
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  mm_i32 s = (mm_i32)mm_lane_s8(a, i) + (mm_i32)mm_lane_s8(b, i);
+                                                  r[i] = (mm_u8)s;
+                                                  if (s >= 0) ge |= (mm_u8)(1u << i);
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                              cpu.ge_flags = ge;
+                                          } break;
+                        case MM_OP_SSUB8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              mm_u8 ge = 0u;
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  mm_i32 s = (mm_i32)mm_lane_s8(a, i) - (mm_i32)mm_lane_s8(b, i);
+                                                  r[i] = (mm_u8)s;
+                                                  if (s >= 0) ge |= (mm_u8)(1u << i);
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                              cpu.ge_flags = ge;
+                                          } break;
+                        case MM_OP_UADD8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              mm_u8 ge = 0u;
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  mm_u32 s = (mm_u32)mm_lane_u8(a, i) + (mm_u32)mm_lane_u8(b, i);
+                                                  r[i] = (mm_u8)s;
+                                                  if (s >= 0x100u) ge |= (mm_u8)(1u << i);
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                              cpu.ge_flags = ge;
+                                          } break;
+                        case MM_OP_USUB8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              mm_u8 ge = 0u;
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  mm_i32 s = (mm_i32)mm_lane_u8(a, i) - (mm_i32)mm_lane_u8(b, i);
+                                                  r[i] = (mm_u8)s;
+                                                  if (s >= 0) ge |= (mm_u8)(1u << i);
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                              cpu.ge_flags = ge;
+                                          } break;
+                        case MM_OP_QADD8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  r[i] = (mm_u8)mm_sat_s8_simple(
+                                                      (mm_i32)mm_lane_s8(a, i) + (mm_i32)mm_lane_s8(b, i));
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                          } break;
+                        case MM_OP_QSUB8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  r[i] = (mm_u8)mm_sat_s8_simple(
+                                                      (mm_i32)mm_lane_s8(a, i) - (mm_i32)mm_lane_s8(b, i));
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                          } break;
+                        case MM_OP_UQADD8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  r[i] = mm_sat_u8_simple(
+                                                      (mm_i32)mm_lane_u8(a, i) + (mm_i32)mm_lane_u8(b, i));
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                          } break;
+                        case MM_OP_UQSUB8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  r[i] = mm_sat_u8_simple(
+                                                      (mm_i32)mm_lane_u8(a, i) - (mm_i32)mm_lane_u8(b, i));
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                          } break;
+                        case MM_OP_SHADD8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  mm_i32 s = (mm_i32)mm_lane_s8(a, i) + (mm_i32)mm_lane_s8(b, i);
+                                                  r[i] = (mm_u8)(s >> 1);
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                          } break;
+                        case MM_OP_SHSUB8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  mm_i32 s = (mm_i32)mm_lane_s8(a, i) - (mm_i32)mm_lane_s8(b, i);
+                                                  r[i] = (mm_u8)(s >> 1);
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                          } break;
+                        case MM_OP_UHADD8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  mm_u32 s = (mm_u32)mm_lane_u8(a, i) + (mm_u32)mm_lane_u8(b, i);
+                                                  r[i] = (mm_u8)(s >> 1);
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                          } break;
+                        case MM_OP_UHSUB8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 r[4];
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  mm_i32 s = (mm_i32)mm_lane_u8(a, i) - (mm_i32)mm_lane_u8(b, i);
+                                                  r[i] = (mm_u8)((mm_u32)s >> 1);
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                          } break;
+
+                        /* -------- DSP 16-bit parallel add/sub --------------- */
+                        case MM_OP_SADD16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_s16(a, 0) + (mm_i32)mm_lane_s16(b, 0);
+                                              mm_i32 hi = (mm_i32)mm_lane_s16(a, 1) + (mm_i32)mm_lane_s16(b, 1);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                              cpu.ge_flags = (mm_u8)((lo >= 0 ? 0x3u : 0u) | (hi >= 0 ? 0xcu : 0u));
+                                          } break;
+                        case MM_OP_SSUB16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_s16(a, 0) - (mm_i32)mm_lane_s16(b, 0);
+                                              mm_i32 hi = (mm_i32)mm_lane_s16(a, 1) - (mm_i32)mm_lane_s16(b, 1);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                              cpu.ge_flags = (mm_u8)((lo >= 0 ? 0x3u : 0u) | (hi >= 0 ? 0xcu : 0u));
+                                          } break;
+                        case MM_OP_UADD16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u32 lo = (mm_u32)mm_lane_u16(a, 0) + (mm_u32)mm_lane_u16(b, 0);
+                                              mm_u32 hi = (mm_u32)mm_lane_u16(a, 1) + (mm_u32)mm_lane_u16(b, 1);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                              cpu.ge_flags = (mm_u8)((lo >= 0x10000u ? 0x3u : 0u) | (hi >= 0x10000u ? 0xcu : 0u));
+                                          } break;
+                        case MM_OP_USUB16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_u16(a, 0) - (mm_i32)mm_lane_u16(b, 0);
+                                              mm_i32 hi = (mm_i32)mm_lane_u16(a, 1) - (mm_i32)mm_lane_u16(b, 1);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                              cpu.ge_flags = (mm_u8)((lo >= 0 ? 0x3u : 0u) | (hi >= 0 ? 0xcu : 0u));
+                                          } break;
+                        case MM_OP_QADD16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i16 lo = mm_sat_s16_simple((mm_i32)mm_lane_s16(a, 0) + (mm_i32)mm_lane_s16(b, 0));
+                                              mm_i16 hi = mm_sat_s16_simple((mm_i32)mm_lane_s16(a, 1) + (mm_i32)mm_lane_s16(b, 1));
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                          } break;
+                        case MM_OP_QSUB16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i16 lo = mm_sat_s16_simple((mm_i32)mm_lane_s16(a, 0) - (mm_i32)mm_lane_s16(b, 0));
+                                              mm_i16 hi = mm_sat_s16_simple((mm_i32)mm_lane_s16(a, 1) - (mm_i32)mm_lane_s16(b, 1));
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                          } break;
+                        case MM_OP_UQADD16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u16 lo = mm_sat_u16_simple((mm_i32)mm_lane_u16(a, 0) + (mm_i32)mm_lane_u16(b, 0));
+                                              mm_u16 hi = mm_sat_u16_simple((mm_i32)mm_lane_u16(a, 1) + (mm_i32)mm_lane_u16(b, 1));
+                                              cpu.r[d.rd] = mm_pack_halves(lo, hi);
+                                          } break;
+                        case MM_OP_UQSUB16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u16 lo = mm_sat_u16_simple((mm_i32)mm_lane_u16(a, 0) - (mm_i32)mm_lane_u16(b, 0));
+                                              mm_u16 hi = mm_sat_u16_simple((mm_i32)mm_lane_u16(a, 1) - (mm_i32)mm_lane_u16(b, 1));
+                                              cpu.r[d.rd] = mm_pack_halves(lo, hi);
+                                          } break;
+                        case MM_OP_SHADD16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_s16(a, 0) + (mm_i32)mm_lane_s16(b, 0);
+                                              mm_i32 hi = (mm_i32)mm_lane_s16(a, 1) + (mm_i32)mm_lane_s16(b, 1);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)(lo >> 1), (mm_u16)(hi >> 1));
+                                          } break;
+                        case MM_OP_SHSUB16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_s16(a, 0) - (mm_i32)mm_lane_s16(b, 0);
+                                              mm_i32 hi = (mm_i32)mm_lane_s16(a, 1) - (mm_i32)mm_lane_s16(b, 1);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)(lo >> 1), (mm_u16)(hi >> 1));
+                                          } break;
+                        case MM_OP_UHADD16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u32 lo = (mm_u32)mm_lane_u16(a, 0) + (mm_u32)mm_lane_u16(b, 0);
+                                              mm_u32 hi = (mm_u32)mm_lane_u16(a, 1) + (mm_u32)mm_lane_u16(b, 1);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)(lo >> 1), (mm_u16)(hi >> 1));
+                                          } break;
+                        case MM_OP_UHSUB16: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_u16(a, 0) - (mm_i32)mm_lane_u16(b, 0);
+                                              mm_i32 hi = (mm_i32)mm_lane_u16(a, 1) - (mm_i32)mm_lane_u16(b, 1);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)((mm_u32)lo >> 1), (mm_u16)((mm_u32)hi >> 1));
+                                          } break;
+
+                        /* -------- DSP cross add-sub (16-bit halves) --------- */
+                        /* ASX: Rd[hi] = Rn[hi] + Rm[lo]; Rd[lo] = Rn[lo] - Rm[hi]
+                         * SAX: Rd[hi] = Rn[hi] - Rm[lo]; Rd[lo] = Rn[lo] + Rm[hi]
+                         */
+                        case MM_OP_SASX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_s16(a, 0) - (mm_i32)mm_lane_s16(b, 1);
+                                              mm_i32 hi = (mm_i32)mm_lane_s16(a, 1) + (mm_i32)mm_lane_s16(b, 0);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                              cpu.ge_flags = (mm_u8)((lo >= 0 ? 0x3u : 0u) | (hi >= 0 ? 0xcu : 0u));
+                                          } break;
+                        case MM_OP_SSAX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_s16(a, 0) + (mm_i32)mm_lane_s16(b, 1);
+                                              mm_i32 hi = (mm_i32)mm_lane_s16(a, 1) - (mm_i32)mm_lane_s16(b, 0);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                              cpu.ge_flags = (mm_u8)((lo >= 0 ? 0x3u : 0u) | (hi >= 0 ? 0xcu : 0u));
+                                          } break;
+                        case MM_OP_UASX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_u16(a, 0) - (mm_i32)mm_lane_u16(b, 1);
+                                              mm_u32 hi = (mm_u32)mm_lane_u16(a, 1) + (mm_u32)mm_lane_u16(b, 0);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                              cpu.ge_flags = (mm_u8)((lo >= 0 ? 0x3u : 0u) | (hi >= 0x10000u ? 0xcu : 0u));
+                                          } break;
+                        case MM_OP_USAX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u32 lo = (mm_u32)mm_lane_u16(a, 0) + (mm_u32)mm_lane_u16(b, 1);
+                                              mm_i32 hi = (mm_i32)mm_lane_u16(a, 1) - (mm_i32)mm_lane_u16(b, 0);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                              cpu.ge_flags = (mm_u8)((lo >= 0x10000u ? 0x3u : 0u) | (hi >= 0 ? 0xcu : 0u));
+                                          } break;
+                        case MM_OP_QASX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i16 lo = mm_sat_s16_simple((mm_i32)mm_lane_s16(a, 0) - (mm_i32)mm_lane_s16(b, 1));
+                                              mm_i16 hi = mm_sat_s16_simple((mm_i32)mm_lane_s16(a, 1) + (mm_i32)mm_lane_s16(b, 0));
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                          } break;
+                        case MM_OP_QSAX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i16 lo = mm_sat_s16_simple((mm_i32)mm_lane_s16(a, 0) + (mm_i32)mm_lane_s16(b, 1));
+                                              mm_i16 hi = mm_sat_s16_simple((mm_i32)mm_lane_s16(a, 1) - (mm_i32)mm_lane_s16(b, 0));
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                          } break;
+                        case MM_OP_UQASX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u16 lo = mm_sat_u16_simple((mm_i32)mm_lane_u16(a, 0) - (mm_i32)mm_lane_u16(b, 1));
+                                              mm_u16 hi = mm_sat_u16_simple((mm_i32)mm_lane_u16(a, 1) + (mm_i32)mm_lane_u16(b, 0));
+                                              cpu.r[d.rd] = mm_pack_halves(lo, hi);
+                                          } break;
+                        case MM_OP_UQSAX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u16 lo = mm_sat_u16_simple((mm_i32)mm_lane_u16(a, 0) + (mm_i32)mm_lane_u16(b, 1));
+                                              mm_u16 hi = mm_sat_u16_simple((mm_i32)mm_lane_u16(a, 1) - (mm_i32)mm_lane_u16(b, 0));
+                                              cpu.r[d.rd] = mm_pack_halves(lo, hi);
+                                          } break;
+                        case MM_OP_SHASX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_s16(a, 0) - (mm_i32)mm_lane_s16(b, 1);
+                                              mm_i32 hi = (mm_i32)mm_lane_s16(a, 1) + (mm_i32)mm_lane_s16(b, 0);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)(lo >> 1), (mm_u16)(hi >> 1));
+                                          } break;
+                        case MM_OP_SHSAX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_s16(a, 0) + (mm_i32)mm_lane_s16(b, 1);
+                                              mm_i32 hi = (mm_i32)mm_lane_s16(a, 1) - (mm_i32)mm_lane_s16(b, 0);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)(lo >> 1), (mm_u16)(hi >> 1));
+                                          } break;
+                        case MM_OP_UHASX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_i32 lo = (mm_i32)mm_lane_u16(a, 0) - (mm_i32)mm_lane_u16(b, 1);
+                                              mm_u32 hi = (mm_u32)mm_lane_u16(a, 1) + (mm_u32)mm_lane_u16(b, 0);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)((mm_u32)lo >> 1), (mm_u16)(hi >> 1));
+                                          } break;
+                        case MM_OP_UHSAX: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u32 lo = (mm_u32)mm_lane_u16(a, 0) + (mm_u32)mm_lane_u16(b, 1);
+                                              mm_i32 hi = (mm_i32)mm_lane_u16(a, 1) - (mm_i32)mm_lane_u16(b, 0);
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)(lo >> 1), (mm_u16)((mm_u32)hi >> 1));
+                                          } break;
+
+                        /* -------- SSAT16 / USAT16 --------------------------- */
+                        case MM_OP_SSAT16: {
+                                              mm_u32 a = cpu.r[d.rn];
+                                              mm_u32 n = d.imm;  /* 1..16 */
+                                              mm_i64 max = (1LL << (n - 1)) - 1;
+                                              mm_i64 min = -(1LL << (n - 1));
+                                              mm_i16 lo_in = mm_lane_s16(a, 0);
+                                              mm_i16 hi_in = mm_lane_s16(a, 1);
+                                              mm_i16 lo, hi;
+                                              if ((mm_i64)lo_in > max) { lo = (mm_i16)max; cpu.q_flag = MM_TRUE; }
+                                              else if ((mm_i64)lo_in < min) { lo = (mm_i16)min; cpu.q_flag = MM_TRUE; }
+                                              else lo = lo_in;
+                                              if ((mm_i64)hi_in > max) { hi = (mm_i16)max; cpu.q_flag = MM_TRUE; }
+                                              else if ((mm_i64)hi_in < min) { hi = (mm_i16)min; cpu.q_flag = MM_TRUE; }
+                                              else hi = hi_in;
+                                              cpu.r[d.rd] = mm_pack_halves((mm_u16)lo, (mm_u16)hi);
+                                          } break;
+                        case MM_OP_USAT16: {
+                                              mm_u32 a = cpu.r[d.rn];
+                                              mm_u32 n = d.imm;  /* 0..15 */
+                                              mm_i64 max = (1LL << n) - 1;
+                                              mm_i16 lo_in = mm_lane_s16(a, 0);
+                                              mm_i16 hi_in = mm_lane_s16(a, 1);
+                                              mm_u16 lo, hi;
+                                              if ((mm_i64)lo_in > max) { lo = (mm_u16)max; cpu.q_flag = MM_TRUE; }
+                                              else if (lo_in < 0) { lo = 0u; cpu.q_flag = MM_TRUE; }
+                                              else lo = (mm_u16)lo_in;
+                                              if ((mm_i64)hi_in > max) { hi = (mm_u16)max; cpu.q_flag = MM_TRUE; }
+                                              else if (hi_in < 0) { hi = 0u; cpu.q_flag = MM_TRUE; }
+                                              else hi = (mm_u16)hi_in;
+                                              cpu.r[d.rd] = mm_pack_halves(lo, hi);
+                                          } break;
+
+                        /* -------- SEL ---------------------------------------- */
+                        case MM_OP_SEL: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u8 ge = cpu.ge_flags;
+                                              mm_u8 r[4];
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  r[i] = ((ge >> i) & 1u) ? mm_lane_u8(a, i) : mm_lane_u8(b, i);
+                                              }
+                                              cpu.r[d.rd] = mm_pack_bytes(r[0], r[1], r[2], r[3]);
+                                          } break;
+
+                        /* -------- USAD8 / USADA8 ---------------------------- */
+                        case MM_OP_USAD8:
+                        case MM_OP_USADA8: {
+                                              mm_u32 a = cpu.r[d.rn], b = cpu.r[d.rm];
+                                              mm_u32 sum = 0u;
+                                              int i;
+                                              for (i = 0; i < 4; ++i) {
+                                                  mm_i32 diff = (mm_i32)mm_lane_u8(a, i) - (mm_i32)mm_lane_u8(b, i);
+                                                  sum += (mm_u32)(diff < 0 ? -diff : diff);
+                                              }
+                                              if (d.kind == MM_OP_USADA8) {
+                                                  sum += cpu.r[d.ra];
+                                              }
+                                              cpu.r[d.rd] = sum;
+                                          } break;
+
+                        /* -------- SMUAD / SMUADX / SMUSD / SMUSDX ----------- */
+                        case MM_OP_SMUAD:
+                        case MM_OP_SMUADX: {
+                                              mm_u32 rn = cpu.r[d.rn], rm = cpu.r[d.rm];
+                                              mm_i32 rn_lo = (mm_i32)(mm_i16)(rn & 0xffffu);
+                                              mm_i32 rn_hi = (mm_i32)(mm_i16)(rn >> 16);
+                                              mm_i32 rm_lo = (mm_i32)(mm_i16)(rm & 0xffffu);
+                                              mm_i32 rm_hi = (mm_i32)(mm_i16)(rm >> 16);
+                                              mm_i64 p1, p2, sum;
+                                              if (d.kind == MM_OP_SMUADX) {
+                                                  p1 = (mm_i64)rn_lo * (mm_i64)rm_hi;
+                                                  p2 = (mm_i64)rn_hi * (mm_i64)rm_lo;
+                                              } else {
+                                                  p1 = (mm_i64)rn_lo * (mm_i64)rm_lo;
+                                                  p2 = (mm_i64)rn_hi * (mm_i64)rm_hi;
+                                              }
+                                              sum = p1 + p2;
+                                              cpu.r[d.rd] = (mm_u32)(mm_i32)mm_sat_s32(sum, 32u, &cpu.q_flag);
+                                          } break;
+                        case MM_OP_SMUSD:
+                        case MM_OP_SMUSDX: {
+                                              mm_u32 rn = cpu.r[d.rn], rm = cpu.r[d.rm];
+                                              mm_i32 rn_lo = (mm_i32)(mm_i16)(rn & 0xffffu);
+                                              mm_i32 rn_hi = (mm_i32)(mm_i16)(rn >> 16);
+                                              mm_i32 rm_lo = (mm_i32)(mm_i16)(rm & 0xffffu);
+                                              mm_i32 rm_hi = (mm_i32)(mm_i16)(rm >> 16);
+                                              mm_i64 p1, p2;
+                                              if (d.kind == MM_OP_SMUSDX) {
+                                                  p1 = (mm_i64)rn_lo * (mm_i64)rm_hi;
+                                                  p2 = (mm_i64)rn_hi * (mm_i64)rm_lo;
+                                              } else {
+                                                  p1 = (mm_i64)rn_lo * (mm_i64)rm_lo;
+                                                  p2 = (mm_i64)rn_hi * (mm_i64)rm_hi;
+                                              }
+                                              /* SMUSD: result fits in 32 bits without Q flag (per ARM ARM). */
+                                              cpu.r[d.rd] = (mm_u32)(mm_i32)(p1 - p2);
+                                          } break;
+
+                        /* -------- SMLSLD / SMLSLDX -------------------------- */
+                        case MM_OP_SMLSLD:
+                        case MM_OP_SMLSLDX: {
+                                              mm_u32 rn = cpu.r[d.rn], rm = cpu.r[d.rm];
+                                              mm_i32 rn_lo = (mm_i32)(mm_i16)(rn & 0xffffu);
+                                              mm_i32 rn_hi = (mm_i32)(mm_i16)(rn >> 16);
+                                              mm_i32 rm_lo = (mm_i32)(mm_i16)(rm & 0xffffu);
+                                              mm_i32 rm_hi = (mm_i32)(mm_i16)(rm >> 16);
+                                              mm_i64 acc = ((mm_i64)(mm_u64)cpu.r[d.ra] << 32) |
+                                                           (mm_u64)cpu.r[d.rd];
+                                              mm_i64 p1, p2, diff;
+                                              mm_u64 result;
+                                              if (d.kind == MM_OP_SMLSLDX) {
+                                                  p1 = (mm_i64)rn_lo * (mm_i64)rm_hi;
+                                                  p2 = (mm_i64)rn_hi * (mm_i64)rm_lo;
+                                              } else {
+                                                  p1 = (mm_i64)rn_lo * (mm_i64)rm_lo;
+                                                  p2 = (mm_i64)rn_hi * (mm_i64)rm_hi;
+                                              }
+                                              diff = p1 - p2 + acc;
+                                              result = (mm_u64)diff;
+                                              cpu.r[d.rd] = (mm_u32)(result & 0xffffffffu);
+                                              cpu.r[d.ra] = (mm_u32)(result >> 32);
+                                          } break;
+
                         case MM_OP_SMMUL:
                         case MM_OP_SMMLA:
                         case MM_OP_SMMLS:

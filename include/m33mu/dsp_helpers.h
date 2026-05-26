@@ -105,4 +105,53 @@ static inline mm_u32 mm_qdsub(mm_u32 rn, mm_u32 rm, mm_bool *q_flag)
     return (mm_u32)mm_sat_s32(result, 32, q_flag);
 }
 
+/* --- Byte/halfword saturation primitives (used by Q*, SSAT16, USAT16) ----- */
+
+static inline mm_i8 mm_sat_s8_simple(mm_i32 v)
+{
+    if (v > 127) return 127;
+    if (v < -128) return -128;
+    return (mm_i8)v;
+}
+
+static inline mm_u8 mm_sat_u8_simple(mm_i32 v)
+{
+    if (v > 255) return 255;
+    if (v < 0) return 0;
+    return (mm_u8)v;
+}
+
+static inline mm_i16 mm_sat_s16_simple(mm_i32 v)
+{
+    if (v > 32767) return 32767;
+    if (v < -32768) return -32768;
+    return (mm_i16)v;
+}
+
+static inline mm_u16 mm_sat_u16_simple(mm_i32 v)
+{
+    if (v > 65535) return 65535;
+    if (v < 0) return 0;
+    return (mm_u16)v;
+}
+
+/* --- Lane extractors ------------------------------------------------------ */
+
+static inline mm_i8 mm_lane_s8(mm_u32 w, int i) { return (mm_i8)((w >> (i * 8)) & 0xffu); }
+static inline mm_u8 mm_lane_u8(mm_u32 w, int i) { return (mm_u8)((w >> (i * 8)) & 0xffu); }
+static inline mm_i16 mm_lane_s16(mm_u32 w, int i) { return (mm_i16)((w >> (i * 16)) & 0xffffu); }
+static inline mm_u16 mm_lane_u16(mm_u32 w, int i) { return (mm_u16)((w >> (i * 16)) & 0xffffu); }
+
+/* Pack 4 byte lanes into a word. */
+static inline mm_u32 mm_pack_bytes(mm_u8 b0, mm_u8 b1, mm_u8 b2, mm_u8 b3)
+{
+    return ((mm_u32)b0) | ((mm_u32)b1 << 8) | ((mm_u32)b2 << 16) | ((mm_u32)b3 << 24);
+}
+
+/* Pack 2 halfword lanes into a word. */
+static inline mm_u32 mm_pack_halves(mm_u16 h0, mm_u16 h1)
+{
+    return ((mm_u32)h0) | ((mm_u32)h1 << 16);
+}
+
 #endif /* M33MU_DSP_HELPERS_H */

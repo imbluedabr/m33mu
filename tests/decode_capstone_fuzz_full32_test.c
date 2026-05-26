@@ -112,11 +112,11 @@ static int capstone_should_skip(mm_u32 insn, const char *mnemonic, const char *o
         return 1;
     }
     
-    /* SIMD parallel arithmetic (SADD8, USADA8, etc.) - optional SIMD extension */
-    if (strcmp(mnemonic, "sadd8") == 0 || strcmp(mnemonic, "usada8") == 0) {
-        return 1;
-    }
-    
+    /* Note: SADD8/USADA8 and the full DSP parallel family are implemented as
+     * of the DSP/FPU fidelity update; do NOT skip them here.
+     */
+
+
     /* SMLAW/SMULW with SP - UNPREDICTABLE but Capstone accepts */
     if (strcmp(mnemonic, "smlawb") == 0 || strcmp(mnemonic, "smlawt") == 0 ||
         strcmp(mnemonic, "smulwb") == 0 || strcmp(mnemonic, "smulwt") == 0) {
@@ -153,14 +153,9 @@ static int capstone_should_skip(mm_u32 insn, const char *mnemonic, const char *o
     if (strncmp(mnemonic, "vmov.", 5) == 0) {
         return 1;
     }
-    if (strncmp(mnemonic, "vcvt", 4) == 0) {
-        if (strstr(mnemonic, ".s16") != 0 || strstr(mnemonic, ".u16") != 0) {
-            return 1;
-        }
-        if (strstr(op_str, "#") != 0) {
-            return 1;
-        }
-    }
+    /* VCVT fixed-point (operand has `#fbits`) and the 16-bit fixed forms
+     * (.s16/.u16) are now implemented via MM_OP_VCVT_FIXED.
+     * Half-precision .f16<->.f32 forms (VCVTB/T) are implemented too. */
     if (strstr(mnemonic, ".f32") != 0) {
         if (strstr(op_str, "d") != 0 || strstr(op_str, "D") != 0) {
             return 1;
@@ -174,7 +169,9 @@ static int capstone_should_skip(mm_u32 insn, const char *mnemonic, const char *o
             return 1;
         }
     }
-    if (strstr(mnemonic, ".16") != 0 || strstr(mnemonic, ".f16") != 0 || strstr(mnemonic, ".f64") != 0) {
+    /* Skip integer NEON (.16) and double-precision (.f64); .f16 (half) is
+     * now implemented via VCVTB/T. */
+    if (strstr(mnemonic, ".16") != 0 || strstr(mnemonic, ".f64") != 0) {
         return 1;
     }
     if (strcmp(mnemonic, "mvn") == 0 || strcmp(mnemonic, "mvn.w") == 0 ||

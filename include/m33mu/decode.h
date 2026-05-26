@@ -225,6 +225,71 @@ enum mm_op_kind {
     MM_OP_USAT,    /* Unsigned saturate */
     MM_OP_SMULBB,  /* Signed halfword multiply (all 4 variants: BB/BT/TB/TT) */
 
+    /* DSP parallel 8-bit add/sub (set GE[3:0]) */
+    MM_OP_SADD8,
+    MM_OP_SSUB8,
+    MM_OP_UADD8,
+    MM_OP_USUB8,
+    /* DSP parallel 8-bit saturating add/sub */
+    MM_OP_QADD8,
+    MM_OP_QSUB8,
+    MM_OP_UQADD8,
+    MM_OP_UQSUB8,
+    /* DSP parallel 8-bit halving add/sub */
+    MM_OP_SHADD8,
+    MM_OP_SHSUB8,
+    MM_OP_UHADD8,
+    MM_OP_UHSUB8,
+
+    /* DSP parallel 16-bit add/sub (set GE[3:0] in halfword pairs) */
+    MM_OP_SADD16,
+    MM_OP_SSUB16,
+    MM_OP_UADD16,
+    MM_OP_USUB16,
+    MM_OP_QADD16,
+    MM_OP_QSUB16,
+    MM_OP_UQADD16,
+    MM_OP_UQSUB16,
+    MM_OP_SHADD16,
+    MM_OP_SHSUB16,
+    MM_OP_UHADD16,
+    MM_OP_UHSUB16,
+
+    /* DSP cross add-sub (16-bit halves with swap) */
+    MM_OP_SASX,
+    MM_OP_SSAX,
+    MM_OP_UASX,
+    MM_OP_USAX,
+    MM_OP_QASX,
+    MM_OP_QSAX,
+    MM_OP_UQASX,
+    MM_OP_UQSAX,
+    MM_OP_SHASX,
+    MM_OP_SHSAX,
+    MM_OP_UHASX,
+    MM_OP_UHSAX,
+
+    /* DSP halfword saturate to N+1-bit signed/unsigned (parallel) */
+    MM_OP_SSAT16,
+    MM_OP_USAT16,
+
+    /* DSP byte select via GE flags */
+    MM_OP_SEL,
+
+    /* DSP sum of absolute differences */
+    MM_OP_USAD8,
+    MM_OP_USADA8,
+
+    /* DSP dual multiply (no accumulator) */
+    MM_OP_SMUAD,
+    MM_OP_SMUADX,
+    MM_OP_SMUSD,
+    MM_OP_SMUSDX,
+
+    /* DSP long signed multiply-subtract */
+    MM_OP_SMLSLD,
+    MM_OP_SMLSLDX,
+
     MM_OP_ORN_REG,
     MM_OP_ORN_IMM,
     MM_OP_RSB_IMM,
@@ -274,6 +339,54 @@ enum mm_op_kind {
     MM_OP_VSTR,
     MM_OP_VLDM,
     MM_OP_VSTM,
+
+    /* ARMv8-M FPv5 additions: directed-rounding integer conversions */
+    MM_OP_VCVTA_S32_F32,
+    MM_OP_VCVTA_U32_F32,
+    MM_OP_VCVTN_S32_F32,
+    MM_OP_VCVTN_U32_F32,
+    MM_OP_VCVTP_S32_F32,
+    MM_OP_VCVTP_U32_F32,
+    MM_OP_VCVTM_S32_F32,
+    MM_OP_VCVTM_U32_F32,
+
+    /* ARMv8-M FPv5 additions: round-to-integral */
+    MM_OP_VRINTA_F32,
+    MM_OP_VRINTN_F32,
+    MM_OP_VRINTP_F32,
+    MM_OP_VRINTM_F32,
+    MM_OP_VRINTZ_F32,
+    MM_OP_VRINTR_F32,
+    MM_OP_VRINTX_F32,
+
+    /* ARMv8-M FPv5 additions: NaN-aware min/max and conditional select */
+    MM_OP_VMAXNM_F32,
+    MM_OP_VMINNM_F32,
+    MM_OP_VSEL_F32,
+
+    /* ARMv8-M FPv5 additions: fused multiply-accumulate */
+    MM_OP_VFMA_F32,
+    MM_OP_VFMS_F32,
+    MM_OP_VFNMA_F32,
+    MM_OP_VFNMS_F32,
+
+    /* ARMv8-M FPv5 additions: negated multiply variants */
+    MM_OP_VNMUL_F32,
+    MM_OP_VNMLA_F32,
+    MM_OP_VNMLS_F32,
+
+    /* ARMv8-M FPv5 additions: half-precision conversion (B=bottom, T=top half) */
+    MM_OP_VCVTB_F32_F16,
+    MM_OP_VCVTT_F32_F16,
+    MM_OP_VCVTB_F16_F32,
+    MM_OP_VCVTT_F16_F32,
+
+    /* ARMv8-M fixed-point conversion (F32 <-> S16/U16/S32/U32 with #fbits).
+     * d.imm packs: bit 0 = to_float, bit 1 = unsigned, bit 2 = 32-bit,
+     *               bits[7:3] = frac_bits (0..32).
+     */
+    MM_OP_VCVT_FIXED,
+
     MM_OP_MAX
 };
 

@@ -638,9 +638,242 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
         case ARM_INS_VCMPE: return dec->kind == MM_OP_VCMPE;
         case ARM_INS_VCVT:
             return (dec->kind == MM_OP_VCVT_S32_F32 || dec->kind == MM_OP_VCVT_U32_F32 ||
-                    dec->kind == MM_OP_VCVT_F32_S32 || dec->kind == MM_OP_VCVT_F32_U32);
+                    dec->kind == MM_OP_VCVT_F32_S32 || dec->kind == MM_OP_VCVT_F32_U32 ||
+                    dec->kind == MM_OP_VCVTB_F32_F16 || dec->kind == MM_OP_VCVTT_F32_F16 ||
+                    dec->kind == MM_OP_VCVTB_F16_F32 || dec->kind == MM_OP_VCVTT_F16_F32 ||
+                    dec->kind == MM_OP_VCVT_FIXED);
         case ARM_INS_VCVTR:
             return (dec->kind == MM_OP_VCVTR_S32_F32 || dec->kind == MM_OP_VCVTR_U32_F32);
+#ifdef ARM_INS_VCVTA
+        case ARM_INS_VCVTA:
+            return (dec->kind == MM_OP_VCVTA_S32_F32 || dec->kind == MM_OP_VCVTA_U32_F32);
+#endif
+#ifdef ARM_INS_VCVTN
+        case ARM_INS_VCVTN:
+            return (dec->kind == MM_OP_VCVTN_S32_F32 || dec->kind == MM_OP_VCVTN_U32_F32);
+#endif
+#ifdef ARM_INS_VCVTP
+        case ARM_INS_VCVTP:
+            return (dec->kind == MM_OP_VCVTP_S32_F32 || dec->kind == MM_OP_VCVTP_U32_F32);
+#endif
+#ifdef ARM_INS_VCVTM
+        case ARM_INS_VCVTM:
+            return (dec->kind == MM_OP_VCVTM_S32_F32 || dec->kind == MM_OP_VCVTM_U32_F32);
+#endif
+#ifdef ARM_INS_VCVTB
+        case ARM_INS_VCVTB:
+            return (dec->kind == MM_OP_VCVTB_F32_F16 || dec->kind == MM_OP_VCVTB_F16_F32);
+#endif
+#ifdef ARM_INS_VCVTT
+        case ARM_INS_VCVTT:
+            return (dec->kind == MM_OP_VCVTT_F32_F16 || dec->kind == MM_OP_VCVTT_F16_F32);
+#endif
+#ifdef ARM_INS_VRINTA
+        case ARM_INS_VRINTA: return dec->kind == MM_OP_VRINTA_F32;
+#endif
+#ifdef ARM_INS_VRINTN
+        case ARM_INS_VRINTN: return dec->kind == MM_OP_VRINTN_F32;
+#endif
+#ifdef ARM_INS_VRINTP
+        case ARM_INS_VRINTP: return dec->kind == MM_OP_VRINTP_F32;
+#endif
+#ifdef ARM_INS_VRINTM
+        case ARM_INS_VRINTM: return dec->kind == MM_OP_VRINTM_F32;
+#endif
+#ifdef ARM_INS_VRINTZ
+        case ARM_INS_VRINTZ: return dec->kind == MM_OP_VRINTZ_F32;
+#endif
+#ifdef ARM_INS_VRINTR
+        case ARM_INS_VRINTR: return dec->kind == MM_OP_VRINTR_F32;
+#endif
+#ifdef ARM_INS_VRINTX
+        case ARM_INS_VRINTX: return dec->kind == MM_OP_VRINTX_F32;
+#endif
+#ifdef ARM_INS_VMAXNM
+        case ARM_INS_VMAXNM: return dec->kind == MM_OP_VMAXNM_F32;
+#endif
+#ifdef ARM_INS_VMINNM
+        case ARM_INS_VMINNM: return dec->kind == MM_OP_VMINNM_F32;
+#endif
+#ifdef ARM_INS_VSELEQ
+        case ARM_INS_VSELEQ:
+#endif
+#ifdef ARM_INS_VSELVS
+        case ARM_INS_VSELVS:
+#endif
+#ifdef ARM_INS_VSELGE
+        case ARM_INS_VSELGE:
+#endif
+#ifdef ARM_INS_VSELGT
+        case ARM_INS_VSELGT:
+#endif
+#if defined(ARM_INS_VSELEQ) || defined(ARM_INS_VSELVS) || defined(ARM_INS_VSELGE) || defined(ARM_INS_VSELGT)
+            return dec->kind == MM_OP_VSEL_F32;
+#endif
+#ifdef ARM_INS_VFMA
+        case ARM_INS_VFMA: return dec->kind == MM_OP_VFMA_F32;
+#endif
+#ifdef ARM_INS_VFMS
+        case ARM_INS_VFMS: return dec->kind == MM_OP_VFMS_F32;
+#endif
+#ifdef ARM_INS_VFNMA
+        case ARM_INS_VFNMA: return dec->kind == MM_OP_VFNMA_F32;
+#endif
+#ifdef ARM_INS_VFNMS
+        case ARM_INS_VFNMS: return dec->kind == MM_OP_VFNMS_F32;
+#endif
+        case ARM_INS_VNMUL: return dec->kind == MM_OP_VNMUL_F32;
+        case ARM_INS_VNMLA: return dec->kind == MM_OP_VNMLA_F32;
+        case ARM_INS_VNMLS: return dec->kind == MM_OP_VNMLS_F32;
+
+        /* DSP parallel arithmetic (added in fidelity update) */
+#ifdef ARM_INS_SADD8
+        case ARM_INS_SADD8: return dec->kind == MM_OP_SADD8;
+#endif
+#ifdef ARM_INS_SSUB8
+        case ARM_INS_SSUB8: return dec->kind == MM_OP_SSUB8;
+#endif
+#ifdef ARM_INS_UADD8
+        case ARM_INS_UADD8: return dec->kind == MM_OP_UADD8;
+#endif
+#ifdef ARM_INS_USUB8
+        case ARM_INS_USUB8: return dec->kind == MM_OP_USUB8;
+#endif
+#ifdef ARM_INS_QADD8
+        case ARM_INS_QADD8: return dec->kind == MM_OP_QADD8;
+#endif
+#ifdef ARM_INS_QSUB8
+        case ARM_INS_QSUB8: return dec->kind == MM_OP_QSUB8;
+#endif
+#ifdef ARM_INS_UQADD8
+        case ARM_INS_UQADD8: return dec->kind == MM_OP_UQADD8;
+#endif
+#ifdef ARM_INS_UQSUB8
+        case ARM_INS_UQSUB8: return dec->kind == MM_OP_UQSUB8;
+#endif
+#ifdef ARM_INS_SHADD8
+        case ARM_INS_SHADD8: return dec->kind == MM_OP_SHADD8;
+#endif
+#ifdef ARM_INS_SHSUB8
+        case ARM_INS_SHSUB8: return dec->kind == MM_OP_SHSUB8;
+#endif
+#ifdef ARM_INS_UHADD8
+        case ARM_INS_UHADD8: return dec->kind == MM_OP_UHADD8;
+#endif
+#ifdef ARM_INS_UHSUB8
+        case ARM_INS_UHSUB8: return dec->kind == MM_OP_UHSUB8;
+#endif
+#ifdef ARM_INS_SADD16
+        case ARM_INS_SADD16: return dec->kind == MM_OP_SADD16;
+#endif
+#ifdef ARM_INS_SSUB16
+        case ARM_INS_SSUB16: return dec->kind == MM_OP_SSUB16;
+#endif
+#ifdef ARM_INS_UADD16
+        case ARM_INS_UADD16: return dec->kind == MM_OP_UADD16;
+#endif
+#ifdef ARM_INS_USUB16
+        case ARM_INS_USUB16: return dec->kind == MM_OP_USUB16;
+#endif
+#ifdef ARM_INS_QADD16
+        case ARM_INS_QADD16: return dec->kind == MM_OP_QADD16;
+#endif
+#ifdef ARM_INS_QSUB16
+        case ARM_INS_QSUB16: return dec->kind == MM_OP_QSUB16;
+#endif
+#ifdef ARM_INS_UQADD16
+        case ARM_INS_UQADD16: return dec->kind == MM_OP_UQADD16;
+#endif
+#ifdef ARM_INS_UQSUB16
+        case ARM_INS_UQSUB16: return dec->kind == MM_OP_UQSUB16;
+#endif
+#ifdef ARM_INS_SHADD16
+        case ARM_INS_SHADD16: return dec->kind == MM_OP_SHADD16;
+#endif
+#ifdef ARM_INS_SHSUB16
+        case ARM_INS_SHSUB16: return dec->kind == MM_OP_SHSUB16;
+#endif
+#ifdef ARM_INS_UHADD16
+        case ARM_INS_UHADD16: return dec->kind == MM_OP_UHADD16;
+#endif
+#ifdef ARM_INS_UHSUB16
+        case ARM_INS_UHSUB16: return dec->kind == MM_OP_UHSUB16;
+#endif
+#ifdef ARM_INS_SASX
+        case ARM_INS_SASX: return dec->kind == MM_OP_SASX;
+#endif
+#ifdef ARM_INS_SSAX
+        case ARM_INS_SSAX: return dec->kind == MM_OP_SSAX;
+#endif
+#ifdef ARM_INS_UASX
+        case ARM_INS_UASX: return dec->kind == MM_OP_UASX;
+#endif
+#ifdef ARM_INS_USAX
+        case ARM_INS_USAX: return dec->kind == MM_OP_USAX;
+#endif
+#ifdef ARM_INS_QASX
+        case ARM_INS_QASX: return dec->kind == MM_OP_QASX;
+#endif
+#ifdef ARM_INS_QSAX
+        case ARM_INS_QSAX: return dec->kind == MM_OP_QSAX;
+#endif
+#ifdef ARM_INS_UQASX
+        case ARM_INS_UQASX: return dec->kind == MM_OP_UQASX;
+#endif
+#ifdef ARM_INS_UQSAX
+        case ARM_INS_UQSAX: return dec->kind == MM_OP_UQSAX;
+#endif
+#ifdef ARM_INS_SHASX
+        case ARM_INS_SHASX: return dec->kind == MM_OP_SHASX;
+#endif
+#ifdef ARM_INS_SHSAX
+        case ARM_INS_SHSAX: return dec->kind == MM_OP_SHSAX;
+#endif
+#ifdef ARM_INS_UHASX
+        case ARM_INS_UHASX: return dec->kind == MM_OP_UHASX;
+#endif
+#ifdef ARM_INS_UHSAX
+        case ARM_INS_UHSAX: return dec->kind == MM_OP_UHSAX;
+#endif
+#ifdef ARM_INS_SSAT16
+        case ARM_INS_SSAT16: return dec->kind == MM_OP_SSAT16;
+#endif
+#ifdef ARM_INS_USAT16
+        case ARM_INS_USAT16: return dec->kind == MM_OP_USAT16;
+#endif
+#ifdef ARM_INS_SEL
+        case ARM_INS_SEL: return dec->kind == MM_OP_SEL;
+#endif
+#ifdef ARM_INS_USAD8
+        case ARM_INS_USAD8: return dec->kind == MM_OP_USAD8;
+#endif
+#ifdef ARM_INS_USADA8
+        case ARM_INS_USADA8: return dec->kind == MM_OP_USADA8;
+#endif
+#ifdef ARM_INS_SMUAD
+        case ARM_INS_SMUAD: return dec->kind == MM_OP_SMUAD;
+#endif
+#ifdef ARM_INS_SMUADX
+        case ARM_INS_SMUADX: return dec->kind == MM_OP_SMUADX;
+#endif
+#ifdef ARM_INS_SMUSD
+        case ARM_INS_SMUSD: return dec->kind == MM_OP_SMUSD;
+#endif
+#ifdef ARM_INS_SMUSDX
+        case ARM_INS_SMUSDX: return dec->kind == MM_OP_SMUSDX;
+#endif
+#ifdef ARM_INS_SMLSLD
+        case ARM_INS_SMLSLD: return dec->kind == MM_OP_SMLSLD;
+#endif
+#ifdef ARM_INS_SMLSLDX
+        case ARM_INS_SMLSLDX: return dec->kind == MM_OP_SMLSLDX;
+#endif
+#ifdef ARM_INS_VPUSH
+        case ARM_INS_VPUSH: return dec->kind == MM_OP_VSTM;
+#endif
+#ifdef ARM_INS_VPOP
+        case ARM_INS_VPOP: return dec->kind == MM_OP_VLDM;
+#endif
         case ARM_INS_VMOV:
             return (dec->kind == MM_OP_VMOV_SR || dec->kind == MM_OP_VMOV_RS ||
                     dec->kind == MM_OP_VMOV_SRR || dec->kind == MM_OP_VMOV_RSS ||

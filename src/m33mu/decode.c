@@ -1106,6 +1106,196 @@ static struct mm_decoded decode_32(mm_u32 insn)
         }
     }
 
+    /* DSP parallel add/sub family (ARMv7-M DSP, optional in ARMv8-M).
+     * Encoding: 1111 1010 1 OPC[2:0] Rn | 1111 Rd VAR[3:0] Rm
+     *   OPC[2:0]: 000=ADD8, 001=ADD16, 010=ASX, 100=SUB8, 101=SUB16, 110=SAX
+     *   VAR[3:0]: 0000=signed, 0001=Q sat signed, 0010=SH halving signed,
+     *             0100=unsigned, 0101=UQ sat unsigned, 0110=UH halving unsigned,
+     *             1000=SEL (opc=010 only)
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xff80u) == 0xfa80u && (hw2 & 0xf000u) == 0xf000u) {
+            mm_u8 opc = (mm_u8)((hw1 >> 4) & 0x7u);
+            mm_u8 rn  = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rd  = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 var = (mm_u8)((hw2 >> 4) & 0xfu);
+            mm_u8 rm  = (mm_u8)(hw2 & 0x0fu);
+            enum mm_op_kind kind = MM_OP_UNDEFINED;
+            switch ((mm_u32)opc << 4 | var) {
+            case 0x00: kind = MM_OP_SADD8;  break;
+            case 0x01: kind = MM_OP_QADD8;  break;
+            case 0x02: kind = MM_OP_SHADD8; break;
+            case 0x04: kind = MM_OP_UADD8;  break;
+            case 0x05: kind = MM_OP_UQADD8; break;
+            case 0x06: kind = MM_OP_UHADD8; break;
+            case 0x10: kind = MM_OP_SADD16; break;
+            case 0x11: kind = MM_OP_QADD16; break;
+            case 0x12: kind = MM_OP_SHADD16; break;
+            case 0x14: kind = MM_OP_UADD16; break;
+            case 0x15: kind = MM_OP_UQADD16; break;
+            case 0x16: kind = MM_OP_UHADD16; break;
+            case 0x20: kind = MM_OP_SASX;   break;
+            case 0x21: kind = MM_OP_QASX;   break;
+            case 0x22: kind = MM_OP_SHASX;  break;
+            case 0x24: kind = MM_OP_UASX;   break;
+            case 0x25: kind = MM_OP_UQASX;  break;
+            case 0x26: kind = MM_OP_UHASX;  break;
+            case 0x28: kind = MM_OP_SEL;    break;
+            case 0x40: kind = MM_OP_SSUB8;  break;
+            case 0x41: kind = MM_OP_QSUB8;  break;
+            case 0x42: kind = MM_OP_SHSUB8; break;
+            case 0x44: kind = MM_OP_USUB8;  break;
+            case 0x45: kind = MM_OP_UQSUB8; break;
+            case 0x46: kind = MM_OP_UHSUB8; break;
+            case 0x50: kind = MM_OP_SSUB16; break;
+            case 0x51: kind = MM_OP_QSUB16; break;
+            case 0x52: kind = MM_OP_SHSUB16; break;
+            case 0x54: kind = MM_OP_USUB16; break;
+            case 0x55: kind = MM_OP_UQSUB16; break;
+            case 0x56: kind = MM_OP_UHSUB16; break;
+            case 0x60: kind = MM_OP_SSAX;   break;
+            case 0x61: kind = MM_OP_QSAX;   break;
+            case 0x62: kind = MM_OP_SHSAX;  break;
+            case 0x64: kind = MM_OP_USAX;   break;
+            case 0x65: kind = MM_OP_UQSAX;  break;
+            case 0x66: kind = MM_OP_UHSAX;  break;
+            default: break;
+            }
+            if (kind != MM_OP_UNDEFINED && rn != 15u && rd != 15u && rm != 15u) {
+                d.kind = kind;
+                d.rn = rn;
+                d.rd = rd;
+                d.rm = rm;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* SSAT16 / USAT16 (Thumb-2 parallel halfword saturate)
+     * SSAT16: 1111 0011 0010 Rn | 0000 Rd 0000 sat_imm[3:0]
+     * USAT16: 1111 0011 1010 Rn | 0000 Rd 0000 sat_imm[3:0]
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xff60u) == 0xf320u && (hw2 & 0x70f0u) == 0x0000u) {
+            mm_u8 unsigned_op = (mm_u8)((hw1 >> 7) & 0x1u);
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 sat = (mm_u8)(hw2 & 0x0fu);
+            if (rn != 15u && rd != 15u) {
+                d.kind = unsigned_op ? MM_OP_USAT16 : MM_OP_SSAT16;
+                d.rn = rn;
+                d.rd = rd;
+                /* SSAT16: sat to (sat_imm+1) bits signed (1..16);
+                 * USAT16: sat to sat_imm bits unsigned (0..15). */
+                d.imm = unsigned_op ? (mm_u32)sat : (mm_u32)(sat + 1u);
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* USAD8 / USADA8 (Thumb-2 sum of absolute differences)
+     * USAD8:  1111 1011 0111 Rn | 1111 Rd 0000 Rm   (Ra=15)
+     * USADA8: 1111 1011 0111 Rn |  Ra  Rd 0000 Rm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfb70u && (hw2 & 0x00f0u) == 0x0000u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 ra = (mm_u8)((hw2 >> 12) & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            if (rn != 15u && rd != 15u && rm != 15u) {
+                d.kind = (ra == 15u) ? MM_OP_USAD8 : MM_OP_USADA8;
+                d.rn = rn;
+                d.rd = rd;
+                d.rm = rm;
+                d.ra = ra;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* SMUAD / SMUADX (Thumb-2 signed dual multiply, no accumulator).
+     * Encoding: SMLAD with Ra=15.
+     * SMUAD:  1111 1011 0010 Rn | 1111 Rd 0000 Rm
+     * SMUADX: 1111 1011 0010 Rn | 1111 Rd 0001 Rm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfb20u && (hw2 & 0xf0e0u) == 0xf000u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 m_bit = (mm_u8)((hw2 >> 4) & 0x1u);
+            if (rn != 15u && rd != 15u && rm != 15u) {
+                d.kind = m_bit ? MM_OP_SMUADX : MM_OP_SMUAD;
+                d.rn = rn;
+                d.rd = rd;
+                d.rm = rm;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* SMUSD / SMUSDX (Thumb-2 signed dual multiply-subtract, no accumulator).
+     * SMUSD:  1111 1011 0100 Rn | 1111 Rd 0000 Rm
+     * SMUSDX: 1111 1011 0100 Rn | 1111 Rd 0001 Rm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfb40u && (hw2 & 0xf0e0u) == 0xf000u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 m_bit = (mm_u8)((hw2 >> 4) & 0x1u);
+            if (rn != 15u && rd != 15u && rm != 15u) {
+                d.kind = m_bit ? MM_OP_SMUSDX : MM_OP_SMUSD;
+                d.rn = rn;
+                d.rd = rd;
+                d.rm = rm;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
+    /* SMLSLD / SMLSLDX (Thumb-2 signed long multiply-subtract dual)
+     * SMLSLD:  1111 1011 1101 Rn | RdLo RdHi 1100 Rm
+     * SMLSLDX: 1111 1011 1101 Rn | RdLo RdHi 1101 Rm
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xfff0u) == 0xfbd0u) {
+            mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
+            mm_u8 rdlo = (mm_u8)((hw2 >> 12) & 0x0fu);
+            mm_u8 rdhi = (mm_u8)((hw2 >> 8) & 0x0fu);
+            mm_u8 rm = (mm_u8)(hw2 & 0x0fu);
+            mm_u8 m_bit = (mm_u8)((hw2 >> 4) & 0x1u);
+            if ((hw2 & 0x00f0u) == (0x00c0u | ((mm_u32)m_bit << 4)) &&
+                rn != 15u && rdlo != 15u && rdhi != 15u && rm != 15u) {
+                d.kind = m_bit ? MM_OP_SMLSLDX : MM_OP_SMLSLD;
+                d.rn = rn;
+                d.rd = rdlo;
+                d.ra = rdhi;
+                d.rm = rm;
+                d.undefined = MM_FALSE;
+                return d;
+            }
+        }
+    }
+
     /* QADD / QSUB (Thumb-2 saturating add/subtract)
      * QADD: 1111 1010 1000 Rn | 1111 Rd 1000 Rm
      * QSUB: 1111 1010 1000 Rn | 1111 Rd 1010 Rm
@@ -2761,6 +2951,309 @@ static struct mm_decoded decode_32(mm_u32 insn)
     }
     if ((insn & 0xffbf0fd0u) == 0xeeb10ac0u) {
         d.kind = MM_OP_VSQRT;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* ARMv8-M VCVT{A,N,P,M}.{S32,U32}.F32 — directed rounding (FPv5).
+     * Encoding: 1111 1110 1D11 11 RM | Vd 101 sz op 1 M 0 Vm
+     *   sz=0 (F32), op=1 (signed) or op=0 (unsigned), bit 6 fixed=1,
+     *   bit 4 fixed=0, bit 5=M (Vm low bit), RM in hw1[17:16]:
+     *     00 = A (nearest, ties away), 01 = N (nearest, ties even),
+     *     10 = P (+inf), 11 = M (-inf).
+     * Mask: hw1=0xffbf (D=hw1[6] free), hw2=0x0fd0 (Vd/M/Vm free).
+     * Verified against arm-none-eabi-as for cortex-m33 / fpv5-sp-d16.
+     */
+    if ((insn & 0xffbf0fd0u) == 0xfebc0ac0u) {
+        d.kind = MM_OP_VCVTA_S32_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfebc0a40u) {
+        d.kind = MM_OP_VCVTA_U32_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfebd0ac0u) {
+        d.kind = MM_OP_VCVTN_S32_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfebd0a40u) {
+        d.kind = MM_OP_VCVTN_U32_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfebe0ac0u) {
+        d.kind = MM_OP_VCVTP_S32_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfebe0a40u) {
+        d.kind = MM_OP_VCVTP_U32_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfebf0ac0u) {
+        d.kind = MM_OP_VCVTM_S32_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfebf0a40u) {
+        d.kind = MM_OP_VCVTM_U32_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* ARMv8-M VRINT{A,N,P,M}.F32 — round-to-integral with directed rounding.
+     * Encoding: 1111 1110 1D11 10 RM | Vd 101 sz 0 1 M 0 Vm
+     * Bit 7 = 0 (op2=0 for VRINT), bit 6 = 1 (fixed), bit 5 = M.
+     */
+    if ((insn & 0xffbf0fd0u) == 0xfeb80a40u) {
+        d.kind = MM_OP_VRINTA_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfeb90a40u) {
+        d.kind = MM_OP_VRINTN_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfeba0a40u) {
+        d.kind = MM_OP_VRINTP_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xfebb0a40u) {
+        d.kind = MM_OP_VRINTM_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* VMAXNM/VMINNM.F32 (T2, FPv5, unconditional).
+     * Encoding: 1111 1110 1D00 Vn | Vd 101 sz N op M 0 Vm
+     *   bit 6 = op (0=VMAXNM, 1=VMINNM), bit 4 = 0 fixed.
+     * Mask: hw1 0xffb0 (D, Vn free), hw2 0x0f50 (Vd, N, M, Vm free).
+     */
+    if ((insn & 0xffb00f50u) == 0xfe800a00u) {
+        d.kind = MM_OP_VMAXNM_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffb00f50u) == 0xfe800a40u) {
+        d.kind = MM_OP_VMINNM_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* VSEL.F32 (T1, FPv5, unconditional with embedded cond).
+     * Encoding: 1111 1110 0D cc Vn | Vd 101 sz N 0 M 0 Vm
+     *   cc[1:0] in hw1[21:20] selects condition:
+     *     00=EQ, 01=VS, 10=GE, 11=GT
+     * Mask: hw1 0xff80 (D, cc, Vn free), hw2 0x0f50 (Vd, N, M, Vm free).
+     * d.imm carries the 2-bit cond selector.
+     */
+    if ((insn & 0xff800f50u) == 0xfe000a00u) {
+        d.kind = MM_OP_VSEL_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.imm = (insn >> 20) & 0x3u;
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* VFMA/VFMS/VFNMA/VFNMS.F32 (T2, FPv5, unconditional).
+     * VFMA:  1110 1110 1D10 Vn | Vd 101 sz N 0 M 0 Vm  (op=0)
+     * VFMS:  1110 1110 1D10 Vn | Vd 101 sz N 1 M 0 Vm  (op=1, bit 6=1)
+     * VFNMA: 1110 1110 1D01 Vn | Vd 101 sz N 1 M 0 Vm  (op=1)
+     * VFNMS: 1110 1110 1D01 Vn | Vd 101 sz N 0 M 0 Vm  (op=0)
+     * Distinguished by hw1[20] and hw2[6].
+     */
+    if ((insn & 0xffb00f50u) == 0xeea00a00u) {
+        d.kind = MM_OP_VFMA_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffb00f50u) == 0xeea00a40u) {
+        d.kind = MM_OP_VFMS_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffb00f50u) == 0xee900a40u) {
+        d.kind = MM_OP_VFNMA_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffb00f50u) == 0xee900a00u) {
+        d.kind = MM_OP_VFNMS_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* VNMUL/VNMLA/VNMLS.F32 (legacy VFPv2, conditional in source but encoded
+     * as unconditional bits in Thumb).
+     * VNMUL: 1110 1110 0D10 Vn | Vd 101 sz N 1 M 0 Vm
+     * VNMLA: 1110 1110 0D01 Vn | Vd 101 sz N 1 M 0 Vm
+     * VNMLS: 1110 1110 0D01 Vn | Vd 101 sz N 0 M 0 Vm
+     */
+    if ((insn & 0xffb00f50u) == 0xee200a40u) {
+        d.kind = MM_OP_VNMUL_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffb00f50u) == 0xee100a40u) {
+        d.kind = MM_OP_VNMLA_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffb00f50u) == 0xee100a00u) {
+        d.kind = MM_OP_VNMLS_F32;
+        d.rd = vfp_sd(insn);
+        d.rn = vfp_sn(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* VCVTB / VCVTT half<->single conversion (FPv5).
+     * Encoding: 1110 1110 1D11 001 op | Vd 101 sz T 1 M 0 Vm
+     *   op = 0 -> F32 <- F16 (top/bottom half decided by T);
+     *   op = 1 -> F16 <- F32 (write top/bottom half).
+     *   sz = 0 (F32 is single-precision).
+     */
+    if ((insn & 0xffbf0fd0u) == 0xeeb20a40u) {
+        d.kind = MM_OP_VCVTB_F32_F16;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xeeb20ac0u) {
+        d.kind = MM_OP_VCVTT_F32_F16;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xeeb30a40u) {
+        d.kind = MM_OP_VCVTB_F16_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xeeb30ac0u) {
+        d.kind = MM_OP_VCVTT_F16_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+
+    /* Fixed-point VCVT (F32 <-> S16/U16/S32/U32 with #fbits).
+     * Encoding: 1110 1110 1D11 1 op2 U | Vd 101 sz sx 1 i 0 imm4
+     *   op2 = 1 means "to-fixed" (bit 18 = 1), op2 = 0 means "to-float"
+     *   U   = unsigned (bit 16)
+     *   sx  = 32-bit fixed (bit 7), 0 -> 16-bit
+     *   imm5 = (imm4 << 1) | i, frac_bits = size - imm5
+     * Single mask + pattern check: hw1 fixed parts and hw2 fixed parts.
+     */
+    {
+        mm_u16 hw1 = (mm_u16)(insn >> 16);
+        mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
+        if ((hw1 & 0xffbau) == 0xeebau && (hw2 & 0x0f50u) == 0x0a40u) {
+            mm_bool to_float = ((hw1 >> 18) & 1u) == 0u;
+            mm_bool unsigned_op = ((hw1 >> 16) & 1u) != 0u;
+            mm_bool sx32 = ((hw2 >> 7) & 1u) != 0u;
+            mm_u32 imm4 = hw2 & 0x0fu;
+            mm_u32 i = (hw2 >> 5) & 1u;
+            mm_u32 imm5 = (imm4 << 1) | i;
+            mm_u32 size = sx32 ? 32u : 16u;
+            mm_u32 frac_bits = size - imm5;
+            d.kind = MM_OP_VCVT_FIXED;
+            d.rd = vfp_sd(insn);
+            d.rm = vfp_sd(insn);  /* same register; ARM uses Vd as both src and dst here */
+            d.imm = (to_float ? 1u : 0u)
+                  | (unsigned_op ? 2u : 0u)
+                  | (sx32 ? 4u : 0u)
+                  | ((frac_bits & 0x1fu) << 3);
+            d.undefined = MM_FALSE;
+            return d;
+        }
+    }
+
+    /* Legacy VRINT{Z,R,X}.F32 — FPSCR or implicit rounding.
+     * VRINTZ:  hw1=0xEEB6, hw2 bit7=1 (op=1, truncate)
+     * VRINTR:  hw1=0xEEB6, hw2 bit7=0 (op=0, FPSCR rmode)
+     * VRINTX:  hw1=0xEEB7, hw2 bit7=0 (op=0, FPSCR rmode + inexact)
+     */
+    if ((insn & 0xffbf0fd0u) == 0xeeb60ac0u) {
+        d.kind = MM_OP_VRINTZ_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xeeb60a40u) {
+        d.kind = MM_OP_VRINTR_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
+    if ((insn & 0xffbf0fd0u) == 0xeeb70a40u) {
+        d.kind = MM_OP_VRINTX_F32;
         d.rd = vfp_sd(insn);
         d.rm = vfp_sm(insn);
         d.undefined = MM_FALSE;
