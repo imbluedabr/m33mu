@@ -1181,7 +1181,7 @@ static struct mm_decoded decode_32(mm_u32 insn)
     {
         mm_u16 hw1 = (mm_u16)(insn >> 16);
         mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
-        if ((hw1 & 0xff60u) == 0xf320u && (hw2 & 0x70f0u) == 0x0000u) {
+        if ((hw1 & 0xff60u) == 0xf320u && (hw2 & 0xf0f0u) == 0x0000u) {
             mm_u8 unsigned_op = (mm_u8)((hw1 >> 7) & 0x1u);
             mm_u8 rn = (mm_u8)(hw1 & 0x0fu);
             mm_u8 rd = (mm_u8)((hw2 >> 8) & 0x0fu);
