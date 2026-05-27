@@ -2813,6 +2813,14 @@ static struct mm_decoded decode_32(mm_u32 insn)
         d.undefined = MM_FALSE;
         return d;
     }
+    /* VMOV (register) T1: 1110 1110 1D11 0000 Vd 1010 01M0 Vm */
+    if ((insn & 0xffbf0fd0u) == 0xeeb00a40u) {
+        d.kind = MM_OP_VMOV_F32;
+        d.rd = vfp_sd(insn);
+        d.rm = vfp_sm(insn);
+        d.undefined = MM_FALSE;
+        return d;
+    }
 
     /* VFP data processing (single-precision). */
     if ((insn & 0xffb00f50u) == 0xee300a00u) {

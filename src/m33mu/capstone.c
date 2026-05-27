@@ -878,7 +878,7 @@ static mm_bool cross_check_kind(const cs_insn *insn, const struct mm_decoded *de
             return (dec->kind == MM_OP_VMOV_SR || dec->kind == MM_OP_VMOV_RS ||
                     dec->kind == MM_OP_VMOV_SRR || dec->kind == MM_OP_VMOV_RSS ||
                     dec->kind == MM_OP_VMOV_DRR || dec->kind == MM_OP_VMOV_RDD ||
-                    dec->kind == MM_OP_VMOV_IMM);
+                    dec->kind == MM_OP_VMOV_IMM || dec->kind == MM_OP_VMOV_F32);
         case ARM_INS_VMRS: return dec->kind == MM_OP_VMRS;
         case ARM_INS_VMSR: return dec->kind == MM_OP_VMSR;
         case ARM_INS_VLDR: return dec->kind == MM_OP_VLDR;

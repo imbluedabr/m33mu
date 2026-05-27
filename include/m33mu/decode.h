@@ -332,6 +332,7 @@ enum mm_op_kind {
     MM_OP_VMOV_DRR,
     MM_OP_VMOV_RDD,
     MM_OP_VMOV_IMM,
+    MM_OP_VMOV_F32,
     MM_OP_VSQRT,
     MM_OP_VMRS,
     MM_OP_VMSR,

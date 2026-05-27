@@ -1562,6 +1562,17 @@ enum mm_exec_status mm_execute_decoded(struct mm_execute_ctx *ctx)
                                                   fpu_mark_active(&cpu);
                                                   break;
                                               }
+                        case MM_OP_VMOV_F32: {
+                                                  if (!fpu_check_or_fault(ctx)) {
+                                                      return MM_EXEC_CONTINUE;
+                                                  }
+                                                  if (d.rd >= 32u || d.rm >= 32u) {
+                                                      EXEC_RAISE_UNDEF();
+                                                  }
+                                                  cpu.s[d.rd] = cpu.s[d.rm];
+                                                  fpu_mark_active(&cpu);
+                                                  break;
+                                              }
                         case MM_OP_VMOV_SRR: {
                                                  if (!fpu_check_or_fault(ctx)) {
                                                      return MM_EXEC_CONTINUE;
