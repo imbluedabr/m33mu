@@ -3213,8 +3213,8 @@ static struct mm_decoded decode_32(mm_u32 insn)
         mm_u16 hw1 = (mm_u16)(insn >> 16);
         mm_u16 hw2 = (mm_u16)(insn & 0xffffu);
         if ((hw1 & 0xffbau) == 0xeebau && (hw2 & 0x0f50u) == 0x0a40u) {
-            mm_bool to_float = ((hw1 >> 18) & 1u) == 0u;
-            mm_bool unsigned_op = ((hw1 >> 16) & 1u) != 0u;
+            mm_bool to_float = ((hw1 >> 2) & 1u) == 0u;
+            mm_bool unsigned_op = (hw1 & 1u) != 0u;
             mm_bool sx32 = ((hw2 >> 7) & 1u) != 0u;
             mm_u32 imm4 = hw2 & 0x0fu;
             mm_u32 i = (hw2 >> 5) & 1u;
