@@ -2805,7 +2805,7 @@ static struct mm_decoded decode_32(mm_u32 insn)
     }
 
     /* VMOV (immediate, single-precision). */
-    if ((insn & 0xffb8efffu) == 0xeeb00a00u) {
+    if ((insn & 0xffb00ff0u) == 0xeeb00a00u) {
         mm_u8 imm8 = (mm_u8)((((insn >> 16) & 0x0fu) << 4) | (insn & 0x0fu));
         d.kind = MM_OP_VMOV_IMM;
         d.rd = vfp_sd(insn);
