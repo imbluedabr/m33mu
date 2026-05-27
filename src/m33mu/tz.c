@@ -96,6 +96,9 @@ static void tz_warn_if_reset_vector_mismatch(struct mm_scs *scs, mm_u32 target)
     mm_u32 reset_addr;
     mm_u32 delta;
 
+    if (!tz_trace_enabled()) {
+        return;
+    }
     if (scs == 0 || scs->vtor_ns == 0u || target_addr == 0u) {
         return;
     }
